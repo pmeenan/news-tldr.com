@@ -1,0 +1,3 @@
+# Python dependencies for news-tldr.com
+# Install inside virtual environment: pip install -r requirements.txt
+

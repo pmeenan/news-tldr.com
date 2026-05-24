@@ -12,6 +12,8 @@ This file serves as the coordinator and handoff state for AI agents working on t
    - Update [docs/design.md](file:///home/pmeenan/src/news-tldr.com/docs/design.md) with any architectural modifications.
    - Update [docs/plan.md](file:///home/pmeenan/src/news-tldr.com/docs/plan.md) to mark completed items and adjust future tasks.
    - Update the **Current State & Handoff** section in this file (`AGENTS.md`) to clearly state what was done and what the incoming agent must do.
+6. **Dependencies.** Before adding any new dependency: scan it using security tools, add it to `requirements.txt`, and update [README.md](file:///home/pmeenan/src/news-tldr.com/README.md) with setup instructions.
+
 
 ---
 
@@ -43,8 +45,8 @@ This file serves as the coordinator and handoff state for AI agents working on t
   - **Categories**: Externalized to `config/categories.json` (11 categories).
   - **Article directories**: Keyed on publish date, with fetch-date fallback.
   - **Presentation**: Rolling time window, not fixed daily editions.
-- **In Progress:** Nothing. Ready to start Milestone 1.
+- **In Progress:** Milestone 1: Data Collection. Python virtual environment has been set up.
 - **Next Steps:**
   1. Start Milestone 1: Data Collection (see [docs/plan.md](file:///home/pmeenan/src/news-tldr.com/docs/plan.md)).
-  2. First tasks: set up Python project, initialize SQLite schema, implement pipeline locking, then feed fetching.
+  2. First tasks: set up Python project dependencies (pyproject.toml), initialize SQLite schema, implement pipeline locking, then feed fetching.
   3. Populate `config/feeds.json` with real RSS/Atom sources.

@@ -56,7 +56,8 @@ gantt
 - [x] Populate seed feed config with real source IDs, feed URLs, category hints, and source policy metadata.
 - [x] Create `config/pipeline.json` with operational defaults (rate limits, timeouts, retention, staleness threshold).
 - [x] Create `config/source-policy.json` skeleton with bias labels and reliability metadata.
-- [ ] Scan dependencies using security tools, then set up Python project: `pyproject.toml`, virtual environment, dependencies (`feedparser`, `httpx`, `trafilatura`; SQLite via standard-library `sqlite3`).
+- [x] Set up Python virtual environment (`.venv`).
+- [ ] Scan dependencies using security tools, then set up Python project: `pyproject.toml`, dependencies (`feedparser`, `httpx`, `trafilatura`; SQLite via standard-library `sqlite3`).
 - [ ] Define SQLite schema and migration/versioning system, then initialize `data/state/pipeline.db` with feeds, articles, article fingerprints, events, pipeline runs, item errors, and LLM usage tables.
 - [ ] Implement atomic pipeline lock acquisition and release with verified process identity and watchdog timeout.
 - [ ] Implement RSS/Atom feed fetching with conditional requests (`If-Modified-Since`, `ETag`) and secure XML parsing (disable external entities).

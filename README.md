@@ -25,4 +25,17 @@ For developers and agents working on the project, refer to these documents:
 
 Add RSS or Atom sources to `config/feeds.json`. Copy the example entry, set a stable `source_id`, provide the `feed_url`, and set `enabled` to `true` when the source should be collected.
 
-*(Runtime setup will be added once the technology stack and dependencies are finalized.)*
+## Development Setup
+
+The project uses a Python virtual environment located in `.venv` for local python3 dependencies.
+
+### Virtual Environment
+
+To activate the virtual environment and install dependencies:
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Any scripts or pipeline executions should run using the Python interpreter inside `.venv` (e.g., `./.venv/bin/python`).
+
