@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import asyncio
 import socket
 
 import pytest
@@ -45,3 +44,17 @@ async def test_validate_url_allows_public_http(monkeypatch):
     resolved = await validate_url("http://example.test/latest")
     assert resolved.hostname == "example.test"
     assert resolved.port == 80
+
+
+@pytest.mark.asyncio
+async def test_validate_url_handles_dns_timeout(monkeypatch):
+    async def fake_getaddrinfo(*args, **kwargs):
+        await asyncio.sleep(10.0)
+        return []
+
+    monkeypatch.setattr("asyncio.to_thread", fake_getaddrinfo)
+
+    with pytest.raises(UnsafeURL) as excinfo:
+        await validate_url("http://example.test/latest")
+    assert "host resolution timed out" in str(excinfo.value)
+

@@ -45,7 +45,12 @@ async def resolve_host_port(hostname: str, port: int) -> tuple[str, ...]:
     if port in BLOCKED_PORTS:
         raise UnsafeURL(f"blocked URL port: {port}")
     try:
-        addrinfo = await asyncio.to_thread(socket.getaddrinfo, hostname, port, type=socket.SOCK_STREAM)
+        addrinfo = await asyncio.wait_for(
+            asyncio.to_thread(socket.getaddrinfo, hostname, port, type=socket.SOCK_STREAM),
+            timeout=5.0,
+        )
+    except TimeoutError as exc:
+        raise UnsafeURL(f"host resolution timed out: {hostname}") from exc
     except socket.gaierror as exc:
         raise UnsafeURL(f"host resolution failed: {hostname}") from exc
     ips = tuple(sorted({item[4][0] for item in addrinfo}))

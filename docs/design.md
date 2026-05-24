@@ -13,7 +13,7 @@ news-tldr.com is a filesystem-backed RSS aggregator that collects source article
 
 ## Technology Stack
 
-- **Pipeline**: Python. Libraries: `feedparser`, `httpx`, `trafilatura` (article extraction), `anthropic`/`openai`/local model client (LLM). SQLite is accessed through Python's standard-library `sqlite3` module.
+- **Pipeline**: Python. Libraries: `feedparser`, `httpx` with `h2` for HTTP/2, `trafilatura` (article extraction), `beautifulsoup4` (custom scrapers), `anthropic`/`openai`/local model client (LLM). SQLite is accessed through Python's standard-library `sqlite3` module.
 - **Presentation**: Astro (or similar frontend-focused SSG). Generates static HTML/CSS/JSON from published story artifacts.
 - **State**: SQLite database for pipeline state, incremental processing tracking, and fast lookups. JSON files remain the human-readable artifacts for each stage.
 - **Deployment**: The pipeline environment (including the SQLite database, staging files, and lock states) must **never** be web-accessible. The published SSG content in `dist/` is pushed to a separate web hosting location, which is a CDN-fronted static file server. The pipeline runs on a schedule (cron, GitHub Actions, or similar) strictly isolated from the public-facing site.
@@ -54,7 +54,7 @@ data/
     pipeline.db              # SQLite: article index, event mappings, run history, lock state.
     pipeline.lock            # Lock file with timestamp for concurrency control.
   staging/
-    articles/YYYY/MM/DD/     # One JSON per collected article, keyed on article publish date.
+    articles/YYYY/MM/DD/     # One JSON per collected article plus optional same-stem image sidecar.
     fetch-log/YYYY-MM-DD.jsonl
   events/
     <event_id>.json          # One file per durable event with article list and metadata.
@@ -66,7 +66,7 @@ site/                        # Astro source and templates.
 dist/                        # Generated CDN-deployable output.
 ```
 
-Article staging directories use the article's **publish date** (from the feed or page metadata). When publish date is missing or unparseable, fall back to **fetch date** and set a `publish_date_estimated: true` flag in the article JSON.
+Article staging directories use the article's **publish date** (from the feed or page metadata). When publish date is missing or unparseable, fall back to **fetch date** and set a `publish_date_estimated: true` flag in the article JSON. When a usable lead image is found, it is stored next to the article JSON with the same base filename and an image extension such as `.jpg`, `.png`, `.webp`, or `.gif`.
 
 Each stage owns clear input and output directories. Stages write new files atomically (write to a temp file, then rename), never mutate upstream artifacts, and record enough metadata to explain later decisions.
 
@@ -87,15 +87,18 @@ Events can carry an optional `thread` tag (e.g., `iran-conflict-2026`) for linki
 
 Inputs:
 
-- `config/feeds.json`, the seed RSS/Atom feed list
+- `config/feeds.json`, the seed RSS/Atom feed list and scraper targets
 - RSS/Atom feeds (HTTP)
+- HTML homepages for Custom Scraper targets
 - Article pages when feed entries have partial content
 
 Responsibilities:
 
-- Fetch each feed with conditional headers (`If-Modified-Since`, `ETag`) where supported.
+- Fetch each feed with conditional headers (`If-Modified-Since`, `ETag`) where supported. The pipeline bypasses robots.txt checks for feed URLs configured by the operator but strictly enforces robots.txt for all article page fetches.
 - Parse publication time, updated time, headline, summary, feed content, GUID, canonical URL, author/byline, tags, and source metadata. Configure the XML parser (`feedparser` / `lxml`) to disable external entity expansion and DTD processing to protect against XXE injection and XML bomb DoS attacks.
-- Fetch full article text when feed content is incomplete, using HTTP GET with readability-style extraction (`trafilatura` or similar). No headless browser in the initial implementation.
+- Extract lead-image candidates from feed media tags, enclosures, inline feed HTML, custom scraper card metadata, and article-page Open Graph/Twitter metadata when the article page is fetched.
+- Fetch full article text when feed content is incomplete, using HTTP GET with readability-style extraction (`trafilatura` or similar). Feed content is deemed incomplete if it is less than 600 characters, equal to the summary, or not substantially longer than the summary (less than or equal to `len(summary) + 200` characters). Extraction should favor recall for full article coverage, fall back through alternate extractor modes, and keep the existing feed text when page extraction does not improve on it.
+- Fetch one supported lead image per article when candidates are available, store it as a same-stem sidecar next to the article JSON, and record image metadata in the article JSON. Supported image formats are JPEG, PNG, WebP, and GIF.
 - Detect likely paywalls and store a `paywall` flag with supporting signals.
 - Normalize text enough for downstream processing while preserving raw source fields.
 - Store one JSON file per collected source article.
@@ -106,12 +109,13 @@ Responsibilities:
 
 The collection implementation lives in the `pipeline` Python package:
 
-- `pipeline/cli.py`: command-line entrypoint. `python -m pipeline.cli init-db` initializes the state database, and `python -m pipeline.cli collect` runs collection.
+- `pipeline/cli.py`: command-line entrypoint. `python -m pipeline.cli init-db` initializes the state database, `python -m pipeline.cli collect` runs collection, `python -m pipeline.cli collect --verbose` streams incremental progress to stderr while preserving final JSON stats on stdout, and `python -m pipeline.cli clean-data --yes` removes local generated collection state for a fresh run.
 - `pipeline/state.py`: SQLite schema and migration entrypoint. The schema includes feeds, feed conditional request state, articles, article fingerprints, events, pipeline runs, item errors, and LLM usage.
 - `pipeline/lock.py`: atomic lock file acquisition/release with PID and Linux process start-time verification, plus stale-lock recovery based on the configured watchdog timeout.
 - `pipeline/http_client.py`: async HTTP client with browser-like desktop Chrome request headers, per-domain rate limiting, robots.txt and crawl-delay enforcement, retry/backoff handling, and manual redirect validation.
 - `pipeline/security.py`: SSRF guardrails. Every initial URL and redirect target is restricted to `http`/`https`, resolved before fetch, and rejected when it maps to loopback, private, link-local, multicast, reserved, unspecified, or blocked-port destinations.
-- `pipeline/collect.py`: feed collection, feed parsing, article extraction, paywall signal detection, article JSON writes, database registration, and fetch-log writes.
+- `pipeline/collect.py`: feed collection, feed parsing, scraper engine routing, article extraction, paywall signal detection, article JSON writes, database registration, and fetch-log writes.
+- `pipeline/scrapers/`: modular engine for custom site scrapers (e.g., AP News, MotorTrend) that generate synthetic feed entries using `beautifulsoup4` when standard RSS feeds are unavailable.
 
 Collection writes article JSON under `data/staging/articles/YYYY/MM/DD/` and appends run logs to `data/staging/fetch-log/YYYY-MM-DD.jsonl`. The SQLite database stores only state/index fields plus JSON metadata needed by later stages; full extracted article text remains in the staging JSON.
 
@@ -119,18 +123,25 @@ The HTTP client sends a desktop Windows Chrome user-agent plus common browser na
 
 ### HTTP Client Policy
 
-- **User-Agent**: Use a current desktop Windows Chrome UA string. Update the UA string periodically (at least monthly) to track current Chrome stable releases. Example: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36`.
+- **User-Agent**: Use a current desktop Windows Chrome UA string. Update the UA string periodically (at least monthly) to track current Chrome stable releases. Illustrative example (the exact version tracked in `pipeline/http_client.py` may be newer): `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36`.
 - **Rate limiting**: Enforce a per-domain delay between requests (default: 2 seconds). Track last-request-time per domain in memory during a pipeline run.
-- **Backoff**: On HTTP 429 or 5xx responses, use exponential backoff (initial 5s, max 60s, 3 retries). After max retries, log the failure and move on.
+- **Backoff**: On HTTP 429 or 5xx responses, use exponential backoff (initial 5s, max 60s, 3 retries). Retry status is emitted through the same optional verbose progress callback as collector status, keeping non-verbose stdout/stderr machine-friendly. After max retries, log the failure and move on.
 - **Robots.txt**: Respect `robots.txt` directives and `Crawl-delay` when present. Cache robots.txt per domain for the duration of a pipeline run.
-- **Timeouts**: Connection timeout 10s, read timeout 30s. Configurable per source in `feeds.json`.
-- **Concurrency**: Fetch feeds and articles concurrently, but respect per-domain rate limits. Use async I/O (`httpx` with `asyncio`).
+- **Timeouts**: Connection timeout 10s, read timeout 10s, and total decoded download timeout 15s. Configurable through `config/pipeline.json`.
+- **Concurrency**: Fetch feeds and articles concurrently. Defaults are set high (100 for feeds, 1000 for articles) so all domains run in parallel without a blocking global bottleneck, while the async per-domain lock handles rate-limiting.
 - **SSRF Protection**: Only fetch `http` and `https` URLs. Resolve each hostname before requesting it and block loopback, private, link-local, multicast, reserved, and documentation IP ranges for both IPv4 and IPv6, including metadata-service addresses such as `169.254.169.254`. Re-run the same validation for every redirect target and abort redirect chains that change to a blocked scheme, host, port, or resolved IP.
-- **Response Size Cap**: Stream response bodies and reject any response whose `Content-Length` header or actual decoded byte count exceeds the configured cap (default 25 MiB). The cap defends against OOM from oversized feeds and gzip-bomb decompression. Cap is configurable per `PoliteHTTPClient` instance.
+- **Response Size Cap**: Stream response bodies and reject any response whose `Content-Length` header or actual decoded byte count exceeds the configured cap (default 25 MiB). The cap defends against OOM from oversized feeds and gzip-bomb decompression. To prevent decompression errors, the client removes stale decompression headers (`Content-Encoding`, original `Content-Length`, `Transfer-Encoding`) before constructing the returned `httpx.Response`; `httpx` may then set a fresh decoded `Content-Length`.
+- **Image Fallback Strategy**: If explicit primary lead image metadata is present, general body images (`html_img`) are discarded. If the chosen primary lead image fails to fetch or is blocked (e.g. by robots.txt), the collector does not fall back to other candidate images.
+- **Origin Circuit Breaker**: If image fetches from a specific scheme + host origin experience 3 consecutive failures (due to HTTP status >= 400, connection errors, timeouts, or robots.txt blocks), the origin is disabled for the rest of the collection pass, and subsequent image requests to it are skipped.
+
 
 ### Feed Config
 
 Entries in `config/feeds.json` include: `source_id`, `source_name`, `feed_url`, optional `site_url`, default category, content/paywall hints, and fetch behavior overrides. Sources can be staged with `"enabled": false`.
+
+The current source catalog contains 83 enabled sources, including the AP News and MotorTrend custom scrapers. `config/source-policy.json` is kept aligned with `config/feeds.json` by `source_id` so editorial stages can resolve source metadata without guessing.
+
+Custom scraper entries use `"feed_type": "scraper"` and a `fetch.scraper_module` value such as `pipeline.scrapers.ap` or `pipeline.scrapers.motortrend`. Scraper module names are restricted to the `pipeline.scrapers.*` namespace at load time. Scrapers must verify that resolved entry URLs stay on the configured `site_url` host and match an anchored article-path pattern so off-site links and unrelated paths are not enqueued. Each candidate anchor must also look like a headline link — either nested inside an `<article>` / `h1`–`h6` ancestor or itself wrapping a heading element — so subscribe/sign-in/site-chrome anchors that happen to share the article path prefix are filtered out. Scrapers return feed-like entries and may include an `image_url` discovered from listing-card markup, but they do not download image bytes themselves. Image downloads are centralized in the collector so RSS feeds and scrapers share the same safety checks, content-type validation, size limits, and sidecar write behavior.
 
 ### Article JSON Sketch
 
@@ -156,6 +167,15 @@ Entries in `config/feeds.json` include: `source_id`, `source_name`, `feed_url`, 
   },
   "content_type": "news | opinion | analysis | review | unknown",
   "language": "en",
+  "image": {
+    "url": "https://example.com/image.jpg",
+    "path": "data/staging/articles/2026/05/24/sha256-of-canonical-url.jpg",
+    "content_type": "image/jpeg",
+    "bytes": 12345,
+    "source": "media_content",
+    "width": 1200,
+    "height": 800
+  },
   "collection": {
     "feed_url": "https://example.com/rss",
     "http_status": 200,
@@ -390,6 +410,12 @@ Responsibilities:
 The presentation build runs after each pipeline run. It reads the current state of published stories and regenerates the site. Pages for stories that haven't changed can be cached or skipped (incremental builds) if the SSG supports it.
 
 ## Pipeline Operations
+
+### CLI Output Contract
+
+Pipeline commands that can run long enough to feel idle in an interactive shell must support `--verbose`. Verbose progress/status is written to stderr, while final machine-readable output remains on stdout. The collection command currently implements this contract with `python -m pipeline.cli collect --verbose`.
+
+The `clean-data` command removes local generated collection state for a fresh run: the SQLite database and sidecars, staged article files, and fetch logs by default. It requires `--yes`, refuses to run while `data/state/pipeline.lock` exists, and can keep fetch logs with `--keep-fetch-log` or override the lock guard with `--ignore-lock`.
 
 ### Concurrency Control
 

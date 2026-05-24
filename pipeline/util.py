@@ -43,6 +43,21 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
+def atomic_write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def atomic_append_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return

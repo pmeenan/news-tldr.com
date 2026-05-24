@@ -384,159 +384,6 @@
       "notes": "Business, financial, and industry news."
     },
     {
-      "source_id": "google-news-top",
-      "source_name": "Google News - Top Stories",
-      "feed_url": "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
-      "site_url": "https://news.google.com",
-      "enabled": true,
-      "default_category": "world",
-      "category_hints": [
-        "world",
-        "us"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Aggregated top headlines from Google News."
-    },
-    {
-      "source_id": "google-news-tech",
-      "source_name": "Google News - Technology",
-      "feed_url": "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGRqTVhZU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en",
-      "site_url": "https://news.google.com",
-      "enabled": true,
-      "default_category": "technology",
-      "category_hints": [
-        "technology"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Aggregated technology headlines from Google News."
-    },
-    {
-      "source_id": "google-news-vehicles",
-      "source_name": "Google News - Vehicles",
-      "feed_url": "https://news.google.com/rss/topics/CAAqIAgKIhpDQkFTRFFvSEwyMHZNR3MwYWhJQ1pXNG9BQVAB?hl=en-US&gl=US&ceid=US%3Aen",
-      "site_url": "https://news.google.com",
-      "enabled": true,
-      "default_category": "automotive",
-      "category_hints": [
-        "automotive"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Aggregated vehicle and automotive headlines from Google News."
-    },
-    {
-      "source_id": "google-news-science",
-      "source_name": "Google News - Science",
-      "feed_url": "https://news.google.com/rss/sections/topic/CAAqKggKIiRDQkFTRlFvSUwyMHZNR1p4WkRnU0FpVnpkR2x5RVg0b0FBUAE?hl=en-US&gl=US&ceid=US:en",
-      "site_url": "https://news.google.com",
-      "enabled": true,
-      "default_category": "science",
-      "category_hints": [
-        "science"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Aggregated science headlines from Google News."
-    },
-    {
-      "source_id": "google-news-health",
-      "source_name": "Google News - Health",
-      "feed_url": "https://news.google.com/rss/sections/topic/CAAqIQgKIhtDQkFTRGdvSUwyMHZNR3QwTlRFU0FpVnpkR2x5RVg0b0FBUAE?hl=en-US&gl=US&ceid=US:en",
-      "site_url": "https://news.google.com",
-      "enabled": true,
-      "default_category": "health",
-      "category_hints": [
-        "health"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Aggregated health headlines from Google News."
-    },
-    {
-      "source_id": "google-news-business",
-      "source_name": "Google News - Business",
-      "feed_url": "https://news.google.com/rss/sections/topic/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx6TVdZd0VnSnVaRzlmS0FBUAE?hl=en-US&gl=US&ceid=US:en",
-      "site_url": "https://news.google.com",
-      "enabled": true,
-      "default_category": "business",
-      "category_hints": [
-        "business"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Aggregated business and financial headlines from Google News."
-    },
-    {
-      "source_id": "google-news-sports",
-      "source_name": "Google News - Sports",
-      "feed_url": "https://news.google.com/rss/sections/topic/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFp1ZEdvU0FpVnpkR2x5RVg0b0FBUAE?hl=en-US&gl=US&ceid=US:en",
-      "site_url": "https://news.google.com",
-      "enabled": true,
-      "default_category": "sports",
-      "category_hints": [
-        "sports"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Aggregated sports headlines from Google News."
-    },
-    {
-      "source_id": "google-news-entertainment",
-      "source_name": "Google News - Entertainment",
-      "feed_url": "https://news.google.com/rss/sections/topic/CAAqJggKIiBDQkFTRWdvSUwyMHZNRmh6YUd1U0FpVnpkR2x5RVg0b0FBUAE?hl=en-US&gl=US&ceid=US:en",
-      "site_url": "https://news.google.com",
-      "enabled": true,
-      "default_category": "entertainment",
-      "category_hints": [
-        "entertainment"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Aggregated entertainment headlines from Google News."
-    },
-    {
       "source_id": "fox-news",
       "source_name": "Fox News",
       "feed_url": "http://feeds.foxnews.com/foxnews/latest",
@@ -612,6 +459,1147 @@
         "timeout_seconds": 30
       },
       "notes": "International news from Fox News."
+    },
+    {
+      "source_id": "bbc-news-top",
+      "source_name": "BBC News - Top Stories",
+      "feed_url": "http://feeds.bbci.co.uk/news/rss.xml",
+      "site_url": "https://www.bbc.co.uk/news",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world",
+        "us"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Top headlines from BBC News."
+    },
+    {
+      "source_id": "bbc-news-world",
+      "source_name": "BBC News - World",
+      "feed_url": "http://feeds.bbci.co.uk/news/world/rss.xml",
+      "site_url": "https://www.bbc.co.uk/news/world",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "International news from BBC News."
+    },
+    {
+      "source_id": "npr-top",
+      "source_name": "NPR - Top News",
+      "feed_url": "https://feeds.npr.org/1002/rss.xml",
+      "site_url": "https://www.npr.org",
+      "enabled": true,
+      "default_category": "us",
+      "category_hints": [
+        "us",
+        "world"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Top news from National Public Radio."
+    },
+    {
+      "source_id": "npr-world",
+      "source_name": "NPR - World",
+      "feed_url": "https://feeds.npr.org/1004/rss.xml",
+      "site_url": "https://www.npr.org/sections/world/",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "World news from NPR."
+    },
+    {
+      "source_id": "ars-technica",
+      "source_name": "Ars Technica",
+      "feed_url": "https://feeds.arstechnica.com/arstechnica/index",
+      "site_url": "https://arstechnica.com",
+      "enabled": true,
+      "default_category": "technology",
+      "category_hints": [
+        "technology",
+        "science"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "In-depth technology and science reporting."
+    },
+    {
+      "source_id": "wired",
+      "source_name": "Wired",
+      "feed_url": "https://www.wired.com/feed/rss",
+      "site_url": "https://www.wired.com",
+      "enabled": true,
+      "default_category": "technology",
+      "category_hints": [
+        "technology"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "metered"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Technology, science, and culture."
+    },
+    {
+      "source_id": "ap-news",
+      "source_name": "Associated Press",
+      "feed_url": "https://apnews.com/",
+      "feed_type": "scraper",
+      "site_url": "https://apnews.com/",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world",
+        "us"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30,
+        "scraper_module": "pipeline.scrapers.ap"
+      },
+      "notes": "Custom scraper for AP News."
+    },
+    {
+      "source_id": "motortrend",
+      "source_name": "MotorTrend",
+      "feed_url": "https://www.motortrend.com/",
+      "feed_type": "scraper",
+      "site_url": "https://www.motortrend.com/",
+      "enabled": true,
+      "default_category": "automotive",
+      "category_hints": [
+        "automotive"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30,
+        "scraper_module": "pipeline.scrapers.motortrend"
+      },
+      "notes": "Custom scraper for MotorTrend."
+    },
+    {
+      "source_id": "bbc-news-business",
+      "source_name": "BBC News - Business",
+      "feed_url": "http://feeds.bbci.co.uk/news/business/rss.xml",
+      "site_url": "https://www.bbc.co.uk/news/business",
+      "enabled": true,
+      "default_category": "business",
+      "category_hints": [
+        "business"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Business and economy headlines from BBC News."
+    },
+    {
+      "source_id": "bbc-news-health",
+      "source_name": "BBC News - Health",
+      "feed_url": "http://feeds.bbci.co.uk/news/health/rss.xml",
+      "site_url": "https://www.bbc.co.uk/news/health",
+      "enabled": true,
+      "default_category": "health",
+      "category_hints": [
+        "health"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Health news from BBC News."
+    },
+    {
+      "source_id": "bbc-news-science-environment",
+      "source_name": "BBC News - Science & Environment",
+      "feed_url": "http://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
+      "site_url": "https://www.bbc.co.uk/news/science_and_environment",
+      "enabled": true,
+      "default_category": "science",
+      "category_hints": [
+        "science",
+        "environment"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Science and environment headlines from BBC News."
+    },
+    {
+      "source_id": "bbc-news-entertainment",
+      "source_name": "BBC News - Entertainment & Arts",
+      "feed_url": "http://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml",
+      "site_url": "https://www.bbc.co.uk/news/entertainment_and_arts",
+      "enabled": true,
+      "default_category": "entertainment",
+      "category_hints": [
+        "entertainment"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Entertainment and arts headlines from BBC News."
+    },
+    {
+      "source_id": "bbc-sport",
+      "source_name": "BBC Sport",
+      "feed_url": "https://feeds.bbci.co.uk/sport/rss.xml",
+      "site_url": "https://www.bbc.com/sport",
+      "enabled": true,
+      "default_category": "sports",
+      "category_hints": [
+        "sports"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Sports headlines from BBC Sport."
+    },
+    {
+      "source_id": "abc-news-politics",
+      "source_name": "ABC News - Politics",
+      "feed_url": "https://feeds.abcnews.com/abcnews/politicsheadlines",
+      "site_url": "https://abcnews.go.com/Politics",
+      "enabled": true,
+      "default_category": "politics",
+      "category_hints": [
+        "politics"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Political headlines from ABC News."
+    },
+    {
+      "source_id": "abc-news-international",
+      "source_name": "ABC News - International",
+      "feed_url": "https://feeds.abcnews.com/abcnews/internationalheadlines",
+      "site_url": "https://abcnews.go.com/International",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "International headlines from ABC News."
+    },
+    {
+      "source_id": "abc-news-health",
+      "source_name": "ABC News - Health",
+      "feed_url": "https://feeds.abcnews.com/abcnews/healthheadlines",
+      "site_url": "https://abcnews.go.com/Health",
+      "enabled": true,
+      "default_category": "health",
+      "category_hints": [
+        "health"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Health headlines from ABC News."
+    },
+    {
+      "source_id": "abc-news-entertainment",
+      "source_name": "ABC News - Entertainment",
+      "feed_url": "https://feeds.abcnews.com/abcnews/entertainmentheadlines",
+      "site_url": "https://abcnews.go.com/Entertainment",
+      "enabled": true,
+      "default_category": "entertainment",
+      "category_hints": [
+        "entertainment"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Entertainment headlines from ABC News."
+    },
+    {
+      "source_id": "abc-news-sports",
+      "source_name": "ABC News - Sports",
+      "feed_url": "https://feeds.abcnews.com/abcnews/sportsheadlines",
+      "site_url": "https://abcnews.go.com/Sports",
+      "enabled": true,
+      "default_category": "sports",
+      "category_hints": [
+        "sports"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Sports headlines from ABC News."
+    },
+    {
+      "source_id": "cbs-news-top",
+      "source_name": "CBS News - Top Stories",
+      "feed_url": "https://www.cbsnews.com/latest/rss/main",
+      "site_url": "https://www.cbsnews.com",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world",
+        "us"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Top headlines from CBS News."
+    },
+    {
+      "source_id": "cbs-news-us",
+      "source_name": "CBS News - US",
+      "feed_url": "https://www.cbsnews.com/latest/rss/us",
+      "site_url": "https://www.cbsnews.com/us/",
+      "enabled": true,
+      "default_category": "us",
+      "category_hints": [
+        "us"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "US headlines from CBS News."
+    },
+    {
+      "source_id": "cbs-news-world",
+      "source_name": "CBS News - World",
+      "feed_url": "https://www.cbsnews.com/latest/rss/world",
+      "site_url": "https://www.cbsnews.com/world/",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "World headlines from CBS News."
+    },
+    {
+      "source_id": "cbs-news-health",
+      "source_name": "CBS News - Health",
+      "feed_url": "https://www.cbsnews.com/latest/rss/health",
+      "site_url": "https://www.cbsnews.com/health/",
+      "enabled": true,
+      "default_category": "health",
+      "category_hints": [
+        "health"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Health headlines from CBS News."
+    },
+    {
+      "source_id": "cbs-news-science",
+      "source_name": "CBS News - Science",
+      "feed_url": "https://www.cbsnews.com/latest/rss/science",
+      "site_url": "https://www.cbsnews.com/science/",
+      "enabled": true,
+      "default_category": "science",
+      "category_hints": [
+        "science",
+        "environment"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Science headlines from CBS News."
+    },
+    {
+      "source_id": "cbs-news-entertainment",
+      "source_name": "CBS News - Entertainment",
+      "feed_url": "https://www.cbsnews.com/latest/rss/entertainment",
+      "site_url": "https://www.cbsnews.com/entertainment/",
+      "enabled": true,
+      "default_category": "entertainment",
+      "category_hints": [
+        "entertainment"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Entertainment headlines from CBS News."
+    },
+    {
+      "source_id": "pbs-newshour",
+      "source_name": "PBS NewsHour - Latest",
+      "feed_url": "https://www.pbs.org/newshour/feeds/rss/headlines",
+      "site_url": "https://www.pbs.org/newshour/",
+      "enabled": true,
+      "default_category": "us",
+      "category_hints": [
+        "us",
+        "world"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Latest headlines from PBS NewsHour."
+    },
+    {
+      "source_id": "pbs-newshour-politics",
+      "source_name": "PBS NewsHour - Politics",
+      "feed_url": "https://www.pbs.org/newshour/feeds/rss/politics",
+      "site_url": "https://www.pbs.org/newshour/politics",
+      "enabled": true,
+      "default_category": "politics",
+      "category_hints": [
+        "politics"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Political headlines from PBS NewsHour."
+    },
+    {
+      "source_id": "pbs-newshour-world",
+      "source_name": "PBS NewsHour - World",
+      "feed_url": "https://www.pbs.org/newshour/feeds/rss/world",
+      "site_url": "https://www.pbs.org/newshour/world",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "World headlines from PBS NewsHour."
+    },
+    {
+      "source_id": "guardian-world",
+      "source_name": "The Guardian - World",
+      "feed_url": "https://www.theguardian.com/world/rss",
+      "site_url": "https://www.theguardian.com/world",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "World news from The Guardian."
+    },
+    {
+      "source_id": "guardian-us",
+      "source_name": "The Guardian - US",
+      "feed_url": "https://www.theguardian.com/us-news/rss",
+      "site_url": "https://www.theguardian.com/us-news",
+      "enabled": true,
+      "default_category": "us",
+      "category_hints": [
+        "us"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "US news from The Guardian."
+    },
+    {
+      "source_id": "guardian-environment",
+      "source_name": "The Guardian - Environment",
+      "feed_url": "https://www.theguardian.com/environment/rss",
+      "site_url": "https://www.theguardian.com/environment",
+      "enabled": true,
+      "default_category": "environment",
+      "category_hints": [
+        "environment",
+        "science"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Environment and climate coverage from The Guardian."
+    },
+    {
+      "source_id": "guardian-science",
+      "source_name": "The Guardian - Science",
+      "feed_url": "https://www.theguardian.com/science/rss",
+      "site_url": "https://www.theguardian.com/science",
+      "enabled": true,
+      "default_category": "science",
+      "category_hints": [
+        "science"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Science coverage from The Guardian."
+    },
+    {
+      "source_id": "guardian-sport",
+      "source_name": "The Guardian - Sport",
+      "feed_url": "https://www.theguardian.com/sport/rss",
+      "site_url": "https://www.theguardian.com/sport",
+      "enabled": true,
+      "default_category": "sports",
+      "category_hints": [
+        "sports"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Sports coverage from The Guardian."
+    },
+    {
+      "source_id": "al-jazeera",
+      "source_name": "Al Jazeera",
+      "feed_url": "https://www.aljazeera.com/xml/rss/all.xml",
+      "site_url": "https://www.aljazeera.com",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "International headlines from Al Jazeera."
+    },
+    {
+      "source_id": "propublica",
+      "source_name": "ProPublica",
+      "feed_url": "https://www.propublica.org/feeds/propublica/main",
+      "site_url": "https://www.propublica.org",
+      "enabled": true,
+      "default_category": "us",
+      "category_hints": [
+        "us",
+        "politics"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Investigative reporting from ProPublica."
+    },
+    {
+      "source_id": "stat-news",
+      "source_name": "STAT",
+      "feed_url": "https://www.statnews.com/feed/",
+      "site_url": "https://www.statnews.com",
+      "enabled": true,
+      "default_category": "health",
+      "category_hints": [
+        "health",
+        "science"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "metered"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Health, medicine, and life sciences news from STAT."
+    },
+    {
+      "source_id": "science-daily-science",
+      "source_name": "ScienceDaily - Science",
+      "feed_url": "https://www.sciencedaily.com/rss/top/science.xml",
+      "site_url": "https://www.sciencedaily.com/news/",
+      "enabled": true,
+      "default_category": "science",
+      "category_hints": [
+        "science"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Top science research news from ScienceDaily."
+    },
+    {
+      "source_id": "science-daily-health",
+      "source_name": "ScienceDaily - Health",
+      "feed_url": "https://www.sciencedaily.com/rss/top/health.xml",
+      "site_url": "https://www.sciencedaily.com/news/health_medicine/",
+      "enabled": true,
+      "default_category": "health",
+      "category_hints": [
+        "health",
+        "science"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Top health and medicine research news from ScienceDaily."
+    },
+    {
+      "source_id": "science-daily-environment",
+      "source_name": "ScienceDaily - Environment",
+      "feed_url": "https://www.sciencedaily.com/rss/top/environment.xml",
+      "site_url": "https://www.sciencedaily.com/news/earth_climate/",
+      "enabled": true,
+      "default_category": "environment",
+      "category_hints": [
+        "environment",
+        "science"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Top environment and climate research news from ScienceDaily."
+    },
+    {
+      "source_id": "espn-top",
+      "source_name": "ESPN - Top News",
+      "feed_url": "https://www.espn.com/espn/rss/news",
+      "site_url": "https://www.espn.com",
+      "enabled": true,
+      "default_category": "sports",
+      "category_hints": [
+        "sports"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Top sports news from ESPN."
+    },
+    {
+      "source_id": "nbc-news",
+      "source_name": "NBC News - Top Stories",
+      "feed_url": "https://feeds.nbcnews.com/nbcnews/public/news",
+      "site_url": "https://www.nbcnews.com",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world",
+        "us"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Top stories from NBC News."
+    },
+    {
+      "source_id": "politico",
+      "source_name": "Politico",
+      "feed_url": "https://rss.politico.com/politics-news.xml",
+      "site_url": "https://www.politico.com",
+      "enabled": true,
+      "default_category": "politics",
+      "category_hints": [
+        "politics"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "US political news from Politico."
+    },
+    {
+      "source_id": "the-hill",
+      "source_name": "The Hill",
+      "feed_url": "https://thehill.com/news/feed/",
+      "site_url": "https://thehill.com",
+      "enabled": true,
+      "default_category": "politics",
+      "category_hints": [
+        "politics"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "US political news from The Hill."
+    },
+    {
+      "source_id": "cnbc",
+      "source_name": "CNBC",
+      "feed_url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+      "site_url": "https://www.cnbc.com",
+      "enabled": true,
+      "default_category": "business",
+      "category_hints": [
+        "business"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Business and financial news from CNBC."
+    },
+    {
+      "source_id": "marketwatch",
+      "source_name": "MarketWatch",
+      "feed_url": "http://feeds.marketwatch.com/marketwatch/topstories/",
+      "site_url": "https://www.marketwatch.com",
+      "enabled": true,
+      "default_category": "business",
+      "category_hints": [
+        "business"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Markets, investing, and financial news from MarketWatch."
+    },
+    {
+      "source_id": "scientific-american",
+      "source_name": "Scientific American",
+      "feed_url": "http://rss.sciam.com/ScientificAmerican-Global",
+      "site_url": "https://www.scientificamerican.com",
+      "enabled": true,
+      "default_category": "science",
+      "category_hints": [
+        "science"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "metered"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Science news and analysis from Scientific American."
+    },
+    {
+      "source_id": "mit-tech-review",
+      "source_name": "MIT Technology Review",
+      "feed_url": "https://www.technologyreview.com/feed/",
+      "site_url": "https://www.technologyreview.com",
+      "enabled": true,
+      "default_category": "technology",
+      "category_hints": [
+        "technology",
+        "science"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "metered"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Emerging technology coverage from MIT Technology Review."
+    },
+    {
+      "source_id": "phys-org",
+      "source_name": "Phys.org",
+      "feed_url": "https://phys.org/rss-feed/",
+      "site_url": "https://phys.org",
+      "enabled": true,
+      "default_category": "science",
+      "category_hints": [
+        "science"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Science research news aggregated from journals and institutions."
+    },
+    {
+      "source_id": "nasa",
+      "source_name": "NASA News",
+      "feed_url": "https://www.nasa.gov/news-release/feed/",
+      "site_url": "https://www.nasa.gov/news/",
+      "enabled": true,
+      "default_category": "science",
+      "category_hints": [
+        "science"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Official news releases from NASA."
+    },
+    {
+      "source_id": "variety",
+      "source_name": "Variety",
+      "feed_url": "https://variety.com/feed/",
+      "site_url": "https://variety.com",
+      "enabled": true,
+      "default_category": "entertainment",
+      "category_hints": [
+        "entertainment"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "metered"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Entertainment industry trade coverage from Variety."
+    },
+    {
+      "source_id": "hollywood-reporter",
+      "source_name": "The Hollywood Reporter",
+      "feed_url": "https://www.hollywoodreporter.com/feed",
+      "site_url": "https://www.hollywoodreporter.com",
+      "enabled": true,
+      "default_category": "entertainment",
+      "category_hints": [
+        "entertainment"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "metered"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Entertainment industry trade coverage from The Hollywood Reporter."
+    },
+    {
+      "source_id": "billboard",
+      "source_name": "Billboard",
+      "feed_url": "https://www.billboard.com/feed/",
+      "site_url": "https://www.billboard.com",
+      "enabled": true,
+      "default_category": "entertainment",
+      "category_hints": [
+        "entertainment"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Music industry news and charts from Billboard."
+    },
+    {
+      "source_id": "dw",
+      "source_name": "Deutsche Welle",
+      "feed_url": "https://rss.dw.com/rdf/rss-en-all",
+      "site_url": "https://www.dw.com/en/",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "International news from Germany's public broadcaster DW."
+    },
+    {
+      "source_id": "france-24",
+      "source_name": "France 24",
+      "feed_url": "https://www.france24.com/en/rss",
+      "site_url": "https://www.france24.com/en/",
+      "enabled": true,
+      "default_category": "world",
+      "category_hints": [
+        "world"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "International news from France 24."
+    },
+    {
+      "source_id": "electrek",
+      "source_name": "Electrek",
+      "feed_url": "https://electrek.co/feed/",
+      "site_url": "https://electrek.co",
+      "enabled": true,
+      "default_category": "automotive",
+      "category_hints": [
+        "automotive",
+        "technology"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Electric vehicle and clean energy news from Electrek."
+    },
+    {
+      "source_id": "jalopnik",
+      "source_name": "Jalopnik",
+      "feed_url": "https://jalopnik.com/rss",
+      "site_url": "https://jalopnik.com",
+      "enabled": true,
+      "default_category": "automotive",
+      "category_hints": [
+        "automotive"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Automotive news and culture from Jalopnik."
+    },
+    {
+      "source_id": "cbs-sports",
+      "source_name": "CBS Sports",
+      "feed_url": "https://www.cbssports.com/rss/headlines/",
+      "site_url": "https://www.cbssports.com",
+      "enabled": true,
+      "default_category": "sports",
+      "category_hints": [
+        "sports"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Sports headlines from CBS Sports."
+    },
+    {
+      "source_id": "cnet",
+      "source_name": "CNET",
+      "feed_url": "https://www.cnet.com/rss/news/",
+      "site_url": "https://www.cnet.com",
+      "enabled": true,
+      "default_category": "technology",
+      "category_hints": [
+        "technology"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Consumer technology news and reviews from CNET."
+    },
+    {
+      "source_id": "9to5mac",
+      "source_name": "9to5Mac",
+      "feed_url": "https://9to5mac.com/feed/",
+      "site_url": "https://9to5mac.com",
+      "enabled": true,
+      "default_category": "technology",
+      "category_hints": [
+        "technology"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Apple ecosystem news and analysis from 9to5Mac."
+    },
+    {
+      "source_id": "9to5google",
+      "source_name": "9to5Google",
+      "feed_url": "https://9to5google.com/feed/",
+      "site_url": "https://9to5google.com",
+      "enabled": true,
+      "default_category": "technology",
+      "category_hints": [
+        "technology"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Google ecosystem news and analysis from 9to5Google."
     }
   ]
 }

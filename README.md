@@ -9,6 +9,7 @@ news-tldr.com is a filesystem-backed RSS aggregator that parses web feeds, extra
 ## Key Features
 
 - **RSS/Atom Feed Parsing**: Periodic updates of subscribed sources.
+- **Lead Image Capture**: Download of supported article images as sidecar files next to staged article JSON.
 - **Filesystem Pipeline**: JSON artifacts and a SQLite state database connect collection, aggregation, editorial, and presentation stages without a server runtime.
 - **AI-Powered Summaries**: Automatic generation of brief, sourced summaries across multiple articles covering the same event.
 - **Static Presentation**: A clean reader interface generated from JSON and deployable without a server runtime.
@@ -37,6 +38,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+This installs the feed parser, HTTP client with HTTP/2 support, article extraction, and scraper dependencies used by the collection pipeline.
+
 Any scripts or pipeline executions should run using the Python interpreter inside `.venv` (e.g., `./.venv/bin/python`).
 
 ### Pipeline Commands
@@ -49,6 +52,16 @@ Initialize or migrate the SQLite state database:
 Run stage 1 data collection:
 ```bash
 ./.venv/bin/python -m pipeline.cli collect
+```
+
+Print incremental collection progress to stderr while keeping final stats on stdout:
+```bash
+./.venv/bin/python -m pipeline.cli collect --verbose
+```
+
+Remove the local generated SQLite state, staged articles, and fetch logs:
+```bash
+./.venv/bin/python -m pipeline.cli clean-data --yes
 ```
 
 Run verification:

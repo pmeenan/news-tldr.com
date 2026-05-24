@@ -21,6 +21,7 @@ class FeedConfig:
     category_hints: list[str]
     content_hints: dict[str, Any]
     fetch: dict[str, Any]
+    feed_type: str = "rss"
     notes: str | None = None
 
 
@@ -52,19 +53,23 @@ def load_feeds(path: Path | None = None, *, enabled_only: bool = True) -> list[F
     feeds: list[FeedConfig] = []
     seen_source_ids: set[str] = set()
     for item in data.get("feeds", []):
-        source_id = item["source_id"]
+        source_id = item.get("source_id")
+        if not source_id:
+            raise ValueError(f"feed item is missing source_id: {item}")
         if source_id != sanitize_id(source_id):
             raise ValueError(f"invalid source_id: {source_id}")
         if source_id in seen_source_ids:
             raise ValueError(f"duplicate source_id: {source_id}")
         seen_source_ids.add(source_id)
-        feed_url = item["feed_url"]
+        feed_url = item.get("feed_url")
+        if not feed_url:
+            raise ValueError(f"feed {source_id} is missing feed_url")
         parsed = urlparse(feed_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError(f"invalid feed_url for {source_id}: {feed_url}")
         feed = FeedConfig(
             source_id=source_id,
-            source_name=item["source_name"],
+            source_name=item.get("source_name", source_id),
             feed_url=feed_url,
             site_url=item.get("site_url"),
             enabled=bool(item.get("enabled", True)),
@@ -72,6 +77,7 @@ def load_feeds(path: Path | None = None, *, enabled_only: bool = True) -> list[F
             category_hints=list(item.get("category_hints", [])),
             content_hints=dict(item.get("content_hints", {})),
             fetch=dict(item.get("fetch", {})),
+            feed_type=item.get("feed_type", "rss"),
             notes=item.get("notes"),
         )
         if feed.enabled or not enabled_only:

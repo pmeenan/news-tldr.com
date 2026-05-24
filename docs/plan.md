@@ -4,13 +4,14 @@ This document tracks the phased buildout of the filesystem-backed RSS aggregator
 
 ## Current Direction
 
-- **Pipeline**: Python with `feedparser`, `httpx`, `trafilatura`, standard-library `sqlite3`, and LLM client libraries.
+- **Pipeline**: Python with `feedparser`, `httpx`/`h2`, `trafilatura`, `beautifulsoup4`, standard-library `sqlite3`, and LLM client libraries.
 - **Presentation**: Astro (or similar frontend-focused SSG) for static site generation.
 - **State**: SQLite for pipeline state and incremental processing. JSON files for human-readable stage artifacts.
 - **No database server** or application runtime for the published site.
 - Filesystem JSON artifacts are the source of truth between stages.
 - Pipeline stages: data collection, story aggregation, editorial, presentation.
 - Data collection is implemented; next active work is story aggregation.
+- The configured source catalog has 83 enabled sources, including AP News and MotorTrend custom scrapers.
 - Neutrality, attribution, and auditability are first-class requirements.
 - Pipeline runs hourly. Stories evolve as new articles arrive across runs.
 - Events are the primary grouping unit. Optional thread tags link related events over time.
@@ -58,7 +59,7 @@ gantt
 - [x] Create `config/pipeline.json` with operational defaults (rate limits, timeouts, retention, staleness threshold).
 - [x] Create `config/source-policy.json` skeleton with bias labels and reliability metadata.
 - [x] Set up Python virtual environment (`.venv`).
-- [x] Scan dependencies using security tools, then set up Python project: `pyproject.toml`, dependencies (`feedparser`, `httpx`, `trafilatura`; SQLite via standard-library `sqlite3`).
+- [x] Scan dependencies using security tools, then set up Python project: `pyproject.toml`, dependencies (`feedparser`, `httpx`, `h2`, `trafilatura`, `beautifulsoup4`; SQLite via standard-library `sqlite3`).
 - [x] Define SQLite schema and migration/versioning system, then initialize `data/state/pipeline.db` with feeds, articles, article fingerprints, events, pipeline runs, item errors, and LLM usage tables.
 - [x] Implement atomic pipeline lock acquisition and release with verified process identity and watchdog timeout.
 - [x] Implement RSS/Atom feed fetching with conditional requests (`If-Modified-Since`, `ETag`) and secure XML parsing (disable external entities).
@@ -68,9 +69,15 @@ gantt
 - [x] Implement paywall detection signals and source-level paywall hints.
 - [x] Implement deduplication by `article_id` (canonical URL hash, GUID fallback) against the state database.
 - [x] Write per-article staging JSON files (atomic writes) keyed on publish date.
+- [x] Fetch supported lead images from feed/scraper/article metadata and store same-stem image sidecars next to staged article JSON.
 - [x] Register collected articles in the state database.
 - [x] Write collection logs (`data/staging/fetch-log/`).
 - [x] Add tests with fixture feeds, sample article pages, lock contention/stale-lock cases, and SSRF redirect/blocking cases.
+- [x] Extend collection to support Custom Site Scrapers (e.g., AP News, MotorTrend) via `beautifulsoup4` for non-RSS sources.
+- [x] Expand and verify the enabled feed catalog; keep source policy metadata aligned 1:1 with configured sources.
+- [x] Add `collect --verbose` progress logging to stderr while preserving final stats JSON on stdout.
+- [x] Route HTTP retry progress through the verbose progress callback instead of unconditional stderr output.
+- [x] Add `clean-data --yes` to remove local generated collection state for a fresh run.
 
 ### [ ] Milestone 2: Story Aggregation
 
@@ -123,6 +130,7 @@ gantt
 
 ### [ ] Milestone 5: Operations & Quality
 
+- [x] Document that long-running pipeline commands must support `--verbose` progress/status logging to stderr.
 - [ ] Add a single command (`make run`, `python -m pipeline`, or similar) to run the full pipeline locally.
 - [ ] Verify pipeline lock, watchdog timeout, and stale lock recovery work end-to-end.
 - [ ] Add prompt/version metadata to all LLM-generated artifacts.

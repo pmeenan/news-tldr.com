@@ -256,6 +256,28 @@ class StateDB:
             is not None
         )
 
+    def find_article_by_url_or_guid(
+        self,
+        url: str,
+        canonical_url: str | None = None,
+        guid: str | None = None,
+        source_id: str | None = None,
+    ) -> tuple[str, str] | None:
+        conditions = ["url = ?"]
+        params = [url]
+        if canonical_url:
+            conditions.extend(["canonical_url = ?", "url = ?", "canonical_url = ?"])
+            params.extend([canonical_url, canonical_url, url])
+        if guid and source_id:
+            conditions.append("(source_id = ? AND guid = ?)")
+            params.extend([source_id, guid])
+
+        query = f"SELECT article_id, article_path FROM articles WHERE {' OR '.join(conditions)}"
+        row = self.conn.execute(query, params).fetchone()
+        if row:
+            return row["article_id"], row["article_path"]
+        return None
+
     def insert_article(self, article: dict[str, Any], article_path: Path) -> None:
         collection = article.get("collection", {})
         with self.conn:

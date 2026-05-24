@@ -3,7 +3,8 @@
   "collection": {
     "rate_limit_seconds": 2,
     "connection_timeout_seconds": 10,
-    "read_timeout_seconds": 30,
+    "read_timeout_seconds": 10,
+    "total_timeout_seconds": 15,
     "max_retries": 3,
     "backoff_initial_seconds": 5,
     "backoff_max_seconds": 60
