@@ -88,18 +88,30 @@ gantt
 > status/updated_at, and item_errors by item. Aggregation work can read/write
 > these directly; further schema changes go in a new migration entry.
 
+> Local LLM decision: Stage 2 aggregation will use Ollama with `gemma4:26b`,
+> preferably through a `gemma4-26b-news-greedy-32k` alias (`num_ctx 32768`,
+> `temperature 0`, `top_k 1`, `top_p 1`, `repeat_penalty 1.5`,
+> `repeat_last_n -1`, `num_predict 2048`) and API calls must set
+> `think: false`. May 24 evaluation on the staged corpus found Gemma4 26B had
+> the best practical CPU/64GB RAM balance: valid structured output in about 29s
+> for an 8-article batch. Qwen3.6 27B was higher latency (~227s), and Llama3.1
+> 8B had weaker classification quality.
+
 - [ ] Implement state database query for unprocessed articles (`event_id` is null).
 - [ ] Implement near-duplicate detection for exact reprints (headline similarity, exact text, or URL hashes).
+- [ ] Implement Ollama local model client using stdlib HTTP or the Ollama API, with `think: false`, JSON/schema mode, request timeouts, model/prompt metadata, and usage/timing capture.
 - [ ] Design batched LLM prompt for article classification and event grouping (headline + brief paragraph summary + source + date + active events context with keywords/entities) to identify articles covering the same underlying story.
-- [ ] Implement LLM abstraction layer supporting API models and local models.
+- [ ] Use compact order-preserving numeric enum output for the first pass; deterministic code maps rows back to input articles by position and rejects malformed or out-of-range values.
+- [ ] Keep free-text generation out of the first pass. Generate event titles, slugs, keywords, entities, and optional thread tags in a second smaller validated call.
+- [ ] Implement LLM abstraction layer supporting the local Ollama default and future API/local model backends.
 - [ ] Implement batched classification: content type, category (validated against `config/categories.json`), and event assignment.
-- [ ] Implement event creation: generate `event_id` (date + LLM-suggested slug), validate uniqueness, store keywords/entities, write event JSON.
+- [ ] Implement event creation: generate `event_id` (date + LLM-suggested slug from the second pass), validate uniqueness, store keywords/entities, write event JSON.
 - [ ] Implement event merging: add articles to existing events when the LLM matches them.
 - [ ] Implement optional thread tag assignment for linking related events.
 - [ ] Filter standalone opinion content from event creation (opinions attach to existing events only).
 - [ ] Update event JSON files and state database after each batch.
 - [ ] Implement event status lifecycle: active → stale (48h no new articles) → archived.
-- [ ] Add deterministic validation for IDs, category values, and confidence thresholds.
+- [ ] Add deterministic validation for IDs, category values, enum values, confidence thresholds, batch cardinality, and retry/fallback behavior.
 - [ ] Add tests for grouping, deduplication, and registry updates.
 
 ### [ ] Milestone 3: Editorial

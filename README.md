@@ -42,6 +42,24 @@ This installs the feed parser, HTTP client with HTTP/2 support, article extracti
 
 Any scripts or pipeline executions should run using the Python interpreter inside `.venv` (e.g., `./.venv/bin/python`).
 
+### Local LLM Setup
+
+Stage 2 story aggregation is planned to use local Ollama with `gemma4:26b`. The recommended local alias is:
+
+```bash
+ollama create gemma4-26b-news-greedy-32k -f <(printf '%s\n' \
+  'FROM gemma4:26b' \
+  'PARAMETER num_ctx 32768' \
+  'PARAMETER temperature 0' \
+  'PARAMETER top_k 1' \
+  'PARAMETER top_p 1' \
+  'PARAMETER repeat_penalty 1.5' \
+  'PARAMETER repeat_last_n -1' \
+  'PARAMETER num_predict 2048')
+```
+
+Aggregation API calls should set `think: false` and use validated structured output.
+
 ### Pipeline Commands
 
 Initialize or migrate the SQLite state database:

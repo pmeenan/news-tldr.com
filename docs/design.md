@@ -207,16 +207,40 @@ Responsibilities:
 
 ### LLM Integration for Aggregation
 
-Aggregation LLM calls are **batched**. Send a batch of article metadata (headline + a brief paragraph summary + source + publish date) along with a context list of currently active events (retrieved from the state database with their `event_id`, title, category, `keywords`, major entities, article count, and update timestamp) in a single prompt and ask the model to:
+Aggregation uses a local Ollama model by default. The selected Stage 2 model is `gemma4:26b`, run through a project alias such as `gemma4-26b-news-greedy-32k` with deterministic settings:
+
+```text
+FROM gemma4:26b
+PARAMETER num_ctx 32768
+PARAMETER temperature 0
+PARAMETER top_k 1
+PARAMETER top_p 1
+PARAMETER repeat_penalty 1.5
+PARAMETER repeat_last_n -1
+PARAMETER num_predict 2048
+```
+
+All aggregation calls must pass `think: false` to the Ollama API. Local evaluation on the staged corpus showed this is required for reliable structured responses. The model supports a larger advertised context window, but `32768` is the initial operating target because it fits the local CPU/64GB RAM environment with acceptable throughput.
+
+Aggregation LLM calls are **batched**. Send a batch of article metadata (headline + a brief paragraph summary + source + publish date) along with a context list of currently active events (retrieved from the state database with their `event_id`, title, category, `keywords`, major entities, article count, and update timestamp) and ask the model to:
 
 1. Classify each article's content type and category.
 2. Group articles into events (matching and referencing existing event IDs from the context list where applicable) by identifying multiple outlets reporting the same underlying story.
 3. Suggest new event IDs and slugs for novel events.
 4. Suggest optional `thread` tags for linking related events.
 
-Batch size should balance context window limits against per-call overhead. Start with batches of 20-50 article summaries. Matching uses only the headline and a brief paragraph summary (typically the lead sentence or feed summary) to keep payloads small and avoid processing full article text at this stage. Full article text stays on disk.
+Prompt shape is part of the contract. The first aggregation pass should avoid free-text fields and ask for compact, order-preserving structured output using numeric enum codes rather than copied article IDs. Deterministic code maps each output row back to the input article by position. This reduces malformed JSON, repeated text inside string fields, and ID-copying errors. Event naming, keyword/entity generation, and slug suggestions should happen in a second smaller call after candidate event assignments are known.
+
+Batch size should balance context window limits against per-call overhead. Start with small validation batches, then scale toward 20-50 article summaries once output validation and retries are stable. Matching uses only the headline and a brief paragraph summary (typically the lead sentence or feed summary) to keep payloads small and avoid processing full article text at this stage. Full article text stays on disk.
 
 Deterministic code validates all LLM outputs: checks category IDs against `config/categories.json`, enforces event ID uniqueness, and rejects malformed suggestions.
+
+Local model evaluation on May 24, 2026:
+
+- `gemma4:26b` with `think: false` and compact numeric schema produced valid structured output in about 29 seconds for an 8-article CPU batch and had the best quality/speed balance.
+- `qwen3.6:27b` with `think: false` produced good structured output but was much slower, about 227 seconds for the same 8-article CPU batch.
+- `llama3.1:8b` produced valid structured output but lower classification quality.
+- Free-text JSON fields and calls without `think: false` caused empty responses, looping, malformed JSON, or poor reliability in local tests.
 
 ### Event JSON Sketch
 
@@ -515,10 +539,10 @@ This keeps decisions auditable and makes reruns straightforward when prompts cha
 
 ### Model Flexibility
 
-The LLM integration should abstract the model backend. The system may use:
+The LLM integration should abstract the model backend. The Stage 2 aggregation default is local Ollama with `gemma4:26b` via the `gemma4-26b-news-greedy-32k` alias and `think: false`; other backends remain swappable behind the same interface. The system may use:
 
 - API models (Claude, GPT, etc.) for high-quality editorial summaries.
-- Small local models for classification and grouping where latency and cost matter.
+- Local models for classification and grouping where latency, privacy, and cost matter.
 - Different models for different stages (e.g., local model for batched aggregation, API model for editorial).
 
 The abstraction should support swapping backends without changing pipeline logic.
@@ -532,5 +556,4 @@ The abstraction should support swapping backends without changing pipeline logic
 
 ## Open Design Questions
 
-- Which LLM backend(s) to use will be decided during Milestone 2, after real data is available for evaluation. The integration must use an abstraction layer with swappable backends (API models, local models, or both).
 - Which Astro plugins/integrations are needed for the initial site build?
