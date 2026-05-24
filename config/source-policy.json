@@ -2,11 +2,228 @@
   "version": 1,
   "sources": [
     {
-      "source_id": "example-source",
+      "source_id": "fox-news-us",
+      "bias_label": "right",
+      "reliability": "medium",
+      "paywall": "none",
+      "notes": "US domestic news from Fox News."
+    },
+    {
+      "source_id": "google-news-entertainment",
       "bias_label": "center",
-      "reliability": "unknown",
-      "paywall": "unknown",
-      "notes": "Copy this entry for each source. bias_label: left, center-left, center, center-right, right. reliability: high, medium, low, unknown. paywall: none, metered, hard, unknown."
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Aggregated entertainment headlines from Google News."
+    },
+    {
+      "source_id": "slashdot",
+      "bias_label": "center",
+      "reliability": "medium",
+      "paywall": "none",
+      "notes": "Aggregated news for nerds."
+    },
+    {
+      "source_id": "cloudflare-blog",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Technical networking and security articles."
+    },
+    {
+      "source_id": "car-and-driver",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Automotive reviews and news."
+    },
+    {
+      "source_id": "business-insider",
+      "bias_label": "center-left",
+      "reliability": "high",
+      "paywall": "metered",
+      "notes": "Business and financial news."
+    },
+    {
+      "source_id": "google-news-top",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Aggregated top headlines from Google News."
+    },
+    {
+      "source_id": "wapo-world",
+      "bias_label": "center-left",
+      "reliability": "high",
+      "paywall": "metered",
+      "notes": "International coverage from The Washington Post."
+    },
+    {
+      "source_id": "google-news-health",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Aggregated health headlines from Google News."
+    },
+    {
+      "source_id": "wapo-politics",
+      "bias_label": "center-left",
+      "reliability": "high",
+      "paywall": "metered",
+      "notes": "Political coverage from The Washington Post."
+    },
+    {
+      "source_id": "wapo-national",
+      "bias_label": "center-left",
+      "reliability": "high",
+      "paywall": "metered",
+      "notes": "National reporting from The Washington Post."
+    },
+    {
+      "source_id": "cnn-us",
+      "bias_label": "left",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "US domestic news from CNN."
+    },
+    {
+      "source_id": "google-news-vehicles",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Aggregated automotive headlines from Google News."
+    },
+    {
+      "source_id": "fox-news",
+      "bias_label": "right",
+      "reliability": "medium",
+      "paywall": "none",
+      "notes": "General news from Fox News."
+    },
+    {
+      "source_id": "fox-news-politics",
+      "bias_label": "right",
+      "reliability": "medium",
+      "paywall": "none",
+      "notes": "Political coverage from Fox News."
+    },
+    {
+      "source_id": "cnn-politics",
+      "bias_label": "left",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "US political news and analysis from CNN."
+    },
+    {
+      "source_id": "google-news-tech",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Aggregated tech headlines from Google News."
+    },
+    {
+      "source_id": "hacker-news",
+      "bias_label": "center",
+      "reliability": "medium",
+      "paywall": "none",
+      "notes": "Aggregated tech community submissions."
+    },
+    {
+      "source_id": "cnn",
+      "bias_label": "left",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Cable news network."
+    },
+    {
+      "source_id": "abc-news-top",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Top stories from ABC News."
+    },
+    {
+      "source_id": "cnn-world",
+      "bias_label": "left",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "International news from CNN."
+    },
+    {
+      "source_id": "abc-news-tech",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Technology headlines from ABC News."
+    },
+    {
+      "source_id": "engadget",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Technology news and reviews."
+    },
+    {
+      "source_id": "fox-news-world",
+      "bias_label": "right",
+      "reliability": "medium",
+      "paywall": "none",
+      "notes": "International news from Fox News."
+    },
+    {
+      "source_id": "google-news-science",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Aggregated science headlines from Google News."
+    },
+    {
+      "source_id": "abc-news-business",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Business and finance headlines from ABC News."
+    },
+    {
+      "source_id": "the-verge",
+      "bias_label": "center-left",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Technology and culture news."
+    },
+    {
+      "source_id": "techcrunch",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Startup and tech industry news."
+    },
+    {
+      "source_id": "abc-news-us",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "US domestic news from ABC News."
+    },
+    {
+      "source_id": "cnn-tech",
+      "bias_label": "left",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Technology news from CNN."
+    },
+    {
+      "source_id": "google-news-business",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Aggregated business headlines from Google News."
+    },
+    {
+      "source_id": "google-news-sports",
+      "bias_label": "center",
+      "reliability": "high",
+      "paywall": "none",
+      "notes": "Aggregated sports headlines from Google News."
     }
   ]
 }

@@ -53,7 +53,7 @@ gantt
 ### [ ] Milestone 1: Data Collection
 
 - [x] Create seed feed config skeleton at `config/feeds.json`.
-- [ ] Populate seed feed config with real source IDs, feed URLs, category hints, and source policy metadata.
+- [x] Populate seed feed config with real source IDs, feed URLs, category hints, and source policy metadata.
 - [x] Create `config/pipeline.json` with operational defaults (rate limits, timeouts, retention, staleness threshold).
 - [x] Create `config/source-policy.json` skeleton with bias labels and reliability metadata.
 - [ ] Scan dependencies using security tools, then set up Python project: `pyproject.toml`, virtual environment, dependencies (`feedparser`, `httpx`, `trafilatura`; SQLite via standard-library `sqlite3`).
