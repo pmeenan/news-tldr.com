@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "categories": [
+    {
+      "id": "world",
+      "name": "World News",
+      "description": "International affairs and global events",
+      "sort_order": 1
+    },
+    {
+      "id": "us",
+      "name": "US News",
+      "description": "Domestic news within the United States",
+      "sort_order": 2
+    },
+    {
+      "id": "politics",
+      "name": "Politics",
+      "description": "Government, elections, policy, and political analysis",
+      "sort_order": 3
+    },
+    {
+      "id": "business",
+      "name": "Business & Finance",
+      "description": "Markets, companies, economics, and trade",
+      "sort_order": 4
+    },
+    {
+      "id": "technology",
+      "name": "Technology",
+      "description": "Software, hardware, internet, and digital industry",
+      "sort_order": 5
+    },
+    {
+      "id": "science",
+      "name": "Science",
+      "description": "Research, discoveries, and scientific developments",
+      "sort_order": 6
+    },
+    {
+      "id": "health",
+      "name": "Health",
+      "description": "Medicine, public health, and healthcare policy",
+      "sort_order": 7
+    },
+    {
+      "id": "environment",
+      "name": "Environment & Climate",
+      "description": "Climate change, conservation, and environmental policy",
+      "sort_order": 8
+    },
+    {
+      "id": "automotive",
+      "name": "Automotive",
+      "description": "Vehicles, EV industry, recalls, and transportation",
+      "sort_order": 9
+    },
+    {
+      "id": "entertainment",
+      "name": "Entertainment",
+      "description": "Film, TV, music, gaming, and cultural events",
+      "sort_order": 10
+    },
+    {
+      "id": "sports",
+      "name": "Sports",
+      "description": "Professional and amateur sports news",
+      "sort_order": 11
+    }
+  ]
+}

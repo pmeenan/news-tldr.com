@@ -1,0 +1,22 @@
+data/
+dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Node / Astro
+node_modules/
+site/.astro/
+
+# Secrets
+.env
+.env.*
+
+# Editors
+.vscode/
+.idea/

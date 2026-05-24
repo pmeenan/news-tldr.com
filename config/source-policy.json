@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "source_id": "example-source",
+      "bias_label": "center",
+      "reliability": "unknown",
+      "paywall": "unknown",
+      "notes": "Copy this entry for each source. bias_label: left, center-left, center, center-right, right. reliability: high, medium, low, unknown. paywall: none, metered, hard, unknown."
+    }
+  ]
+}

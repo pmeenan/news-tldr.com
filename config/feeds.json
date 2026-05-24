@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "feeds": [
+    {
+      "source_id": "example-source",
+      "source_name": "Example Source",
+      "feed_url": "https://example.com/rss",
+      "site_url": "https://example.com",
+      "enabled": false,
+      "default_category": "world",
+      "category_hints": [],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "unknown"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Copy this entry for each RSS or Atom feed and set enabled to true when ready."
+    }
+  ]
+}
