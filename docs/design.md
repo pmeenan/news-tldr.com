@@ -102,6 +102,21 @@ Responsibilities:
 - Record each collected article in the pipeline state database for incremental processing.
 - Skip articles already recorded in the state database (deduplicate by `article_id`).
 
+### Stage 1 Implementation
+
+The collection implementation lives in the `pipeline` Python package:
+
+- `pipeline/cli.py`: command-line entrypoint. `python -m pipeline.cli init-db` initializes the state database, and `python -m pipeline.cli collect` runs collection.
+- `pipeline/state.py`: SQLite schema and migration entrypoint. The schema includes feeds, feed conditional request state, articles, article fingerprints, events, pipeline runs, item errors, and LLM usage.
+- `pipeline/lock.py`: atomic lock file acquisition/release with PID and Linux process start-time verification, plus stale-lock recovery based on the configured watchdog timeout.
+- `pipeline/http_client.py`: async HTTP client with browser-like desktop Chrome request headers, per-domain rate limiting, robots.txt and crawl-delay enforcement, retry/backoff handling, and manual redirect validation.
+- `pipeline/security.py`: SSRF guardrails. Every initial URL and redirect target is restricted to `http`/`https`, resolved before fetch, and rejected when it maps to loopback, private, link-local, multicast, reserved, unspecified, or blocked-port destinations.
+- `pipeline/collect.py`: feed collection, feed parsing, article extraction, paywall signal detection, article JSON writes, database registration, and fetch-log writes.
+
+Collection writes article JSON under `data/staging/articles/YYYY/MM/DD/` and appends run logs to `data/staging/fetch-log/YYYY-MM-DD.jsonl`. The SQLite database stores only state/index fields plus JSON metadata needed by later stages; full extracted article text remains in the staging JSON.
+
+The HTTP client sends a desktop Windows Chrome user-agent plus common browser navigation headers (`Accept`, `Accept-Language`, `Sec-Fetch-*`, cache headers, and `Upgrade-Insecure-Requests`) while retaining RSS/Atom/XML-compatible accept values. It does not use a headless browser, login cookies, or paywall bypass behavior.
+
 ### HTTP Client Policy
 
 - **User-Agent**: Use a current desktop Windows Chrome UA string. Update the UA string periodically (at least monthly) to track current Chrome stable releases. Example: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36`.
@@ -111,6 +126,7 @@ Responsibilities:
 - **Timeouts**: Connection timeout 10s, read timeout 30s. Configurable per source in `feeds.json`.
 - **Concurrency**: Fetch feeds and articles concurrently, but respect per-domain rate limits. Use async I/O (`httpx` with `asyncio`).
 - **SSRF Protection**: Only fetch `http` and `https` URLs. Resolve each hostname before requesting it and block loopback, private, link-local, multicast, reserved, and documentation IP ranges for both IPv4 and IPv6, including metadata-service addresses such as `169.254.169.254`. Re-run the same validation for every redirect target and abort redirect chains that change to a blocked scheme, host, port, or resolved IP.
+- **Response Size Cap**: Stream response bodies and reject any response whose `Content-Length` header or actual decoded byte count exceeds the configured cap (default 25 MiB). The cap defends against OOM from oversized feeds and gzip-bomb decompression. Cap is configurable per `PoliteHTTPClient` instance.
 
 ### Feed Config
 
@@ -409,6 +425,8 @@ The aggregation stage queries for articles where `event_id` is null to find unpr
 ### Database Schema & Migrations
 
 SQLite schema changes are versioned. The database stores the current schema version in a `schema_version` table (or `PRAGMA user_version`), and migrations run automatically before any pipeline stage executes.
+
+Migrations are organized as an append-only list of `(version, sql)` pairs in `pipeline/state.py::MIGRATIONS`. Each migration is the SQL needed to bring the database from the previous version up to its own version. Once released, a migration is immutable; later schema changes are added as new entries with higher version numbers. `migrate()` reads the highest recorded version from `schema_version` and runs every newer migration in order, then records each applied version. Fresh installs run all migrations; existing databases only run the deltas.
 
 Initial tables:
 

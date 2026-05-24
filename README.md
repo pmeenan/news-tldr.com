@@ -39,3 +39,20 @@ pip install -r requirements.txt
 
 Any scripts or pipeline executions should run using the Python interpreter inside `.venv` (e.g., `./.venv/bin/python`).
 
+### Pipeline Commands
+
+Initialize or migrate the SQLite state database:
+```bash
+./.venv/bin/python -m pipeline.cli init-db
+```
+
+Run stage 1 data collection:
+```bash
+./.venv/bin/python -m pipeline.cli collect
+```
+
+Run verification:
+```bash
+./.venv/bin/pip-audit -r requirements.txt
+./.venv/bin/python -m pytest
+```

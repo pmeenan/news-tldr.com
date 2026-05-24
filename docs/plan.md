@@ -10,6 +10,7 @@ This document tracks the phased buildout of the filesystem-backed RSS aggregator
 - **No database server** or application runtime for the published site.
 - Filesystem JSON artifacts are the source of truth between stages.
 - Pipeline stages: data collection, story aggregation, editorial, presentation.
+- Data collection is implemented; next active work is story aggregation.
 - Neutrality, attribution, and auditability are first-class requirements.
 - Pipeline runs hourly. Stories evolve as new articles arrive across runs.
 - Events are the primary grouping unit. Optional thread tags link related events over time.
@@ -50,28 +51,35 @@ gantt
 - [x] Define event model (flat events with optional thread tags, no topic registry).
 - [x] Define political framing approach (neutral TL;DR + transparent left/right perspectives).
 
-### [ ] Milestone 1: Data Collection
+### [x] Milestone 1: Data Collection
 
 - [x] Create seed feed config skeleton at `config/feeds.json`.
 - [x] Populate seed feed config with real source IDs, feed URLs, category hints, and source policy metadata.
 - [x] Create `config/pipeline.json` with operational defaults (rate limits, timeouts, retention, staleness threshold).
 - [x] Create `config/source-policy.json` skeleton with bias labels and reliability metadata.
 - [x] Set up Python virtual environment (`.venv`).
-- [ ] Scan dependencies using security tools, then set up Python project: `pyproject.toml`, dependencies (`feedparser`, `httpx`, `trafilatura`; SQLite via standard-library `sqlite3`).
-- [ ] Define SQLite schema and migration/versioning system, then initialize `data/state/pipeline.db` with feeds, articles, article fingerprints, events, pipeline runs, item errors, and LLM usage tables.
-- [ ] Implement atomic pipeline lock acquisition and release with verified process identity and watchdog timeout.
-- [ ] Implement RSS/Atom feed fetching with conditional requests (`If-Modified-Since`, `ETag`) and secure XML parsing (disable external entities).
-- [ ] Implement HTTP client with desktop Chrome UA, per-domain rate limiting, robots.txt respect, exponential backoff, and redirect-aware SSRF protection (validate scheme/host/port/resolved IP before each request and redirect).
-- [ ] Parse feed entries into normalized article JSON.
-- [ ] Implement article text extraction via `trafilatura` (or similar readability library) for partial feed entries.
-- [ ] Implement paywall detection signals and source-level paywall hints.
-- [ ] Implement deduplication by `article_id` (canonical URL hash, GUID fallback) against the state database.
-- [ ] Write per-article staging JSON files (atomic writes) keyed on publish date.
-- [ ] Register collected articles in the state database.
-- [ ] Write collection logs (`data/staging/fetch-log/`).
-- [ ] Add tests with fixture feeds, sample article pages, lock contention/stale-lock cases, and SSRF redirect/blocking cases.
+- [x] Scan dependencies using security tools, then set up Python project: `pyproject.toml`, dependencies (`feedparser`, `httpx`, `trafilatura`; SQLite via standard-library `sqlite3`).
+- [x] Define SQLite schema and migration/versioning system, then initialize `data/state/pipeline.db` with feeds, articles, article fingerprints, events, pipeline runs, item errors, and LLM usage tables.
+- [x] Implement atomic pipeline lock acquisition and release with verified process identity and watchdog timeout.
+- [x] Implement RSS/Atom feed fetching with conditional requests (`If-Modified-Since`, `ETag`) and secure XML parsing (disable external entities).
+- [x] Implement HTTP client with desktop Chrome UA, per-domain rate limiting, robots.txt respect, exponential backoff, and redirect-aware SSRF protection (validate scheme/host/port/resolved IP before each request and redirect).
+- [x] Parse feed entries into normalized article JSON.
+- [x] Implement article text extraction via `trafilatura` (or similar readability library) for partial feed entries.
+- [x] Implement paywall detection signals and source-level paywall hints.
+- [x] Implement deduplication by `article_id` (canonical URL hash, GUID fallback) against the state database.
+- [x] Write per-article staging JSON files (atomic writes) keyed on publish date.
+- [x] Register collected articles in the state database.
+- [x] Write collection logs (`data/staging/fetch-log/`).
+- [x] Add tests with fixture feeds, sample article pages, lock contention/stale-lock cases, and SSRF redirect/blocking cases.
 
 ### [ ] Milestone 2: Story Aggregation
+
+> Schema note: the v2 migration in `pipeline/state.py` already provisions the
+> `events.keywords_json`, `events.entities_json`, `events.article_count`,
+> `events.last_editorial_at`, `events.confidence`, and `item_errors.retry_count`
+> columns, plus indexes for unassigned articles, canonical-URL lookups, event
+> status/updated_at, and item_errors by item. Aggregation work can read/write
+> these directly; further schema changes go in a new migration entry.
 
 - [ ] Implement state database query for unprocessed articles (`event_id` is null).
 - [ ] Implement near-duplicate detection for exact reprints (headline similarity, exact text, or URL hashes).
