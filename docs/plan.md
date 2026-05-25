@@ -10,7 +10,7 @@ This document tracks the phased buildout of the filesystem-backed RSS aggregator
 - **No database server** or application runtime for the published site.
 - Filesystem JSON artifacts are the source of truth between stages.
 - Pipeline stages: data collection, story aggregation, editorial, presentation.
-- Data collection is implemented; next active work is story aggregation.
+- Data collection is implemented; story aggregation is implemented and undergoing quality hardening.
 - Article digest generation is now its own runnable stage before story aggregation.
 - The configured source catalog has 83 enabled sources, including AP News and MotorTrend custom scrapers.
 - Neutrality, attribution, and auditability are first-class requirements.
@@ -78,7 +78,7 @@ gantt
 - [x] Expand and verify the enabled feed catalog; keep source policy metadata aligned 1:1 with configured sources.
 - [x] Add `collect --verbose` progress logging to stderr while preserving final stats JSON on stdout.
 - [x] Route HTTP retry progress through the verbose progress callback instead of unconditional stderr output.
-- [x] Add `clean-data --yes` to remove local generated collection state for a fresh run.
+- [x] Add `clean-data --yes` to remove local generated pipeline state for a fresh run, including event and published artifacts.
 
 ### [ ] Milestone 2: Story Aggregation
 
@@ -88,10 +88,13 @@ gantt
 > newsworthiness columns for global/category ranking. Further schema changes
 > go in a new migration entry.
 
-> Windowing note: aggregation uses sliding publish-time windows. The default is
-> a 6-hour window with a 1-hour step, tracked in `aggregation_windows` so
-> completed windows are not rerun on every pipeline pass. The newest completed
-> window may be rerun on the next pass to absorb late articles near the overlap.
+> Windowing note: aggregation uses chunked publish-time windows with overlap.
+> The default is a 3-hour aggregation chunk plus a 1-hour overlap lookahead
+> (4-hour LLM windows fixed to `00/03/06/09/12/15/18/21` UTC starts), tracked
+> in `aggregation_windows` so completed windows are not rerun on every
+> pipeline pass. Hourly cron runs keep revisiting those fixed UTC windows
+> rather than shifting based on the current hour. The newest completed window
+> may be rerun on the next pass to absorb late articles near the overlap.
 > By default, if no range is specified, aggregation and digestion processing starts
 > from the start of the previous UTC day to avoid processing older retained staging data.
 
@@ -118,7 +121,7 @@ gantt
 - [ ] Keep free-text generation out of the first pass. Generate event titles, slugs, keywords, entities, and optional thread tags in a second smaller validated call.
 - [x] Implement LLM abstraction layer supporting the Gemini API default and future hosted/local model backends.
 - [x] Implement classification: content type, category (validated against `config/categories.json`), and event assignment.
-- [x] Implement sliding 6-hour aggregation windows with a 1-hour overlap and completed-window skip logic.
+- [x] Implement 3-hour aggregation chunks with a 1-hour overlap lookahead and completed-window skip logic.
 - [x] Implement event creation: generate `event_id` (date + deterministic headline slug in the first pass), validate uniqueness, store lightweight keywords, write event JSON.
 - [x] Implement event merging: add articles to existing events when the LLM matches them.
 - [x] Add newsworthiness scoring with global and category scores, preferring article-level digest impact to avoid extra LLM calls and falling back to deterministic or optional post-grouping LLM scoring when impact metadata is unavailable.
@@ -128,6 +131,8 @@ gantt
 - [ ] Implement event status lifecycle: active → stale (48h no new articles) → archived.
 - [x] Add deterministic validation for IDs, category values, enum values, confidence thresholds, window cardinality, and retry/fallback behavior.
 - [x] Add tests for grouping and registry updates.
+- [x] Partition window articles and active events by Category Group prior to story aggregation, including bounded sub-batches for oversized groups, to prevent LLM attention breakdown and "mega-event" grouping errors in large windows.
+- [x] Add deterministic post-validation grouping guardrails: split weakly connected headline groups, only preserve `existing_event_id` on matching components, treat null-like existing-event values as absent, and evaluate duplicate event candidates using article-headline similarity.
 
 ### [ ] Milestone 3: Editorial
 

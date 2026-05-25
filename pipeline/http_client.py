@@ -150,7 +150,7 @@ class PoliteHTTPClient:
     def __init__(
         self,
         *,
-        rate_limit_seconds: float = 2,
+        rate_limit_seconds: float = 1,
         connection_timeout_seconds: float = 10,
         read_timeout_seconds: float = 10,
         total_timeout_seconds: float = 15,

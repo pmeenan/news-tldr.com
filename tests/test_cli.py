@@ -17,6 +17,8 @@ def test_clean_data_removes_database_articles_and_fetch_logs(tmp_path):
     db_path = tmp_path / "state" / "pipeline.db"
     article_dir = tmp_path / "staging" / "articles"
     fetch_log_dir = tmp_path / "staging" / "fetch-log"
+    event_dir = tmp_path / "events"
+    published_dir = tmp_path / "published"
     lock_path = tmp_path / "state" / "pipeline.lock"
     for path in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm"), Path(f"{db_path}-journal")):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -25,12 +27,18 @@ def test_clean_data_removes_database_articles_and_fetch_logs(tmp_path):
     (article_dir / "article.json").write_text("{}", encoding="utf-8")
     fetch_log_dir.mkdir(parents=True)
     (fetch_log_dir / "run.jsonl").write_text("{}", encoding="utf-8")
+    event_dir.mkdir(parents=True)
+    (event_dir / "event.json").write_text("{}", encoding="utf-8")
+    published_dir.mkdir(parents=True)
+    (published_dir / "active-stories.json").write_text("{}", encoding="utf-8")
 
     removed = clean_data(
         confirm=True,
         db_path=db_path,
         article_dir=article_dir,
         fetch_log_dir=fetch_log_dir,
+        event_dir=event_dir,
+        published_dir=published_dir,
         lock_path=lock_path,
         data_dir=tmp_path,
     )
@@ -39,9 +47,13 @@ def test_clean_data_removes_database_articles_and_fetch_logs(tmp_path):
     assert str(Path(f"{db_path}-wal")) in removed
     assert str(article_dir) in removed
     assert str(fetch_log_dir) in removed
+    assert str(event_dir) in removed
+    assert str(published_dir) in removed
     assert not db_path.exists()
     assert not article_dir.exists()
     assert not fetch_log_dir.exists()
+    assert not event_dir.exists()
+    assert not published_dir.exists()
 
 
 def test_clean_data_can_keep_fetch_logs(tmp_path):
@@ -163,12 +175,21 @@ def test_collect_without_verbose_keeps_stderr_quiet(monkeypatch, capsys):
 
 
 def test_aggregate_verbose_writes_progress_to_stderr(monkeypatch, capsys):
-    def fake_aggregate_once(*, range_start=None, range_end=None, limit_windows=None, dry_run=False, progress=None):
+    def fake_aggregate_once(
+        *,
+        range_start=None,
+        range_end=None,
+        limit_windows=None,
+        dry_run=False,
+        progress=None,
+        force=False,
+    ):
         assert range_start == "2026-05-24T16:00:00Z"
         assert range_end == "2026-05-24T22:00:00Z"
         assert limit_windows == 1
         assert dry_run is True
         assert progress is not None
+        assert force is False
         progress("aggregate: fake progress")
         return {"windows_processed": 1}
 
@@ -195,6 +216,40 @@ def test_aggregate_verbose_writes_progress_to_stderr(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "aggregate: fake progress" in captured.err
     assert json.loads(captured.out) == {"windows_processed": 1}
+
+
+def test_aggregate_force_passes_force_to_aggregate_once(monkeypatch, capsys):
+    def fake_aggregate_once(
+        *,
+        range_start=None,
+        range_end=None,
+        limit_windows=None,
+        dry_run=False,
+        progress=None,
+        force=False,
+    ):
+        assert force is True
+        return {"windows_processed": 2}
+
+    monkeypatch.setattr("pipeline.cli.aggregate_once", fake_aggregate_once)
+    monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "news-tldr-pipeline",
+            "aggregate",
+            "--range-start",
+            "2026-05-24T16:00:00Z",
+            "--range-end",
+            "2026-05-24T22:00:00Z",
+            "--force",
+        ],
+    )
+
+    main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"windows_processed": 2}
 
 
 def test_digest_verbose_writes_progress_to_stderr(monkeypatch, capsys):

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "collection": {
-    "rate_limit_seconds": 2,
+    "rate_limit_seconds": 1,
     "connection_timeout_seconds": 10,
     "read_timeout_seconds": 10,
     "total_timeout_seconds": 15,
@@ -10,8 +10,9 @@
     "backoff_max_seconds": 60
   },
   "aggregation": {
-    "window_hours": 6,
-    "window_step_hours": 1,
+    "window_hours": 3,
+    "window_overlap_hours": 1,
+    "window_step_hours": 3,
     "stale_threshold_hours": 48,
     "min_category_impact": 0.25
   },

@@ -32,6 +32,113 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on May 25, 2026 (Aggregation Hardening, Clean Reset, and Verified Rerun)
+
+- **Scope of this pass**: Fixed live aggregation failures and quality issues found after a clean full-pipeline run, reset aggregation artifacts, reran aggregation end-to-end, and inspected the resulting event clusters.
+- **Implementation**:
+  - `pipeline/aggregate.py`
+    - Treats null-like `existing_event_id` values (`null`, `none`, `n/a`, empty strings, etc.) as absent instead of failing validation.
+    - Splits aggregation batches by category group and further splits high-volume `news_business` into `world`, `us`, and `business` buckets, chunked to at most 50 articles per LLM grouping call.
+    - Tracks `windows_partial_failed` separately and records `category_batch_count` in window stats.
+    - Marks standalone opinion groups as `filtered_standalone_opinion` so they do not stay pending forever.
+    - Adds deterministic grouping guardrails after LLM validation: weakly connected headline groups are split into smaller components, and an `existing_event_id` is preserved only when the component matches that active event title or already contains an article assigned to that event.
+    - Removes `us`/`u`/`s` as meaningful headline-match tokens to avoid U.S.-keyword false positives.
+    - Improves post-aggregation dedupe candidate discovery with highly similar article-headline matching, catching duplicate clusters split across categories even when event titles differ.
+  - `pipeline/cli.py` / `pipeline/paths.py`
+    - `clean-data --yes` now removes `data/events/` and `data/published/` in addition to SQLite state, staged articles, and fetch logs.
+  - `config/pipeline.json` / `pipeline/http_client.py`
+    - Collection same-origin rate limit is now 1 second instead of 2 seconds.
+  - Docs updated in `README.md`, `docs/design.md`, and `docs/plan.md`.
+- **Tests & Verification**:
+  - Targeted aggregation/CLI tests passed: `PYTHONPATH=. ./.venv/bin/pytest tests/test_aggregate.py tests/test_cli.py -q` → **75 passed**.
+  - Full test suite passed: `PYTHONPATH=. ./.venv/bin/pytest -q` → **195 passed**.
+  - Linter passed: `./.venv/bin/ruff check .` → clean.
+  - Reset aggregation state only (article `event_id` assignments, `events`, `aggregation_windows`, aggregation/dedupe/newsworthiness LLM usage/errors, and `data/events/*.json`), preserving collection and digest artifacts.
+  - Reran live aggregation: `./.venv/bin/python -m pipeline.cli aggregate --verbose`.
+- **Final live aggregation state**:
+  - Aggregation run status: `success`.
+  - Windows: **16 completed**, **0 failed**, **0 partial**.
+  - Former failing windows:
+    - `2026-05-24T15:00:00Z`: processed **20/20** articles, **5** category batches, no errors.
+    - `2026-05-25T18:00:00Z`: processed **159/159** articles, **8** category batches, no errors.
+  - Event artifacts are consistent: **291** SQLite event rows and **291** `data/events/*.json` files.
+  - Article assignment summary: **412** assigned/unfiltered, **135** unassigned/unfiltered, **347** filtered. The unassigned/unfiltered rows are digest-stage pending/failed rows, not aggregation window failures.
+  - Spot checks:
+    - Rubio India trip is separate from Pope events.
+    - Pope AI encyclical sources are grouped together.
+    - Pope slavery apology is separate from Pope AI.
+    - Hajj and Hezbollah stories are separate from the Iran deal cluster.
+    - Iran deal cluster is broad but centered on the same negotiations/backlash/market-reaction arc.
+- **Files touched in this pass**:
+  - `pipeline/aggregate.py`
+  - `pipeline/cli.py`
+  - `pipeline/paths.py`
+  - `pipeline/http_client.py`
+  - `config/pipeline.json`
+  - `tests/test_aggregate.py`
+  - `tests/test_cli.py`
+  - `README.md`
+  - `docs/design.md`
+  - `docs/plan.md`
+  - `AGENTS.md`
+- **Not committed.** Working tree remains intentionally dirty with these changes and prior uncommitted pipeline work.
+- **Next Steps**:
+  1. Implement the second validated LLM pass for richer event metadata (titles, slugs, keywords, entities, optional thread tags) — Milestone 2 checkbox in `docs/plan.md`.
+  2. Implement event lifecycle transitions (`active` → `stale` → `archived`).
+  3. Consider running `digest --verbose` to address the remaining digest-pending/failed rows before the next aggregation pass.
+  4. Begin Milestone 3 (Editorial Stage).
+
+### State on May 25, 2026 (Category-Group-based Window Splitting)
+
+- **Scope of this pass**: Implemented category-group-based window splitting to prevent Gemini attention breakdown, eliminate "mega-event" grouping hallucinations, and keep batches under 40–50 articles.
+- **Implementation**:
+  - Defined `CATEGORY_GROUPS` partition layout in `pipeline/aggregate.py` to bucket articles into `politics_gov`, `news_business`, `sci_tech`, and `leisure` groups.
+  - Restructured the window aggregation loop in `aggregate_once` to process loaded window articles separate per category group.
+  - Safely accumulated window execution metrics (`elapsed_ms`, token usage, created/updated event counts) to support window completion tracking, guarding against `None` values to avoid `TypeError`.
+  - Updated `deduplicate_active_events_llm` to check category group compatibility (`_in_same_category_group`) instead of strict category equality.
+- **Tests & Verification**:
+  - Added new unit tests verifying category group splitting and cross-category group deduplication within the same category group in `tests/test_aggregate.py`.
+  - Ran `data/scratch/step_by_step_aggregate.py` completely over all 15 sliding windows. Window 14's massive 194-article load was successfully processed in smaller category group batches. Unrelated stories remained properly segregated.
+  - All **175 tests** passed successfully (`PYTHONPATH=. ./.venv/bin/pytest`).
+  - Linter (`ruff check .`) is clean.
+- **Next Steps**:
+  - Implement the second validated LLM pass for richer event metadata (titles, slugs, keywords, entities) — Milestone 2 checkbox at `docs/plan.md:121`.
+  - Implement event lifecycle transitions (`active` → `stale` → `archived`) — `docs/plan.md:131`.
+  - Begin Milestone 3 (Editorial Stage).
+
+### State on May 25, 2026 (Refining Active Events Selection — Bug Fix)
+
+- **Scope of this pass**: Diagnosed and fixed the "mega-event" grouping issue where unrelated events (e.g. Cuba rice shipment, Pakistan train blast, Hajj, and U.S.-Iran peace talks) were merged into a single event.
+- **Root Cause**: The proactive active-event matching query checked if an active event's title shared *any* word (excluding stopwords) with the *union* of all article headlines in the window. In large windows, the union of words contains almost all common words, causing almost all active events (over 370 in Window 10) to match, cluttering the prompt and confusing the LLM into false-positive groupings.
+- **Refined Selection Criteria**:
+  - Modified `pipeline/aggregate.py` to match an active event only if its title shares **at least 2 content-bearing words** (excluding `_KEYWORD_STOPWORDS`) with **at least one individual article's headline** in the current window (or shares the single content-bearing word if the title only has one).
+  - This reduced the candidate active-event matches sent to Gemini by 60–90% in large windows (e.g., from 371 to 112 matches in Window 10, and from 281 to 103 in Window 14).
+  - Keeps the context window clean, prevents LLM grouping hallucinations, and properly separates unrelated stories (Cuba rice shipment has exactly 2 articles, and Pakistan train blast has exactly 7 articles, kept separate from the Trump-Iran event).
+- **Verified in this pass**:
+  - Run `data/scratch/step_by_step_aggregate.py` completely to completion over all 15 sliding windows. Verify that the Cuba event remained at exactly 2 articles and Pakistan blast at 6/7 articles.
+  - All **172 tests** passed successfully (`PYTHONPATH=. ./.venv/bin/pytest`).
+  - Linter (`ruff check .`) is clean.
+
+### State on May 25, 2026 (Cross-Window Grouping & Deduplication)
+
+- **Scope of this pass**: Addressed sliding window boundary splitting by implementing proactive matching (Option 2) and post-aggregation LLM deduplication (Option 1).
+- **Proactive Active-Events Matching**:
+  - `pipeline/aggregate.py` now queries the database for events updated within the last 48 hours that match the categories of the window articles.
+  - Active events are passed to the grouping prompt (`_build_grouping_prompt`), containing their event IDs, categories, and descriptive titles (headlines).
+  - The grouping response schema (`_grouping_response_schema`) and `validate_grouping_response` support an optional `existing_event_id` returned by the LLM.
+  - `apply_grouping_result` successfully maps the group to `existing_event_id` and merges the window articles into the existing event, updating database assignments and JSON files on disk.
+- **Reactive Post-Aggregation Deduplication**:
+  - Added suffix conflict (`_base_slug`) and title overlap (`_titles_similar`) heuristics.
+  - At the end of the aggregation pass, `deduplicate_active_events_llm` searches for candidate duplicate active events updated in the last 48 hours.
+  - Candidate event pairs are sent to a targeted LLM call (`_build_event_merge_prompt`) to decide if they represent the exact same news event.
+  - If verified, `merge_events` executes the merge in SQLite (`StateDB.merge_events_into`) and on disk (deletes loser, updates winner JSON article list, and re-runs `upsert_event`).
+- **Tests Added**:
+  - `tests/test_aggregate.py::test_group_articles_with_gemini_with_active_events` - verifies active events are included in prompt and parsed in grouping JSON.
+  - `tests/test_aggregate.py::test_deduplicate_active_events_llm` - verifies post-aggregation pairing, LLM comparison, database merge, and JSON rewrite.
+- **Verified in this pass**:
+  - `./.venv/bin/python -m pytest` -> **170 passed** (all green).
+  - `./.venv/bin/ruff check .` -> clean.
+
 ### State on May 25, 2026 (Digest Prompt + Cap Rework — article-digest-v3)
 
 - **Scope of this pass:** Quality evaluation of v2 digests across a stratified sample (39 articles spanning all 11 categories with high/med/low/verylow impact bands plus 6 edge cases), followed by a targeted rewrite of the digest prompt and the impact-cap system. Five sub-agent reviewers each evaluated a batch in parallel; findings were consolidated into a single set of concrete changes and applied.

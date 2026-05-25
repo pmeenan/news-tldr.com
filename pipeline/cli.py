@@ -49,6 +49,8 @@ def clean_data(
     db_path: Path = DB_PATH,
     article_dir: Path = ARTICLE_DIR,
     fetch_log_dir: Path = FETCH_LOG_DIR,
+    event_dir: Path | None = None,
+    published_dir: Path | None = None,
     lock_path: Path = LOCK_PATH,
     data_dir: Path = DATA_DIR,
 ) -> list[str]:
@@ -57,12 +59,17 @@ def clean_data(
     if lock_path.exists() and not ignore_lock:
         raise RuntimeError(f"pipeline lock exists at {lock_path}; refusing to clean while a run may be active")
 
+    event_dir = event_dir or (data_dir / "events")
+    published_dir = published_dir or (data_dir / "published")
+
     targets = [
         db_path,
         Path(f"{db_path}-wal"),
         Path(f"{db_path}-shm"),
         Path(f"{db_path}-journal"),
         article_dir,
+        event_dir,
+        published_dir,
     ]
     if include_fetch_logs:
         targets.append(fetch_log_dir)
@@ -96,6 +103,11 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help="Run LLM grouping without mutating events, article assignments, or aggregation windows.",
+    )
+    aggregate_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force aggregation of all windows in range, ignoring database completed state.",
     )
     aggregate_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     digest_stage_parser = sub.add_parser("digest", help="Run the article digest stage before aggregation.")
@@ -164,6 +176,7 @@ def main() -> None:
             limit_windows=args.limit_windows,
             dry_run=args.dry_run,
             progress=progress,
+            force=args.force,
         )
         print(json.dumps(stats, indent=2, sort_keys=True))
     elif args.command == "digest":

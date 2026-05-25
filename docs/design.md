@@ -112,7 +112,7 @@ Responsibilities:
 
 The collection implementation lives in the `pipeline` Python package:
 
-- `pipeline/cli.py`: command-line entrypoint. `./.venv/bin/python -m pipeline.cli init-db` initializes the state database, `./.venv/bin/python -m pipeline.cli collect` runs collection, `./.venv/bin/python -m pipeline.cli collect --verbose` streams incremental progress to stderr while preserving final JSON stats on stdout, and `./.venv/bin/python -m pipeline.cli clean-data --yes` removes local generated collection state for a fresh run.
+- `pipeline/cli.py`: command-line entrypoint. `./.venv/bin/python -m pipeline.cli init-db` initializes the state database, `./.venv/bin/python -m pipeline.cli collect` runs collection, `./.venv/bin/python -m pipeline.cli collect --verbose` streams incremental progress to stderr while preserving final JSON stats on stdout, and `./.venv/bin/python -m pipeline.cli clean-data --yes` removes local generated pipeline state for a fresh run.
 - `pipeline/state.py`: SQLite schema and migration entrypoint. The schema includes feeds, feed conditional request state, articles, article fingerprints, events, pipeline runs, item errors, and LLM usage.
 - `pipeline/lock.py`: atomic lock file acquisition/release with PID and Linux process start-time verification, plus stale-lock recovery based on the configured watchdog timeout.
 - `pipeline/http_client.py`: async HTTP client with browser-like desktop Chrome request headers, per-domain rate limiting, robots.txt and crawl-delay enforcement, retry/backoff handling, and manual redirect validation.
@@ -127,7 +127,7 @@ The HTTP client sends a desktop Windows Chrome user-agent plus common browser na
 ### HTTP Client Policy
 
 - **User-Agent**: Use a current desktop Windows Chrome UA string. Update the UA string periodically (at least monthly) to track current Chrome stable releases. Illustrative example (the exact version tracked in `pipeline/http_client.py` may be newer): `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36`.
-- **Rate limiting**: Enforce a per-domain delay between requests (default: 2 seconds). Track last-request-time per domain in memory during a pipeline run.
+- **Rate limiting**: Enforce a per-domain delay between requests (default: 1 second). Track last-request-time per domain in memory during a pipeline run.
 - **Backoff**: On HTTP 429 or 5xx responses, use exponential backoff (initial 5s, max 60s, 3 retries). Retry status is emitted through the same optional verbose progress callback as collector status, keeping non-verbose stdout/stderr machine-friendly. After max retries, log the failure and move on.
 - **Robots.txt**: Respect `robots.txt` directives and `Crawl-delay` when present. Cache robots.txt per domain for the duration of a pipeline run.
 - **Timeouts**: Connection timeout 10s, read timeout 10s, and total decoded download timeout 15s. Configurable through `config/pipeline.json`.
@@ -278,7 +278,7 @@ structured output (`responseMimeType: application/json` plus a response JSON
 schema). API keys must not be written to logs, command output, JSON artifacts,
 or committed files.
 
-Aggregation runs over sliding publish-time windows. The default window is 6 hours with a 1-hour step, so adjacent windows overlap and boundary-adjacent articles can still be grouped. The digest stage should run before aggregation; aggregation then filters non-news/spammy/video-carousel artifacts and articles whose digest category/vertical impact score is below the configured threshold. The state database records completed aggregation windows; normal pipeline runs skip windows already completed, while allowing the latest completed window from the previous run to be rerun so the overlap can absorb late-arriving articles. For each sliding window, we load all eligible articles published within those hours (both assigned and unassigned) and send their metadata (headline + digest summary/key facts when available, otherwise collected summary + source + publish date) to the LLM to:
+Aggregation runs over fixed UTC publish-time chunks with a short overlap lookahead. The default aggregation chunk is 3 hours with an additional 1-hour overlap, so actual LLM windows are 4 hours wide and anchored to UTC boundaries (`00:00-04:00`, `03:00-07:00`, `06:00-10:00`, `09:00-13:00`, `12:00-16:00`, `15:00-19:00`, `18:00-22:00`, `21:00-01:00`). Hourly cron runs keep returning to those same fixed windows rather than shifting the window start based on the current hour or first unassigned article. This lets boundary-adjacent articles be grouped without rerunning nearly the same 3-hour context every hour. The digest stage should run before aggregation; aggregation then filters non-news/spammy/video-carousel artifacts and articles whose digest category/vertical impact score is below the configured threshold. The state database records completed aggregation windows; normal pipeline runs skip windows already completed, while allowing the latest completed window from the previous run to be rerun so the overlap can absorb late-arriving articles. For each aggregation window, we load all eligible articles published within those hours (both assigned and unassigned) and send their metadata (headline + digest summary/key facts when available, otherwise collected summary + source + publish date) to the LLM to:
 
 1. Classify each article's content type and category.
 2. Group articles into story clusters (matching and referencing existing event IDs where applicable) by identifying multiple outlets and angles reporting on the same developing news subject.
@@ -287,7 +287,28 @@ Aggregation runs over sliding publish-time windows. The default window is 6 hour
 
 Prompt shape is part of the contract. The first aggregation pass should avoid free-text fields and ask for compact, order-preserving structured output using numeric enum codes rather than copied article IDs. Deterministic code maps each output row back to the input article by position. This reduces malformed JSON, repeated text inside string fields, and ID-copying errors. Event naming, keyword/entity generation, and slug suggestions should happen in a second smaller call after candidate event assignments are known.
 
-The sliding window approach balances context window limits, cost, latency, and retry blast radius. The hosted Gemini path supports much larger contexts than the local Ollama evaluation, but the implementation still manages sizing via the sliding window duration.
+#### Category Group Partitioning
+
+To solve LLM laziness and incorrect grouping when a single window contains a large volume of articles (which can exceed 100+ articles in high-traffic windows), the window articles and active events are partitioned into related **Category Groups** before invoking the grouping LLM. Oversized groups are split into bounded batches of at most 50 articles before prompting, preventing attention breakdown and hallucinations.
+
+The predefined category groups are:
+- `politics_gov`: `politics`
+- `news_business`: `us`, `world`, `business`
+- `sci_tech`: `technology`, `science`, `health`, `environment`
+- `leisure`: `sports`, `entertainment`, `automotive`
+
+For each window chunk:
+1. Load all eligible window articles.
+2. Group the articles by their default categories into the four Category Groups. The high-volume `news_business` group is split first by `us`, `world`, and `business`, then any oversized bucket is chunked to the configured batch maximum.
+3. For each non-empty Category Group batch, fetch active events matching the batch categories. The matching set intentionally bridges `politics` with `us` and `world` so civic/political stories from general-news feeds can still attach to political events without combining all those articles into one large grouping batch.
+4. Run active event filtering, Gemini story grouping, newsworthiness scoring, and grouping result application separately for the batch.
+5. Accumulate token usage, execution times, and counts across all processed Category Group batches to finalize the window's run metrics.
+
+After the grouping response validates, deterministic code also splits weakly connected headline groups into smaller components. Components only inherit an `existing_event_id` when they have enough headline overlap with that active event title (or already contain an article assigned to that event), which prevents broad-keyword clusters from attaching unrelated articles to an existing event.
+
+Post-aggregation deduplication checks candidate event pairs using suffix/title similarity and highly similar article headlines. The article-headline path catches duplicate clusters split across categories even when the event titles differ.
+
+The chunk-plus-overlap approach balances context window limits, cost, latency, and retry blast radius. The hosted Gemini path supports much larger contexts than the local Ollama evaluation, but smaller chunks keep batches under the LLM attention-breakdown threshold and isolate failure blast radius to a single chunk plus overlap.
 Matching uses only the headline and a digest/brief paragraph summary, plus compact key facts when available, to keep grouping payloads small and avoid processing full article text inside the grouping call. Full article text stays on disk for digest generation and later editorial passes.
 
 Deterministic code validates all LLM outputs: checks category IDs against `config/categories.json`, enforces event ID uniqueness, and rejects malformed suggestions.
@@ -302,7 +323,7 @@ Scores are normalized from `0.0` to `1.0`, validated by deterministic code, stor
 
 ### Stage 2 Implementation
 
-The initial aggregation implementation lives in `pipeline/aggregate.py` and is exposed by `./.venv/bin/python -m pipeline.cli aggregate`. It plans sliding 6-hour windows with 1-hour steps, skips completed windows using `aggregation_windows`, loads category-impact-eligible articles in each window so overlap runs can attach new articles to existing event assignments, calls Gemini with headline + digest/summary metadata, validates that every article index appears exactly once, scores resulting groups for newsworthiness from digest impact or fallback scoring, writes `data/events/<event_id>.json`, upserts the `events` table, assigns `articles.event_id`, and records completed windows. The command supports `--range-start`, `--range-end`, `--limit-windows`, `--dry-run`, and `--verbose`. By default, if no range is specified, aggregation window planning starts from the earliest unassigned article published within the current and previous UTC days (starting at 00:00:00 UTC of yesterday) up to the latest published article. If no unassigned articles exist within this window, the run completes early without planning windows.
+The initial aggregation implementation lives in `pipeline/aggregate.py` and is exposed by `./.venv/bin/python -m pipeline.cli aggregate`. It plans 3-hour aggregation chunks with a 1-hour overlap lookahead (4-hour LLM windows fixed to `00/03/06/09/12/15/18/21` UTC starts), skips completed windows using `aggregation_windows`, loads category-impact-eligible articles in each window so overlap runs can attach new articles to existing event assignments, calls Gemini with headline + digest/summary metadata in category-bounded batches, validates that every article index appears exactly once, scores resulting groups for newsworthiness from digest impact or fallback scoring, writes `data/events/<event_id>.json`, upserts the `events` table, assigns `articles.event_id`, and records completed windows. The command supports `--range-start`, `--range-end`, `--limit-windows`, `--dry-run`, `--force`, and `--verbose`. By default, if no range is specified, aggregation window planning starts from the fixed UTC 3-hour boundary at or before the earliest unassigned article published within the current and previous UTC days (starting at 00:00:00 UTC of yesterday) up through the fixed boundary after the latest unassigned article. If no unassigned articles exist within this window, the run completes early without planning windows.
 
 Event naming in this first pass is deterministic and intentionally simple: existing event IDs are reused when a group contains already-assigned articles; otherwise code derives a stable date + headline slug and stores lightweight keyword metadata. Richer title/slug/entity generation remains a follow-up LLM pass.
 
@@ -312,7 +333,12 @@ Prompt version `article-digest-v6` includes URL, canonical URL, and estimated-pu
 
 #### Event Merging and Reassignment
 
-When a new window groups articles that span multiple already-existing events (for example, grouping articles currently assigned to `event-A` and `event-B` into a single cluster), one winning event ID is chosen (preserving existing event IDs when available). To prevent historical article data loss, the aggregator loads all historical article IDs belonging to the merged-away events from their event JSON files, merges the article lists, updates the winning event's JSON and SQLite database assignments, deletes the merged-away events' JSON files, and removes their SQLite database entries.
+To handle stories that develop over longer periods and span across different 3-hour windows, the system implements a two-layered event merging strategy:
+
+1. **Proactive Active-Events Matching**: During the window aggregation pass, the aggregator queries the SQLite database for events updated within the last 48 hours matching the categories of the window articles. These active events are filtered to only include those whose title shares at least 2 non-stopword words with at least one article's headline in the current window (or shares the single non-stopword if the event title only has one). This prevents context bloat and false-positive groupings in the LLM. The matched active events are passed to the grouping LLM call (containing their IDs, categories, and titles/headlines). The LLM is instructed to assign window articles directly to these existing events where appropriate, returning their `existing_event_id` in the JSON groups response. The validator accepts only event IDs that were actually included in that prompt.
+2. **Reactive Post-Aggregation Deduplication**: At the end of the aggregation pass, a reactive deduplication process runs over all active events updated in the last 48 hours. It checks for candidate event pairs using suffix conflicts (e.g. `event-name` vs `event-name-2` date-slug collisions), title word overlaps, and highly similar article headlines. For each candidate pair, a targeted LLM call evaluates their full article lists, headlines, and digests to decide if they represent the exact same real-world event. A merge requires both `should_merge=true` and confidence of at least `0.80`.
+
+When a merge is triggered (either proactively via the window LLM or reactively via post-aggregation deduplication), the aggregator selects a winning event ID, loads historical article IDs from both events, merges their article lists, updates the winning event's JSON and database assignments, deletes the merged-away events' JSON files, and removes their SQLite database entries to prevent historical data loss.
 
 Model evaluation notes:
 
@@ -527,7 +553,7 @@ The presentation build runs after each pipeline run. It reads the current state 
 
 Pipeline commands that can run long enough to feel idle in an interactive shell must support `--verbose`. Verbose progress/status is written to stderr, while final machine-readable output remains on stdout. The collection command currently implements this contract with `./.venv/bin/python -m pipeline.cli collect --verbose`.
 
-The `clean-data` command removes local generated collection state for a fresh run: the SQLite database and sidecars, staged article files, and fetch logs by default. It requires `--yes`, refuses to run while `data/state/pipeline.lock` exists, and can keep fetch logs with `--keep-fetch-log` or override the lock guard with `--ignore-lock`.
+The `clean-data` command removes local generated pipeline state for a fresh run: the SQLite database and sidecars, staged article files, event JSON, published JSON, and fetch logs by default. It requires `--yes`, refuses to run while `data/state/pipeline.lock` exists, and can keep fetch logs with `--keep-fetch-log` or override the lock guard with `--ignore-lock`.
 
 ### Concurrency Control
 
@@ -639,7 +665,7 @@ The abstraction should support swapping backends without changing pipeline logic
 
 ### Cost Awareness
 
-- Aggregation uses sliding window calls with short summaries (headline + lead) to minimize token usage.
+- Aggregation uses fixed chunk-plus-overlap window calls with short summaries (headline + lead) to minimize token usage.
 - Editorial uses **per-event** calls with full article text where quality matters most.
 - Track token usage per run in the pipeline state database for monitoring.
 - Support dry-run mode that processes everything except LLM calls (useful for testing collection and aggregation logic).

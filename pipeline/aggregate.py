@@ -21,6 +21,94 @@ AGGREGATION_PROMPT_VERSION = "aggregation-v6"
 AGGREGATION_EXPERIMENT_PROMPT_VERSION = "aggregation-experiment-v6"
 NEWSWORTHINESS_PROMPT_VERSION = "newsworthiness-v1"
 GROUPING_MODES = ("titles", "titles_summaries")
+DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD = 0.8
+MAX_CATEGORY_GROUP_ARTICLES = 50
+NULL_EXISTING_EVENT_ID_VALUES = {"null", "none", "nil", "n/a", "na", "unknown"}
+CATEGORY_GROUPS = [
+    {"name": "politics_gov", "categories": ["politics"]},
+    {"name": "news_business", "categories": ["us", "world", "business"]},
+    {"name": "sci_tech", "categories": ["technology", "science", "health", "environment"]},
+    {"name": "leisure", "categories": ["sports", "entertainment", "automotive"]},
+]
+CATEGORY_COMPATIBILITY_BRIDGES = (
+    frozenset({"politics", "us"}),
+    frozenset({"politics", "world"}),
+)
+
+
+def _in_same_category_group(cat1: str, cat2: str) -> bool:
+    for group in CATEGORY_GROUPS:
+        if cat1 in group["categories"] and cat2 in group["categories"]:
+            return True
+    return any(cat1 in bridge and cat2 in bridge for bridge in CATEGORY_COMPATIBILITY_BRIDGES)
+
+
+def _candidate_categories_for_group(categories: Sequence[str]) -> set[str]:
+    compatible = set(categories)
+    for category in categories:
+        for bridge in CATEGORY_COMPATIBILITY_BRIDGES:
+            if category in bridge:
+                compatible.update(bridge)
+    return compatible
+
+
+def _category_group_for_category(category: str) -> dict[str, Any]:
+    for group in CATEGORY_GROUPS:
+        if category in group["categories"]:
+            return group
+    return CATEGORY_GROUPS[1]
+
+
+def _category_batches_for_articles(
+    articles: Sequence[ArticleForAggregation],
+    feeds_by_source: dict[str, Any],
+    *,
+    max_articles: int = MAX_CATEGORY_GROUP_ARTICLES,
+) -> list[dict[str, Any]]:
+    if max_articles <= 0:
+        raise ValueError("max_articles must be positive")
+
+    article_categories = [
+        (article, _category_for_articles([article], feeds_by_source)) for article in articles
+    ]
+    bucket_order: list[str] = []
+    buckets: dict[str, dict[str, Any]] = {}
+
+    def add_to_bucket(name: str, categories: Sequence[str], article: ArticleForAggregation) -> None:
+        if name not in buckets:
+            bucket_order.append(name)
+            buckets[name] = {"name": name, "categories": list(categories), "articles": []}
+        buckets[name]["articles"].append(article)
+
+    for group in CATEGORY_GROUPS:
+        for article, category in article_categories:
+            if _category_group_for_category(category)["name"] != group["name"]:
+                continue
+            if group["name"] == "news_business" and category in group["categories"]:
+                add_to_bucket(f"news_business_{category}", [category], article)
+            else:
+                add_to_bucket(group["name"], group["categories"], article)
+
+    batches: list[dict[str, Any]] = []
+    for bucket_name in bucket_order:
+        bucket = buckets[bucket_name]
+        bucket_articles = bucket["articles"]
+        chunks = [
+            bucket_articles[index : index + max_articles]
+            for index in range(0, len(bucket_articles), max_articles)
+        ]
+        for chunk_index, chunk in enumerate(chunks, start=1):
+            batch_name = bucket_name
+            if len(chunks) > 1:
+                batch_name = f"{bucket_name}-{chunk_index}"
+            batches.append({
+                "name": batch_name,
+                "categories": bucket["categories"],
+                "articles": chunk,
+            })
+    return batches
+
+
 AGGREGATION_EXCLUDED_RATIONALE_CODES = {
     "advertorial",
     "affiliate_content",
@@ -289,14 +377,20 @@ def plan_sliding_windows(
     range_start: str,
     range_end: str,
     window_hours: int = 6,
-    step_hours: int = 1,
+    step_hours: int | None = None,
+    overlap_hours: int = 1,
     db: StateDB | None = None,
     rerun_latest_completed: bool = True,
+    force: bool = False,
 ) -> list[AggregationWindow]:
     if window_hours <= 0:
         raise ValueError("window_hours must be positive")
+    if step_hours is None:
+        step_hours = window_hours
     if step_hours <= 0:
         raise ValueError("step_hours must be positive")
+    if overlap_hours < 0:
+        raise ValueError("overlap_hours cannot be negative")
     start_dt = _parse_iso_timestamp(range_start)
     end_dt = _parse_iso_timestamp(range_end)
     if end_dt <= start_dt:
@@ -308,6 +402,8 @@ def plan_sliding_windows(
         latest_completed = state.latest_completed_aggregation_window() if rerun_latest_completed else None
 
         def should_skip_window(window: AggregationWindow) -> bool:
+            if force:
+                return False
             status = state.aggregation_window_status(window.window_start, window.window_end)
             if status != "completed":
                 return False
@@ -317,32 +413,17 @@ def plan_sliding_windows(
 
         windows: list[AggregationWindow] = []
         current = start_dt
-        window_delta = timedelta(hours=window_hours)
+        window_delta = timedelta(hours=window_hours + overlap_hours)
         step_delta = timedelta(hours=step_hours)
-        last_full_end_dt: datetime | None = None
-        while current + window_delta <= end_dt:
+        while current < end_dt:
             window_end_dt = current + window_delta
             window = AggregationWindow(
                 window_start=_format_iso_timestamp(current),
                 window_end=_format_iso_timestamp(window_end_dt),
             )
-            last_full_end_dt = window_end_dt
             current += step_delta
             if not should_skip_window(window):
                 windows.append(window)
-
-        if last_full_end_dt is None or last_full_end_dt < end_dt:
-            tail_start_dt = max(start_dt, end_dt - window_delta)
-            tail_window = AggregationWindow(
-                window_start=_format_iso_timestamp(tail_start_dt),
-                window_end=_format_iso_timestamp(end_dt),
-            )
-            already_present = any(
-                w.window_start == tail_window.window_start and w.window_end == tail_window.window_end for w in windows
-            )
-            if not already_present:
-                if not should_skip_window(tail_window):
-                    windows.append(tail_window)
 
         return windows
     finally:
@@ -358,12 +439,14 @@ def aggregate_once(
     dry_run: bool = False,
     client: JsonGenerator | None = None,
     progress: Callable[[str], None] | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     if (range_start is None) != (range_end is None):
         raise ValueError("range_start and range_end must be provided together or both omitted")
     config = load_pipeline_config()
     window_hours = int(config.aggregation.get("window_hours", 6))
-    step_hours = int(config.aggregation.get("window_step_hours", 1))
+    step_hours = int(config.aggregation.get("window_step_hours", window_hours))
+    overlap_hours = int(config.aggregation.get("window_overlap_hours", 1))
     min_category_impact = float(config.aggregation.get("min_category_impact", 0.25))
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"aggregation-{uuid.uuid4().hex}"
@@ -373,6 +456,7 @@ def aggregate_once(
         "windows_planned": 0,
         "windows_processed": 0,
         "windows_failed": 0,
+        "windows_partial_failed": 0,
         "articles_seen": 0,
         "groups_seen": 0,
         "events_created": 0,
@@ -381,7 +465,11 @@ def aggregate_once(
         "newsworthiness_scored": 0,
         "newsworthiness_fallbacks": 0,
         "min_category_impact": min_category_impact,
+        "window_hours": window_hours,
+        "window_overlap_hours": overlap_hours,
+        "window_step_hours": step_hours,
         "dry_run": dry_run,
+        "force": force,
     }
     try:
         with PipelineLock(LOCK_PATH, lock_timeout, run_id=run_id):
@@ -419,15 +507,19 @@ def aggregate_once(
                     if bounds_start < limit_dt:
                         bounds_start = limit_dt
 
-                    range_start = _format_iso_timestamp(_floor_hour(bounds_start))
-                    range_end = _format_iso_timestamp(_ceil_hour(bounds_end) + timedelta(hours=window_hours))
+                    range_start = _format_iso_timestamp(_floor_utc_interval(bounds_start, step_hours))
+                    range_end = _format_iso_timestamp(
+                        _floor_utc_interval(bounds_end, step_hours) + timedelta(hours=step_hours)
+                    )
 
                 windows = plan_sliding_windows(
                     range_start=range_start,
                     range_end=range_end,
                     window_hours=window_hours,
                     step_hours=step_hours,
+                    overlap_hours=overlap_hours,
                     db=state,
+                    force=force,
                 )
                 if limit_windows is not None:
                     windows = windows[:limit_windows]
@@ -466,112 +558,296 @@ def aggregate_once(
                             stats["windows_processed"] += 1
                             continue
 
-                        result = group_articles_with_gemini(articles, mode="titles_summaries", client=generator)
-                        if not dry_run and result.get("usage"):
-                            state.record_llm_usage(
-                                run_id=run_id,
-                                stage="aggregation",
-                                model=generator.model,
-                                prompt_version=AGGREGATION_PROMPT_VERSION,
-                                input_tokens=result["usage"].get("promptTokenCount"),
-                                output_tokens=result["usage"].get("candidatesTokenCount"),
-                            )
+                        total_articles_in_window = len(articles)
+                        category_batches = _category_batches_for_articles(articles, feeds_by_source)
 
-                        stats["articles_seen"] += len(articles)
-                        stats["groups_seen"] += result["group_count"]
-                        window_stats = {
-                            "article_count": len(articles),
-                            "group_count": result["group_count"],
-                            "singleton_count": result["singleton_count"],
-                            "multi_article_group_count": result["multi_article_group_count"],
-                            "validation_attempts": result["validation_attempts"],
-                            "elapsed_ms": result["elapsed_ms"],
-                            "usage": result["usage"],
-                        }
+                        # Pre-fetch active events once per window, partition by category in Python.
+                        since_dt = datetime.now(UTC) - timedelta(hours=48)
+                        since = since_dt.isoformat().replace("+00:00", "Z")
+                        all_active_rows = state.conn.execute(
+                            """
+                            SELECT event_id, title, category, updated_at
+                            FROM events
+                            WHERE status = 'active'
+                              AND updated_at >= ?
+                            ORDER BY updated_at DESC
+                            """,
+                            (since,),
+                        ).fetchall()
+                        active_rows_by_category: dict[str, list[dict[str, Any]]] = {}
+                        for row in all_active_rows:
+                            active_rows_by_category.setdefault(row["category"], []).append(dict(row))
 
-                        groups_to_score = []
-                        scores_by_group_index = {}
-                        for group in result["groups"]:
-                            group_articles = [articles[idx] for idx in group["article_indexes"]]
-                            event_id = _event_id_for_group(group_articles)
-                            reused_score = None
-                            if event_id:
-                                event_path = EVENT_DIR / f"{event_id}.json"
-                                existing = _read_event(event_path)
-                                if existing and existing.get("newsworthiness"):
-                                    existing_ids = set(existing.get("article_ids", []))
-                                    current_ids = set(art.article_id for art in group_articles)
-                                    if existing_ids == current_ids:
-                                        reused_score = existing["newsworthiness"]
-                            if reused_score:
-                                scores_by_group_index[int(group["group_index"])] = reused_score
-                            else:
-                                groups_to_score.append(group)
+                        window_group_count = 0
+                        window_singleton_count = 0
+                        window_multi_article_group_count = 0
+                        window_validation_attempts = 0
+                        window_elapsed_ms = 0
+                        window_prompt_tokens = 0
+                        window_candidates_tokens = 0
 
-                        if groups_to_score:
-                            scores_result = score_groups_newsworthiness(
-                                articles=articles,
-                                groups=groups_to_score,
-                                client=generator,
-                                feeds_by_source=feeds_by_source,
-                            )
-                            if not dry_run and scores_result.get("usage"):
-                                state.record_llm_usage(
+                        window_news_scored = 0
+                        window_news_fallback_count = 0
+                        window_news_elapsed_ms = 0
+                        window_news_prompt_tokens = 0
+                        window_news_candidates_tokens = 0
+
+                        window_events_created = 0
+                        window_events_updated = 0
+                        window_article_assignments = 0
+
+                        group_errors: list[dict[str, Any]] = []
+                        non_empty_group_count = len(category_batches)
+                        processed_articles_count = 0
+
+                        for batch in category_batches:
+                            group_articles = batch["articles"]
+
+                            try:
+                                # Tightened candidate filter: an active event is a candidate only if
+                                # its title shares at least 2 non-stopword words with at least one
+                                # individual article headline (or shares the single word if the event
+                                # title only has one). This avoids the union-of-all-words false-positive
+                                # mode that pulled ~all active events into the prompt on large windows.
+                                article_word_sets = [
+                                    set(re.findall(r"[A-Za-z0-9]+", art.headline.lower()))
+                                    - _KEYWORD_STOPWORDS
+                                    for art in group_articles
+                                ]
+                                candidates: list[dict[str, Any]] = []
+                                for cat in _candidate_categories_for_group(batch["categories"]):
+                                    for ev in active_rows_by_category.get(cat, []):
+                                        title_words = (
+                                            set(re.findall(r"[A-Za-z0-9]+", ev["title"].lower()))
+                                            - _KEYWORD_STOPWORDS
+                                        )
+                                        if not title_words:
+                                            continue
+                                        required = 1 if len(title_words) == 1 else 2
+                                        if any(
+                                            len(title_words & art_words) >= required
+                                            for art_words in article_word_sets
+                                        ):
+                                            candidates.append(ev)
+
+                                active_events = filter_active_events_with_llm(
+                                    articles=group_articles,
+                                    active_events=candidates,
+                                    client=generator,
                                     run_id=run_id,
-                                    stage="newsworthiness",
-                                    model=generator.model,
-                                    prompt_version=NEWSWORTHINESS_PROMPT_VERSION,
-                                    input_tokens=scores_result["usage"].get("promptTokenCount"),
-                                    output_tokens=scores_result["usage"].get("candidatesTokenCount"),
+                                    state=state if not dry_run else None,
                                 )
-                            api_scores = scores_result["scores_by_group_index"]
-                            fallback_count = scores_result["fallback_count"]
-                            elapsed_ms = scores_result.get("elapsed_ms")
-                            usage = scores_result.get("usage", {})
-                        else:
-                            api_scores = {}
-                            fallback_count = 0
-                            elapsed_ms = 0
-                            usage = {}
 
-                        merged_scores = {**scores_by_group_index, **api_scores}
-                        stats["newsworthiness_scored"] += len(merged_scores)
-                        stats["newsworthiness_fallbacks"] += fallback_count
-                        window_stats["newsworthiness"] = {
-                            "scored": len(merged_scores),
-                            "fallback_count": fallback_count,
-                            "elapsed_ms": elapsed_ms,
-                            "usage": usage,
+                                result = group_articles_with_gemini(
+                                    group_articles,
+                                    mode="titles_summaries",
+                                    client=generator,
+                                    active_events=active_events,
+                                )
+                                if not dry_run and result.get("usage"):
+                                    state.record_llm_usage(
+                                        run_id=run_id,
+                                        stage="aggregation",
+                                        model=generator.model,
+                                        prompt_version=AGGREGATION_PROMPT_VERSION,
+                                        input_tokens=result["usage"].get("promptTokenCount"),
+                                        output_tokens=result["usage"].get("candidatesTokenCount"),
+                                    )
+                                    if result["usage"].get("promptTokenCount"):
+                                        window_prompt_tokens += result["usage"]["promptTokenCount"]
+                                    if result["usage"].get("candidatesTokenCount"):
+                                        window_candidates_tokens += result["usage"]["candidatesTokenCount"]
+
+                                window_group_count += result["group_count"]
+                                window_singleton_count += result["singleton_count"]
+                                window_multi_article_group_count += result["multi_article_group_count"]
+                                window_validation_attempts += result["validation_attempts"]
+                                val_elapsed = result.get("elapsed_ms")
+                                if val_elapsed is not None:
+                                    window_elapsed_ms += val_elapsed
+
+                                groups_to_score = []
+                                scores_by_group_index: dict[int, dict[str, Any]] = {}
+                                for group in result["groups"]:
+                                    grp_arts = [group_articles[idx] for idx in group["article_indexes"]]
+                                    event_id = _event_id_for_group(grp_arts)
+                                    reused_score = None
+                                    if event_id:
+                                        event_path = EVENT_DIR / f"{event_id}.json"
+                                        existing = _read_event(event_path)
+                                        if existing and existing.get("newsworthiness"):
+                                            existing_ids = set(existing.get("article_ids", []))
+                                            current_ids = set(art.article_id for art in grp_arts)
+                                            if existing_ids == current_ids:
+                                                reused_score = existing["newsworthiness"]
+                                    if reused_score:
+                                        scores_by_group_index[int(group["group_index"])] = reused_score
+                                    else:
+                                        groups_to_score.append(group)
+
+                                if groups_to_score:
+                                    scores_result = score_groups_newsworthiness(
+                                        articles=group_articles,
+                                        groups=groups_to_score,
+                                        client=generator,
+                                        feeds_by_source=feeds_by_source,
+                                    )
+                                    if not dry_run and scores_result.get("usage"):
+                                        state.record_llm_usage(
+                                            run_id=run_id,
+                                            stage="newsworthiness",
+                                            model=generator.model,
+                                            prompt_version=NEWSWORTHINESS_PROMPT_VERSION,
+                                            input_tokens=scores_result["usage"].get("promptTokenCount"),
+                                            output_tokens=scores_result["usage"].get("candidatesTokenCount"),
+                                        )
+                                        p_tokens = scores_result["usage"].get("promptTokenCount")
+                                        if p_tokens:
+                                            window_news_prompt_tokens += p_tokens
+                                        c_tokens = scores_result["usage"].get("candidatesTokenCount")
+                                        if c_tokens:
+                                            window_news_candidates_tokens += c_tokens
+                                    api_scores = scores_result["scores_by_group_index"]
+                                    fallback_count = scores_result["fallback_count"]
+                                    elapsed_ms = scores_result.get("elapsed_ms")
+                                else:
+                                    api_scores = {}
+                                    fallback_count = 0
+                                    elapsed_ms = 0
+
+                                merged_scores = {**scores_by_group_index, **api_scores}
+                                window_news_scored += len(merged_scores)
+                                window_news_fallback_count += fallback_count
+                                if elapsed_ms is not None:
+                                    window_news_elapsed_ms += elapsed_ms
+
+                                if not dry_run:
+                                    applied = apply_grouping_result(
+                                        articles=group_articles,
+                                        groups=result["groups"],
+                                        state=state,
+                                        scores_by_group_index=merged_scores,
+                                        article_classifications=result.get("article_classifications"),
+                                        feeds_by_source=feeds_by_source,
+                                        run_id=run_id,
+                                        progress=progress,
+                                    )
+                                    window_events_created += applied["events_created"]
+                                    window_events_updated += applied["events_updated"]
+                                    window_article_assignments += applied["article_assignments"]
+
+                                processed_articles_count += len(group_articles)
+                            except Exception as group_exc:
+                                group_errors.append({
+                                    "category_group": batch["name"],
+                                    "article_count": len(group_articles),
+                                    "error": str(group_exc),
+                                })
+                                if progress:
+                                    progress(
+                                        f"aggregate: window {window.window_start} group "
+                                        f"{batch['name']} ({len(group_articles)} articles) failed: {group_exc}"
+                                    )
+                                if not dry_run:
+                                    try:
+                                        state.record_error(
+                                            run_id,
+                                            "aggregation",
+                                            "category_group",
+                                            f"{window.window_start}_{window.window_end}_{batch['name']}",
+                                            None,
+                                            group_exc,
+                                        )
+                                    except Exception:
+                                        pass
+
+                        stats["articles_seen"] += processed_articles_count
+                        stats["groups_seen"] += window_group_count
+                        stats["newsworthiness_scored"] += window_news_scored
+                        stats["newsworthiness_fallbacks"] += window_news_fallback_count
+
+                        all_groups_failed = (
+                            non_empty_group_count > 0 and len(group_errors) >= non_empty_group_count
+                        )
+
+                        window_stats = {
+                            "article_count": total_articles_in_window,
+                            "processed_article_count": processed_articles_count,
+                            "category_batch_count": non_empty_group_count,
+                            "group_count": window_group_count,
+                            "singleton_count": window_singleton_count,
+                            "multi_article_group_count": window_multi_article_group_count,
+                            "validation_attempts": window_validation_attempts,
+                            "elapsed_ms": window_elapsed_ms if window_elapsed_ms > 0 else None,
+                            "usage": {
+                                "promptTokenCount": window_prompt_tokens,
+                                "candidatesTokenCount": window_candidates_tokens,
+                            },
+                            "newsworthiness": {
+                                "scored": window_news_scored,
+                                "fallback_count": window_news_fallback_count,
+                                "elapsed_ms": window_news_elapsed_ms if window_news_elapsed_ms > 0 else None,
+                                "usage": {
+                                    "promptTokenCount": window_news_prompt_tokens,
+                                    "candidatesTokenCount": window_news_candidates_tokens,
+                                },
+                            },
                         }
+                        if group_errors:
+                            window_stats["group_errors"] = group_errors
 
                         if not dry_run:
-                            applied = apply_grouping_result(
-                                articles=articles,
-                                groups=result["groups"],
-                                state=state,
-                                scores_by_group_index=merged_scores,
-                                article_classifications=result.get("article_classifications"),
-                                feeds_by_source=feeds_by_source,
-                                run_id=run_id,
-                                progress=progress,
-                            )
-                            for key in ("events_created", "events_updated", "article_assignments"):
-                                stats[key] += applied[key]
-                            window_stats.update(applied)
+                            stats["events_created"] += window_events_created
+                            stats["events_updated"] += window_events_updated
+                            stats["article_assignments"] += window_article_assignments
+                            window_stats.update({
+                                "events_created": window_events_created,
+                                "events_updated": window_events_updated,
+                                "article_assignments": window_article_assignments,
+                            })
+                            # Mark the window failed only if every non-empty category group failed.
+                            # Partial failures use "partial_failure" so the window is rerun next pass
+                            # (idempotent: already-assigned groups are no-ops).
+                            if all_groups_failed:
+                                final_status = "failed"
+                            elif group_errors:
+                                final_status = "partial_failure"
+                            else:
+                                final_status = "completed"
                             state.finish_aggregation_window(
                                 window_start=window.window_start,
                                 window_end=window.window_end,
-                                status="completed",
-                                article_count=len(articles),
+                                status=final_status,
+                                article_count=processed_articles_count,
                                 stats=window_stats,
                             )
-                        stats["windows_processed"] += 1
+
+                        if all_groups_failed:
+                            stats["windows_failed"] += 1
+                        else:
+                            stats["windows_processed"] += 1
+                            if group_errors:
+                                stats["windows_partial_failed"] += 1
+
                         if progress:
-                            progress(
-                                "aggregate: "
-                                f"{window.window_start} grouped {len(articles)} articles "
-                                f"into {result['group_count']} groups"
-                            )
+                            if group_errors and not all_groups_failed:
+                                progress(
+                                    "aggregate: "
+                                    f"{window.window_start} grouped {processed_articles_count}/"
+                                    f"{total_articles_in_window} articles into {window_group_count} groups "
+                                    f"({len(group_errors)} category group(s) failed)"
+                                )
+                            elif all_groups_failed:
+                                progress(
+                                    f"aggregate: window {window.window_start} to "
+                                    f"{window.window_end} failed: all category groups failed"
+                                )
+                            else:
+                                progress(
+                                    "aggregate: "
+                                    f"{window.window_start} grouped {processed_articles_count} articles "
+                                    f"into {window_group_count} groups"
+                                )
                     except Exception as exc:
                         stats["windows_failed"] += 1
                         if progress:
@@ -593,8 +869,31 @@ def aggregate_once(
                                 article_count=0,
                                 stats={"error": str(exc)},
                             )
+                if not dry_run:
+                    try:
+                        deduplicate_active_events_llm(
+                            state=state,
+                            client=generator,
+                            feeds_by_source=feeds_by_source,
+                            progress=progress,
+                            run_id=run_id,
+                        )
+                    except Exception as exc:
+                        if progress:
+                            progress(f"aggregate: post-aggregation deduplication failed: {exc}")
+                        state.record_error(
+                            run_id,
+                            "aggregation",
+                            "deduplication_run",
+                            None,
+                            None,
+                            exc,
+                        )
+
                 if stats["windows_failed"]:
                     status = "failed" if stats["windows_processed"] == 0 else "partial_failure"
+                elif stats["windows_partial_failed"]:
+                    status = "partial_failure"
             except Exception:
                 status = "failed"
                 raise
@@ -659,17 +958,37 @@ def apply_grouping_result(
                 for index in group["article_indexes"]
             )
 
-        existing_event_ids = sorted(set(art.event_id for art in group_articles if art.event_id))
+        llm_event_id = _normalize_existing_event_id(group.get("existing_event_id"))
+        # A second line of defense for direct callers/tests: group_articles_with_gemini
+        # validates that LLM-supplied IDs came from the prompt's active_events list.
+        # Without this guard, a caller could still create an event with a model-chosen ID.
+        if llm_event_id and not state.event_exists(llm_event_id):
+            if progress:
+                progress(
+                    f"aggregate: ignoring hallucinated existing_event_id={llm_event_id!r} "
+                    f"(no such event in state)"
+                )
+            llm_event_id = None
+        existing_event_ids_set = set(art.event_id for art in group_articles if art.event_id)
+        if llm_event_id:
+            existing_event_ids_set.add(llm_event_id)
+        existing_event_ids = sorted(existing_event_ids_set)
 
         if not existing_event_ids:
             if is_all_opinions:
+                for article in group_articles:
+                    state.update_article_aggregation_status(
+                        article.article_id,
+                        status="filtered_standalone_opinion",
+                        reason="standalone_opinion",
+                    )
                 continue
             event_id = _generate_new_event_id(group_articles, state)
             winner_event_ids = []
             created = True
             existing = None
         else:
-            winner_id = _event_id_for_group(group_articles)
+            winner_id = _event_id_for_group(group_articles) or llm_event_id
             assert winner_id is not None
             event_id = winner_id
             winner_event_ids = [eid for eid in existing_event_ids if eid != winner_id]
@@ -809,12 +1128,23 @@ def group_articles_with_gemini(
     *,
     mode: str,
     client: JsonGenerator,
+    active_events: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     mode = _normalize_mode(mode)
     if mode not in GROUPING_MODES:
         raise ValueError(f"unsupported grouping mode: {mode}")
     valid_categories = load_categories()
-    base_prompt = _build_grouping_prompt(articles, mode=mode, valid_categories=valid_categories)
+    valid_existing_event_ids = {
+        str(event.get("event_id", "")).strip() for event in active_events if str(event.get("event_id", "")).strip()
+    }
+    active_events_by_id = {
+        str(event.get("event_id", "")).strip(): event
+        for event in active_events
+        if str(event.get("event_id", "")).strip()
+    }
+    base_prompt = _build_grouping_prompt(
+        articles, mode=mode, valid_categories=valid_categories, active_events=active_events
+    )
     last_error: ValueError | None = None
     for attempt in range(2):
         prompt = base_prompt
@@ -839,6 +1169,12 @@ def group_articles_with_gemini(
                 result.payload,
                 article_count=len(articles),
                 valid_categories=valid_categories,
+                valid_existing_event_ids=valid_existing_event_ids,
+            )
+            groups = _split_weakly_connected_groups(
+                groups,
+                articles,
+                active_events_by_id=active_events_by_id,
             )
             break
         except ValueError as exc:
@@ -858,6 +1194,7 @@ def group_articles_with_gemini(
                 "category": _category_from_classifications(group["article_indexes"], classifications),
                 "headlines": [articles[i].headline for i in group["article_indexes"]],
                 "sources": [articles[i].source_name for i in group["article_indexes"]],
+                **({"existing_event_id": group["existing_event_id"]} if "existing_event_id" in group else {}),
             }
             for index, group in enumerate(groups)
         ],
@@ -872,7 +1209,8 @@ def validate_grouping_response(
     *,
     article_count: int,
     valid_categories: list[str],
-) -> tuple[list[dict[str, list[int]]], dict[int, dict[str, Any]]]:
+    valid_existing_event_ids: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
     raw_groups = payload.get("groups")
     if not isinstance(raw_groups, list):
         raise ValueError("grouping response must contain a groups list")
@@ -913,7 +1251,7 @@ def validate_grouping_response(
         raise ValueError(f"missing classification for article indexes: {missing_idxs}")
 
     seen: set[int] = set()
-    groups: list[dict[str, list[int]]] = []
+    groups: list[dict[str, Any]] = []
     for raw_group in raw_groups:
         if not isinstance(raw_group, dict):
             raise ValueError("each group must be an object")
@@ -930,12 +1268,127 @@ def validate_grouping_response(
                 raise ValueError(f"article index appears in multiple groups: {value}")
             seen.add(value)
             cleaned.append(value)
-        groups.append({"article_indexes": sorted(cleaned)})
+
+        existing_event_id = _normalize_existing_event_id(raw_group.get("existing_event_id"))
+        group_data = {"article_indexes": sorted(cleaned)}
+        if existing_event_id:
+            if valid_existing_event_ids is not None and existing_event_id not in valid_existing_event_ids:
+                raise ValueError(f"existing_event_id was not offered in active events: {existing_event_id}")
+            group_data["existing_event_id"] = existing_event_id
+        groups.append(group_data)
 
     missing = sorted(set(range(article_count)) - seen)
     if missing:
         raise ValueError(f"grouping response omitted article indexes in groups: {missing}")
     return sorted(groups, key=lambda group: group["article_indexes"][0]), classifications
+
+
+def _normalize_existing_event_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or normalized.lower() in NULL_EXISTING_EVENT_ID_VALUES:
+        return None
+    return normalized
+
+
+def _split_weakly_connected_groups(
+    groups: Sequence[dict[str, Any]],
+    articles: Sequence[ArticleForAggregation],
+    *,
+    active_events_by_id: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    split_groups: list[dict[str, Any]] = []
+    for group in groups:
+        indexes = group["article_indexes"]
+        existing_event_id = group.get("existing_event_id")
+        if len(indexes) <= 1:
+            split_groups.append(group)
+            continue
+
+        components = _headline_cohesion_components(indexes, articles)
+        if len(components) <= 1:
+            if existing_event_id and not _component_matches_existing_event(
+                indexes,
+                articles,
+                existing_event_id,
+                active_events_by_id or {},
+            ):
+                group = {key: value for key, value in group.items() if key != "existing_event_id"}
+            split_groups.append(group)
+            continue
+
+        for component in components:
+            split_group = {"article_indexes": component}
+            if existing_event_id and _component_matches_existing_event(
+                component,
+                articles,
+                existing_event_id,
+                active_events_by_id or {},
+            ):
+                split_group["existing_event_id"] = existing_event_id
+            split_groups.append(split_group)
+    return sorted(split_groups, key=lambda group: group["article_indexes"][0])
+
+
+def _component_matches_existing_event(
+    indexes: Sequence[int],
+    articles: Sequence[ArticleForAggregation],
+    existing_event_id: str,
+    active_events_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    if any(articles[index].event_id == existing_event_id for index in indexes):
+        return True
+    event = active_events_by_id.get(existing_event_id)
+    if not event:
+        return True
+    event_words = _headline_word_set(str(event.get("title", "")))
+    if not event_words:
+        return False
+    return any(len(event_words & _headline_word_set(articles[index].headline)) >= 2 for index in indexes)
+
+
+def _headline_cohesion_components(
+    indexes: Sequence[int],
+    articles: Sequence[ArticleForAggregation],
+) -> list[list[int]]:
+    word_sets = {
+        index: _headline_word_set(articles[index].headline)
+        for index in indexes
+    }
+    neighbors = {index: set() for index in indexes}
+    for left_pos, left in enumerate(indexes):
+        for right in indexes[left_pos + 1 :]:
+            if len(word_sets[left] & word_sets[right]) >= 2:
+                neighbors[left].add(right)
+                neighbors[right].add(left)
+
+    components: list[list[int]] = []
+    visited: set[int] = set()
+    for index in indexes:
+        if index in visited:
+            continue
+        stack = [index]
+        component: list[int] = []
+        visited.add(index)
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbor in neighbors[current]:
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                stack.append(neighbor)
+        components.append(sorted(component))
+    return sorted(components, key=lambda component: component[0])
+
+
+def _headline_word_set(text: str) -> set[str]:
+    return {
+        word
+        for word in re.findall(r"[A-Za-z0-9]+", text.lower())
+        if len(word) >= 3 and word not in _KEYWORD_STOPWORDS
+    }
 
 
 def validate_newsworthiness_response(
@@ -1017,11 +1470,88 @@ def default_experiment_output_path() -> Path:
     return PROJECT_ROOT / "data" / "staging" / "aggregation-experiments" / "latest.json"
 
 
+def filter_active_events_with_llm(
+    *,
+    articles: Sequence[ArticleForAggregation],
+    active_events: Sequence[dict[str, Any]],
+    client: JsonGenerator,
+    run_id: str | None = None,
+    state: StateDB | None = None,
+) -> list[dict[str, Any]]:
+    if not articles or not active_events:
+        return []
+
+    prompt = _build_active_events_filter_prompt(articles, active_events)
+    schema = _active_events_filter_response_schema()
+
+    try:
+        result = client.generate_json(
+            system_instruction=(
+                "You are an expert news editor. Identify which active events from the list "
+                "represent the same news stories/threads as any of the current articles."
+            ),
+            prompt=prompt,
+            response_schema=schema,
+            temperature=0,
+        )
+        if state and run_id and result.usage:
+            state.record_llm_usage(
+                run_id=run_id,
+                stage="active_events_filter",
+                model=client.model,
+                prompt_version="active-events-filter-v1",
+                input_tokens=result.usage.get("promptTokenCount"),
+                output_tokens=result.usage.get("candidatesTokenCount"),
+            )
+        matched_ids = set(result.payload.get("matched_event_ids", []))
+        return [ev for ev in active_events if ev["event_id"] in matched_ids]
+    except Exception:
+        # On LLM error, skip proactive matching for this group rather than flooding the
+        # grouping prompt with the full unfiltered candidate list. Post-aggregation
+        # deduplication will still catch any cross-window duplicates.
+        return []
+
+
+def _build_active_events_filter_prompt(
+    articles: Sequence[ArticleForAggregation],
+    active_events: Sequence[dict[str, Any]],
+) -> str:
+    headlines = [art.headline for art in articles]
+    event_list = [
+        {"event_id": ev["event_id"], "title": ev["title"], "category": ev["category"]}
+        for ev in active_events
+    ]
+    return (
+        "We have a list of new article headlines in the current time window, "
+        "and a list of active news events from the last 48 hours.\n"
+        "Identify which active events from the list cover the same underlying "
+        "news story/thread as any of the new articles.\n"
+        "Be conservative: only match if an event is directly related to at least one article headline.\n"
+        "Return a JSON object containing the matched active event IDs in the 'matched_event_ids' list.\n\n"
+        f"New Articles:\n{json.dumps(headlines, ensure_ascii=False, separators=(',', ':'))}\n\n"
+        f"Active Events:\n{json.dumps(event_list, ensure_ascii=False, separators=(',', ':'))}"
+    )
+
+
+def _active_events_filter_response_schema() -> dict[str, Any]:
+    return {
+        "type": "OBJECT",
+        "properties": {
+            "matched_event_ids": {
+                "type": "ARRAY",
+                "items": {"type": "STRING"}
+            }
+        },
+        "required": ["matched_event_ids"]
+    }
+
+
 def _build_grouping_prompt(
     articles: Sequence[ArticleForAggregation],
     *,
     mode: str,
     valid_categories: list[str],
+    active_events: Sequence[dict[str, Any]] = (),
 ) -> str:
     fields = "index, source, published_at, headline"
     if mode == "titles_summaries":
@@ -1039,6 +1569,20 @@ def _build_grouping_prompt(
             if article.digest_key_facts:
                 row["key_facts"] = list(article.digest_key_facts[:6])
         rows.append(row)
+
+    active_events_section = ""
+    if active_events:
+        active_events_list = [
+            {"event_id": ev["event_id"], "title": ev["title"], "category": ev["category"]}
+            for ev in active_events
+        ]
+        active_events_section = (
+            "\n\nExisting Active Events (from the last 48 hours):\n"
+            f"{json.dumps(active_events_list, ensure_ascii=False, separators=(',', ':'))}\n"
+            "If any article in the input list belongs to one of these existing events, assign it to that event "
+            "by returning its event_id in the 'existing_event_id' property of the group."
+        )
+
     return (
         "Group articles into reader-facing story clusters for summarization, and classify their metadata.\n"
         "A story cluster may include multiple angles on the same developing news subject: the core report, "
@@ -1084,7 +1628,8 @@ def _build_grouping_prompt(
         f"Audit the final JSON: every integer from 0 through {len(articles) - 1} must appear "
         "exactly once in both 'articles' and the combined 'groups.article_indexes'. "
         "No missing indexes. No repeated indexes.\n"
-        "Return compact JSON only.\n\n"
+        "Return compact JSON only."
+        f"{active_events_section}\n\n"
         f"Articles:\n{json.dumps(rows, ensure_ascii=False, separators=(',', ':'))}"
     )
 
@@ -1119,7 +1664,10 @@ def _grouping_response_schema(valid_categories: list[str]) -> dict[str, Any]:
                         "article_indexes": {
                             "type": "ARRAY",
                             "items": {"type": "INTEGER"},
-                        }
+                        },
+                        "existing_event_id": {
+                            "type": "STRING",
+                        },
                     },
                     "required": ["article_indexes"],
                 },
@@ -1281,15 +1829,14 @@ def _format_iso_timestamp(value: datetime) -> str:
     return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _floor_hour(value: datetime) -> datetime:
-    return value.replace(minute=0, second=0, microsecond=0)
-
-
-def _ceil_hour(value: datetime) -> datetime:
-    floored = _floor_hour(value)
-    if value == floored:
-        return floored
-    return floored + timedelta(hours=1)
+def _floor_utc_interval(value: datetime, interval_hours: int) -> datetime:
+    if interval_hours <= 0:
+        raise ValueError("interval_hours must be positive")
+    value = value.astimezone(UTC)
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    interval_seconds = interval_hours * 60 * 60
+    elapsed_seconds = int((value - epoch).total_seconds())
+    return epoch + timedelta(seconds=(elapsed_seconds // interval_seconds) * interval_seconds)
 
 
 def _event_id_for_group(articles: Sequence[ArticleForAggregation]) -> str | None:
@@ -1556,23 +2103,20 @@ def _earliest_published_at(articles: Sequence[ArticleForAggregation]) -> str | N
 
 
 _KEYWORD_STOPWORDS = {
-    "about",
-    "after",
-    "amid",
-    "and",
-    "are",
-    "from",
-    "have",
-    "into",
-    "more",
-    "news",
-    "over",
-    "says",
-    "that",
-    "the",
-    "their",
-    "this",
-    "with",
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "as", "at",
+    "be", "because", "been", "before", "being", "below", "between", "both", "but", "by",
+    "can", "could", "did", "do", "does", "doing", "down", "during",
+    "each", "few", "for", "from", "further", "had", "has", "have", "having", "he", "her",
+    "here", "hers", "him", "his", "how", "i", "if", "in", "into", "is", "it", "its", "itself",
+    "just", "me", "more", "most", "my", "myself", "no", "nor", "not", "of", "off", "on", "once",
+    "only", "or", "other", "our", "ours", "ourselves", "out", "over", "own", "same", "she",
+    "should", "so", "some", "such", "than", "that", "the", "their", "theirs", "them",
+    "themselves", "then", "there", "these", "they", "this", "those", "through", "to", "too",
+    "under", "until", "up", "very", "was", "we", "were", "what", "when", "where", "which",
+    "while", "who", "whom", "why", "with", "would", "you", "your", "yours", "yourself",
+    "yourselves",
+    # domain specific
+    "news", "says", "said", "amid", "report", "reports", "according", "u", "s", "us"
 }
 
 
@@ -1612,3 +2156,308 @@ def _paired_indexes(groups: Sequence[dict[str, Any]]) -> set[tuple[int, int]]:
             for right in indexes[left_index + 1 :]:
                 pairs.add((left, right))
     return pairs
+
+
+def _base_slug(event_id: str) -> str:
+    if len(event_id) > 11 and event_id[4] == "-" and event_id[7] == "-" and event_id[10] == "-":
+        slug = event_id[11:]
+    else:
+        slug = event_id
+    return re.sub(r"-\d+$", "", slug)
+
+
+def _titles_similar(title1: str, title2: str) -> bool:
+    w1 = set(re.findall(r"[A-Za-z0-9]+", title1.lower())) - _KEYWORD_STOPWORDS
+    w2 = set(re.findall(r"[A-Za-z0-9]+", title2.lower())) - _KEYWORD_STOPWORDS
+    common = w1 & w2
+    return len(common) >= 4 or (len(common) >= 3 and min(len(w1), len(w2)) <= 4)
+
+
+def _titles_share_at_least(title1: str, title2: str, count: int) -> bool:
+    w1 = set(re.findall(r"[A-Za-z0-9]+", title1.lower())) - _KEYWORD_STOPWORDS
+    w2 = set(re.findall(r"[A-Za-z0-9]+", title2.lower())) - _KEYWORD_STOPWORDS
+    return len(w1 & w2) >= count
+
+
+def _events_have_similar_article_headline(
+    event_id1: str,
+    event_id2: str,
+    article_headlines_by_event: dict[str, list[str]],
+) -> bool:
+    headlines1 = article_headlines_by_event.get(event_id1, [])
+    headlines2 = article_headlines_by_event.get(event_id2, [])
+    for headline1 in headlines1:
+        for headline2 in headlines2:
+            if _normalized_title(headline1) == _normalized_title(headline2):
+                return True
+            if _titles_similar(headline1, headline2):
+                return True
+    return False
+
+
+def _normalized_title(title: str) -> str:
+    return " ".join(re.findall(r"[A-Za-z0-9]+", title.lower()))
+
+
+def merge_events(
+    winner_id: str,
+    loser_id: str,
+    state: StateDB,
+    feeds_by_source: dict[str, Any],
+) -> None:
+    winner_path = EVENT_DIR / f"{winner_id}.json"
+    loser_path = EVENT_DIR / f"{loser_id}.json"
+    winner_event = _read_event(winner_path)
+    if not winner_event:
+        return
+
+    state.merge_events_into([loser_id], winner_id)
+
+    try:
+        loser_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    rows = state.conn.execute(
+        """
+        SELECT article_id, source_id, source_name, headline, summary, published_at, article_path, event_id
+        FROM articles
+        WHERE event_id = ? AND is_filtered = 0
+        """,
+        (winner_id,),
+    ).fetchall()
+
+    articles = [
+        ArticleForAggregation(
+            article_id=row["article_id"],
+            source_id=row["source_id"],
+            source_name=row["source_name"],
+            headline=row["headline"],
+            summary=row["summary"],
+            published_at=row["published_at"],
+            article_path=row["article_path"],
+            event_id=row["event_id"],
+            **_load_digest_fields(row["article_path"]),
+        )
+        for row in rows
+    ]
+
+    # Drop the pre-merge newsworthiness so _build_event_payload recomputes it across
+    # the combined article set — picking up multi-source/broad-coverage bonuses that
+    # the winner's pre-merge score didn't see.
+    existing_for_payload = {k: v for k, v in winner_event.items() if k != "newsworthiness"}
+    event_payload = _build_event_payload(
+        event_id=winner_id,
+        event_path=winner_path,
+        articles=articles,
+        existing=existing_for_payload,
+        feeds_by_source=feeds_by_source,
+    )
+    atomic_write_json(winner_path, event_payload)
+    state.upsert_event(event_payload, winner_path)
+
+
+def _load_event_articles_summary(event_id: str, state: StateDB) -> list[dict[str, str]]:
+    rows = state.conn.execute(
+        "SELECT headline, summary, article_path FROM articles WHERE event_id = ? AND is_filtered = 0",
+        (event_id,),
+    ).fetchall()
+    summaries = []
+    for row in rows:
+        digest = _load_digest_fields(row["article_path"])
+        summary = digest.get("digest_summary") or row["summary"] or ""
+        summaries.append({
+            "headline": row["headline"],
+            "summary": summary[:300] + "..." if len(summary) > 300 else summary
+        })
+    return summaries
+
+
+def _build_event_merge_prompt(event1: dict[str, Any], event2: dict[str, Any]) -> str:
+    return (
+        "Compare these two news event clusters and decide if they represent the exact same "
+        "underlying real-world news event and should be merged into a single event.\n"
+        "They should be merged if they cover the same development, announcement, decision, "
+        "sports game, or incident.\n"
+        "They should remain separate if they are different incidents, different sports games, "
+        "unrelated actions by the same actor, or distinct developments in a broader topic "
+        "(e.g., separate space launches, separate policy announcements, separate trials).\n\n"
+        "Event 1:\n"
+        f"  ID: {event1['event_id']}\n"
+        f"  Title: {event1['title']}\n"
+        f"  Articles:\n{json.dumps(event1['articles'], ensure_ascii=False, indent=2)}\n\n"
+        "Event 2:\n"
+        f"  ID: {event2['event_id']}\n"
+        f"  Title: {event2['title']}\n"
+        f"  Articles:\n{json.dumps(event2['articles'], ensure_ascii=False, indent=2)}\n\n"
+        "Return a JSON object matching this schema:\n"
+        "{\n"
+        "  \"should_merge\": boolean,\n"
+        "  \"confidence\": number (0.0 to 1.0),\n"
+        "  \"rationale\": string\n"
+        "}"
+    )
+
+
+def _event_merge_response_schema() -> dict[str, Any]:
+    return {
+        "type": "OBJECT",
+        "properties": {
+            "should_merge": {"type": "BOOLEAN"},
+            "confidence": {"type": "NUMBER"},
+            "rationale": {"type": "STRING"},
+        },
+        "required": ["should_merge", "confidence", "rationale"],
+    }
+
+
+def deduplicate_active_events_llm(
+    *,
+    state: StateDB,
+    client: JsonGenerator,
+    feeds_by_source: dict[str, Any],
+    progress: Callable[[str], None] | None = None,
+    run_id: str | None = None,
+) -> None:
+    since_dt = datetime.now(UTC) - timedelta(hours=48)
+    since = since_dt.isoformat().replace("+00:00", "Z")
+
+    rows = state.conn.execute(
+        """
+        SELECT event_id, title, category, updated_at, article_count, created_at
+        FROM events
+        WHERE status = 'active' AND updated_at >= ?
+        ORDER BY category, updated_at DESC
+        """,
+        (since,),
+    ).fetchall()
+
+    events = [dict(row) for row in rows]
+    if len(events) < 2:
+        return
+    article_headlines_by_event: dict[str, list[str]] = {}
+    for row in state.conn.execute(
+        """
+        SELECT event_id, headline
+        FROM articles
+        WHERE event_id IS NOT NULL
+          AND is_filtered = 0
+        """
+    ).fetchall():
+        article_headlines_by_event.setdefault(row["event_id"], []).append(row["headline"])
+
+    candidates = []
+    for i in range(len(events)):
+        for j in range(i + 1, len(events)):
+            e1 = events[i]
+            e2 = events[j]
+            slug_match = _base_slug(e1["event_id"]) == _base_slug(e2["event_id"])
+            title_match = _titles_similar(e1["title"], e2["title"])
+            headline_match = False
+            if not (slug_match or title_match) and _titles_share_at_least(e1["title"], e2["title"], 2):
+                headline_match = _events_have_similar_article_headline(
+                    e1["event_id"],
+                    e2["event_id"],
+                    article_headlines_by_event,
+                )
+            if slug_match or title_match or headline_match:
+                candidates.append((e1, e2))
+
+    if not candidates:
+        return
+
+    if progress:
+        progress(f"deduplicate: found {len(candidates)} candidate event pair(s) for LLM evaluation")
+
+    merges_count = 0
+    for e1, e2 in candidates:
+        if not state.event_exists(e1["event_id"]) or not state.event_exists(e2["event_id"]):
+            continue
+
+        articles1 = _load_event_articles_summary(e1["event_id"], state)
+        articles2 = _load_event_articles_summary(e2["event_id"], state)
+
+        if not articles1 or not articles2:
+            continue
+
+        payload1 = {"event_id": e1["event_id"], "title": e1["title"], "articles": articles1}
+        payload2 = {"event_id": e2["event_id"], "title": e2["title"], "articles": articles2}
+
+        try:
+            result = client.generate_json(
+                system_instruction=(
+                    "You are an expert news editor. Determine if two event clusters represent "
+                    "the same news event and should be merged."
+                ),
+                prompt=_build_event_merge_prompt(payload1, payload2),
+                response_schema=_event_merge_response_schema(),
+                temperature=0,
+            )
+            if run_id:
+                try:
+                    state.record_llm_usage(
+                        run_id=run_id,
+                        stage="deduplication",
+                        model=client.model,
+                        prompt_version="deduplication-v1",
+                        input_tokens=result.usage.get("promptTokenCount"),
+                        output_tokens=result.usage.get("candidatesTokenCount"),
+                    )
+                except Exception:
+                    pass
+
+            should_merge = result.payload.get("should_merge") is True
+            raw_confidence = result.payload.get("confidence")
+            confidence = (
+                float(raw_confidence)
+                if isinstance(raw_confidence, int | float) and not isinstance(raw_confidence, bool)
+                else 0.0
+            )
+            rationale = result.payload.get("rationale", "")
+
+            if should_merge and confidence >= DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD:
+                winner = e1
+                loser = e2
+                if e2.get("article_count", 0) > e1.get("article_count", 0):
+                    winner, loser = e2, e1
+                elif e2.get("article_count", 0) == e1.get("article_count", 0):
+                    if e2.get("created_at", "") < e1.get("created_at", ""):
+                        winner, loser = e2, e1
+                    elif e2.get("created_at", "") == e1.get("created_at", ""):
+                        if len(e2["event_id"]) < len(e1["event_id"]):
+                            winner, loser = e2, e1
+
+                winner_id = winner["event_id"]
+                loser_id = loser["event_id"]
+
+                if progress:
+                    progress(
+                        f"deduplicate: merging {loser_id} into {winner_id} "
+                        f"(confidence: {confidence:.2f}; rationale: {rationale})"
+                    )
+
+                merge_events(winner_id, loser_id, state, feeds_by_source)
+                merges_count += 1
+            elif should_merge and progress:
+                progress(
+                    f"deduplicate: skipped low-confidence merge for {e1['event_id']} and {e2['event_id']} "
+                    f"(confidence: {confidence:.2f})"
+                )
+        except Exception as exc:
+            if progress:
+                progress(f"deduplicate: failed to evaluate pair {e1['event_id']} and {e2['event_id']}: {exc}")
+            if run_id:
+                try:
+                    state.record_error(
+                        run_id,
+                        "deduplication",
+                        "event_pair",
+                        f"{e1['event_id']}_{e2['event_id']}",
+                        None,
+                        exc,
+                    )
+                except Exception:
+                    pass
+
+    if progress and merges_count > 0:
+        progress(f"deduplicate: completed merging {merges_count} event(s)")

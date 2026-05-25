@@ -92,7 +92,7 @@ into events:
 ./.venv/bin/python -m pipeline.cli aggregate --verbose
 ```
 
-Remove the local generated SQLite state, staged articles, and fetch logs:
+Remove the local generated SQLite state, staged articles, event files, published files, and fetch logs:
 ```bash
 ./.venv/bin/python -m pipeline.cli clean-data --yes
 ```
