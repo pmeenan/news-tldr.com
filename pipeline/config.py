@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -31,6 +31,7 @@ class PipelineConfig:
     aggregation: dict[str, Any]
     retention: dict[str, Any]
     pipeline: dict[str, Any]
+    digest: dict[str, Any] = field(default_factory=dict)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -45,6 +46,7 @@ def load_pipeline_config(path: Path | None = None) -> PipelineConfig:
         aggregation=data.get("aggregation", {}),
         retention=data.get("retention", {}),
         pipeline=data.get("pipeline", {}),
+        digest=data.get("digest", {}),
     )
 
 
@@ -88,3 +90,8 @@ def load_feeds(path: Path | None = None, *, enabled_only: bool = True) -> list[F
 def load_source_policy(path: Path | None = None) -> dict[str, dict[str, Any]]:
     data = _load_json(path or CONFIG_DIR / "source-policy.json")
     return {item["source_id"]: item for item in data.get("sources", [])}
+
+
+def load_categories(path: Path | None = None) -> list[str]:
+    data = _load_json(path or CONFIG_DIR / "categories.json")
+    return [item["id"] for item in data.get("categories", [])]

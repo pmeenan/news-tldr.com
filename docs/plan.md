@@ -81,12 +81,16 @@ gantt
 
 ### [ ] Milestone 2: Story Aggregation
 
-> Schema note: the v2 migration in `pipeline/state.py` already provisions the
-> `events.keywords_json`, `events.entities_json`, `events.article_count`,
-> `events.last_editorial_at`, `events.confidence`, and `item_errors.retry_count`
-> columns, plus indexes for unassigned articles, canonical-URL lookups, event
-> status/updated_at, and item_errors by item. Aggregation work can read/write
-> these directly; further schema changes go in a new migration entry.
+> Schema note: migrations in `pipeline/state.py` provision aggregation state:
+> event keywords/entities/article counts/editorial timestamps/confidence,
+> `aggregation_windows` for sliding-window idempotency, and event
+> newsworthiness columns for global/category ranking. Further schema changes
+> go in a new migration entry.
+
+> Windowing note: aggregation uses sliding publish-time windows. The default is
+> a 6-hour window with a 1-hour step, tracked in `aggregation_windows` so
+> completed windows are not rerun on every pipeline pass. The newest completed
+> window may be rerun on the next pass to absorb late articles near the overlap.
 
 > Hosted LLM decision: Stage 2 aggregation will use the Gemini Developer API
 > by default with an AI Studio key loaded from local `.env` as
@@ -97,22 +101,25 @@ gantt
 > tests succeeded with structured JSON output for `gemini-2.5-flash-lite` and
 > `gemini-3.1-flash-lite`.
 
-- [ ] Implement state database query for unprocessed articles (`event_id` is null).
-- [ ] Implement near-duplicate detection for exact reprints (headline similarity, exact text, or URL hashes).
-- [ ] Implement Gemini Developer API client using stdlib HTTP, loading `GEMINI_API_KEY` and `GEMINI_MODEL` from `.env`/environment, with structured output, request timeouts, model/prompt metadata, and usage/timing capture.
-- [ ] Design batched LLM prompt for article classification and event grouping (headline + brief paragraph summary + source + date + active events context with keywords/entities) to identify articles covering the same underlying story.
-- [ ] Use compact order-preserving numeric enum output for the first pass; deterministic code maps rows back to input articles by position and rejects malformed or out-of-range values.
+- [x] Implement state database query for unprocessed articles (`event_id` is null).
+- [x] Generate and persist per-article LLM digests before aggregation, including factual summaries, key facts, content-quality signals, article-level impact scores, prompt metadata, SQLite status tracking, and bounded parallel API calls.
+- [x] Implement near-duplicate detection for exact reprints (content text and canonical URL hashes). Headline-hash and summary-hash signals are stored in `article_fingerprints` for future use, but are intentionally not used to short-circuit digest generation because generic shared headlines would silently propagate one story's digest onto unrelated stories.
+- [x] Implement Gemini Developer API client using stdlib HTTP, loading `GEMINI_API_KEY` and `GEMINI_MODEL` from `.env`/environment, with structured output, request timeouts, model/prompt metadata, and usage/timing capture.
+- [x] Design window-based LLM prompt for story clustering (headline + brief paragraph summary + source + date) to identify articles and angles covering the same developing news subject.
+- [x] Use compact order-preserving numeric enum output for the first pass; deterministic code maps rows back to input articles by position and rejects malformed or out-of-range values.
 - [ ] Keep free-text generation out of the first pass. Generate event titles, slugs, keywords, entities, and optional thread tags in a second smaller validated call.
-- [ ] Implement LLM abstraction layer supporting the Gemini API default and future hosted/local model backends.
-- [ ] Implement batched classification: content type, category (validated against `config/categories.json`), and event assignment.
-- [ ] Implement event creation: generate `event_id` (date + LLM-suggested slug from the second pass), validate uniqueness, store keywords/entities, write event JSON.
-- [ ] Implement event merging: add articles to existing events when the LLM matches them.
+- [x] Implement LLM abstraction layer supporting the Gemini API default and future hosted/local model backends.
+- [x] Implement classification: content type, category (validated against `config/categories.json`), and event assignment.
+- [x] Implement sliding 6-hour aggregation windows with a 1-hour overlap and completed-window skip logic.
+- [x] Implement event creation: generate `event_id` (date + deterministic headline slug in the first pass), validate uniqueness, store lightweight keywords, write event JSON.
+- [x] Implement event merging: add articles to existing events when the LLM matches them.
+- [x] Add newsworthiness scoring with global and category scores, preferring article-level digest impact to avoid extra LLM calls and falling back to deterministic or optional post-grouping LLM scoring when impact metadata is unavailable.
 - [ ] Implement optional thread tag assignment for linking related events.
-- [ ] Filter standalone opinion content from event creation (opinions attach to existing events only).
-- [ ] Update event JSON files and state database after each batch.
+- [x] Filter standalone opinion content from event creation (opinions attach to existing events only).
+- [x] Update event JSON files and state database after each window.
 - [ ] Implement event status lifecycle: active → stale (48h no new articles) → archived.
-- [ ] Add deterministic validation for IDs, category values, enum values, confidence thresholds, batch cardinality, and retry/fallback behavior.
-- [ ] Add tests for grouping, deduplication, and registry updates.
+- [x] Add deterministic validation for IDs, category values, enum values, confidence thresholds, window cardinality, and retry/fallback behavior.
+- [x] Add tests for grouping and registry updates.
 
 ### [ ] Milestone 3: Editorial
 
@@ -121,7 +128,7 @@ gantt
 - [ ] Generate story JSON from event article groups (one LLM call per event).
 - [ ] Include source references for each key fact and uncertainty.
 - [ ] Implement political framing extraction for clearly political events (left/right perspectives with source attribution).
-- [ ] Implement story importance scoring (source count, freshness, category, editorial judgment).
+- [ ] Refine story importance ranking using Stage 2 newsworthiness, source count, freshness, source quality, category, and editorial judgment.
 - [ ] Write/update story JSON files with `llm_metadata` (model, prompt version, timestamp, input references).
 - [ ] Generate `data/published/active-stories.json` index.
 - [ ] Add tests for schema validation, citation coverage, and framing extraction.

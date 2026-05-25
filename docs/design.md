@@ -36,7 +36,7 @@ graph TD
     State -.-> Editorial
 
     Collect -->|HTTP + readability| Pages[Article pages]
-    Aggregate -->|Batched LLM| Classify[Grouping & classification]
+    Aggregate -->|Window LLM| Classify[Grouping & classification]
     Editorial -->|Per-event LLM| Summarize[Summary & framing]
 ```
 
@@ -156,6 +156,22 @@ Custom scraper entries use `"feed_type": "scraper"` and a `fetch.scraper_module`
   "headline": "Headline",
   "summary": "Feed summary or extracted lead",
   "content_text": "Extracted article text",
+  "llm_digest": {
+    "summary": "Neutral factual digest generated from content_text",
+    "key_facts": ["Important fact with source-article context"],
+    "content_quality": "ok | thin | extraction_noise | paywalled | non_news",
+    "impact": {
+      "global": 0.72,
+      "category": 0.88,
+      "scope": "local | regional | national | international | niche",
+      "novelty": "breaking | update | analysis | evergreen | low_signal",
+      "rationale_codes": ["public_safety", "economic_impact"]
+    },
+    "generated_at": "2026-05-24T12:50:00Z",
+    "model": "gemini-3.1-flash-lite",
+    "prompt_version": "article-digest-v2",
+    "content_chars_used": 12000
+  },
   "published_at": "2026-05-24T12:30:00Z",
   "publish_date_estimated": false,
   "fetched_at": "2026-05-24T12:45:00Z",
@@ -197,11 +213,13 @@ Inputs:
 Responsibilities:
 
 - Query the state database for articles not yet assigned to an event.
-- Deduplicate near-identical exact article reprints (e.g., wire service stories) using URL, headline, or summary hash.
+- Generate missing per-article LLM digests before grouping. To avoid redundant LLM requests and costs, exact article reprints sharing the same content hash or canonical URL hash are grouped: we run the LLM digest only on one canonical article and propagate/copy the resulting `llm_digest` block to all matching duplicate reprint JSON files on disk, marking them as completed with a `"copied"` model status in SQLite. The article JSON keeps the real generating model for provenance; the SQLite `digest_model` column carries `"copied"` so downstream queries can distinguish generated from copied digests without re-reading files. Headline-hash matches are intentionally excluded from digest copying because generic shared headlines (e.g. "Morning briefing", "[City] weather forecast") would silently propagate one story's digest onto unrelated stories. Digests are written back to the article JSON as `llm_digest` with a concise factual summary, `key_facts`, content-quality signal, article-level impact scores, model, prompt version, and timestamp. Digest calls run with bounded parallelism and are tracked in SQLite so reruns skip completed articles.
+- Deduplicate near-identical exact article reprints (e.g., wire service stories) using content and canonical URL hashes during the digest pass and aggregation stages. Headline and summary hashes remain available in `article_fingerprints` for collection-time near-duplicate suppression, but are not used to short-circuit digest generation.
 - Classify each article's content type: news, opinion, analysis, review, or unknown.
 - Assign each article to a category from `config/categories.json`.
-- Group articles into durable events: either match an existing event or create a new one. Match articles reporting the same underlying story using the headline and a brief paragraph summary, not the full article text.
+- Group articles into durable story clusters: either match an existing event or create a new one. A cluster may include multiple angles on the same developing news subject, such as updates, reactions, analysis, and local/international framing. The editorial stage is responsible for separating those angles in the summary. Match using the headline and a brief paragraph summary, not the full article text.
 - Maintain event matching metadata (`keywords` and major named entities) for future aggregation context.
+- Score each cluster's initial newsworthiness on two axes: global homepage impact and impact within its own category/vertical.
 - Update event files and the state database with new article assignments.
 - Filter standalone opinion pieces from event creation (opinion articles can be attached to an existing event but should not create one alone).
 
@@ -222,24 +240,39 @@ structured output (`responseMimeType: application/json` plus a response JSON
 schema). API keys must not be written to logs, command output, JSON artifacts,
 or committed files.
 
-Aggregation LLM calls are **batched**. Send a batch of article metadata (headline + a brief paragraph summary + source + publish date) along with a context list of currently active events (retrieved from the state database with their `event_id`, title, category, `keywords`, major entities, article count, and update timestamp) and ask the model to:
+Aggregation runs over sliding publish-time windows. The default window is 6 hours with a 1-hour step, so adjacent windows overlap and boundary-adjacent articles can still be grouped. Before grouping, the pipeline generates missing article digests for the planned windows. The digest prompt uses `content_text`, allows more than one or two sentences when needed to preserve important facts, returns `key_facts`, scores article-level impact, and avoids recreating the full article. Digest generation uses the configured Gemini backend with bounded parallelism (`digest.concurrency` in `config/pipeline.json`). The state database records completed aggregation windows; normal pipeline runs skip windows already completed, while allowing the latest completed window from the previous run to be rerun so the overlap can absorb late-arriving articles. For each sliding window, we load all articles published within those hours (both assigned and unassigned) and send their metadata (headline + digest summary/key facts when available, otherwise collected summary + source + publish date) to the LLM to:
 
 1. Classify each article's content type and category.
-2. Group articles into events (matching and referencing existing event IDs from the context list where applicable) by identifying multiple outlets reporting the same underlying story.
+2. Group articles into story clusters (matching and referencing existing event IDs where applicable) by identifying multiple outlets and angles reporting on the same developing news subject.
 3. Suggest new event IDs and slugs for novel events.
 4. Suggest optional `thread` tags for linking related events.
 
 Prompt shape is part of the contract. The first aggregation pass should avoid free-text fields and ask for compact, order-preserving structured output using numeric enum codes rather than copied article IDs. Deterministic code maps each output row back to the input article by position. This reduces malformed JSON, repeated text inside string fields, and ID-copying errors. Event naming, keyword/entity generation, and slug suggestions should happen in a second smaller call after candidate event assignments are known.
 
-Batch size should balance context window limits, cost, latency, and retry blast
-radius. The hosted Gemini path supports much larger contexts than the local
-Ollama evaluation, but the implementation should still start with small
-validation batches, then scale once output validation and retries are stable.
-Matching uses only the headline and a brief paragraph summary (typically the
-lead sentence or feed summary) to keep payloads small and avoid processing full
-article text at this stage. Full article text stays on disk.
+The sliding window approach balances context window limits, cost, latency, and retry blast radius. The hosted Gemini path supports much larger contexts than the local Ollama evaluation, but the implementation still manages sizing via the sliding window duration.
+Matching uses only the headline and a digest/brief paragraph summary, plus compact key facts when available, to keep grouping payloads small and avoid processing full article text inside the grouping call. Full article text stays on disk for digest generation and later editorial passes.
 
 Deterministic code validates all LLM outputs: checks category IDs against `config/categories.json`, enforces event ID uniqueness, and rejects malformed suggestions.
+
+After grouping, aggregation derives event newsworthiness from article-level digest impact scores when available. This avoids an extra LLM call for groups whose articles already have impact metadata. For groups missing digest impact, aggregation can still run a smaller newsworthiness scoring pass over each cluster/singleton. This keeps the grouping prompt focused on "same underlying event" while still capturing editorial ranking signals early. The scoring prompt uses headline, brief summary, source count, article count, and category hint, and returns:
+
+- `global`: importance to a broad general-news homepage.
+- `category`: importance within the story's own vertical.
+- `rationale_codes`: compact audit tags such as `geopolitical_escalation`, `public_safety`, `economic_impact`, `major_sports_result`, or `low_public_impact`.
+
+Scores are normalized from `0.0` to `1.0`, validated by deterministic code, stored in event JSON, and mirrored in SQLite for ranking queries. If digest impact is unavailable and the LLM scoring call fails, is unavailable, or omits a cluster, deterministic baseline scoring is used so every event has a usable signal.
+
+### Stage 2 Implementation
+
+The initial aggregation implementation lives in `pipeline/aggregate.py` and is exposed by `./.venv/bin/python -m pipeline.cli aggregate`. It plans sliding 6-hour windows with 1-hour steps, skips completed windows using `aggregation_windows`, generates missing article digests for the planned windows, loads all articles in each window so overlap runs can attach new articles to existing event assignments, calls Gemini with headline + digest/summary metadata, validates that every article index appears exactly once, scores resulting groups for newsworthiness from digest impact or fallback scoring, writes `data/events/<event_id>.json`, upserts the `events` table, assigns `articles.event_id`, and records completed windows. The command supports `--range-start`, `--range-end`, `--limit-windows`, `--dry-run`, and `--verbose`. Dry runs do not generate or persist digests.
+
+Event naming in this first pass is deterministic and intentionally simple: existing event IDs are reused when a group contains already-assigned articles; otherwise code derives a stable date + headline slug and stores lightweight keyword metadata. Richer title/slug/entity generation remains a follow-up LLM pass.
+
+An article-digest experiment command remains available as `./.venv/bin/python -m pipeline.cli article-digest-experiment`. It samples articles whose collected site summaries look weak (missing, very short, headline-only, generic teaser text, or feed boilerplate) plus a configurable control set, then writes side-by-side review artifacts under `data/staging/article-digest-experiments/` without mutating article JSON or aggregation state.
+
+#### Event Merging and Reassignment
+
+When a new window groups articles that span multiple already-existing events (for example, grouping articles currently assigned to `event-A` and `event-B` into a single cluster), one winning event ID is chosen (preserving existing event IDs when available). To prevent historical article data loss, the aggregator loads all historical article IDs belonging to the merged-away events from their event JSON files, merges the article lists, updates the winning event's JSON and SQLite database assignments, deletes the merged-away events' JSON files, and removes their SQLite database entries.
 
 Model evaluation notes:
 
@@ -272,7 +305,15 @@ Model evaluation notes:
     "sha256-def456"
   ],
   "article_count": 2,
-  "confidence": 0.86
+  "confidence": 0.86,
+  "newsworthiness": {
+    "global": 0.82,
+    "category": 0.91,
+    "rationale_codes": ["geopolitical_escalation", "multi_source"],
+    "scored_at": "2026-05-24T18:31:00Z",
+    "model": "gemini-3.1-flash-lite",
+    "prompt_version": "newsworthiness-v1"
+  }
 }
 ```
 
@@ -296,7 +337,7 @@ Responsibilities:
 - Include the important facts, relevant uncertainty, and known missing context.
 - Attribute claims to source articles without copying article prose.
 - For clearly political events where sources frame the story in divergent ways, extract left-perspective and right-perspective summaries with source attribution.
-- Rank stories by importance using source count, freshness, category, and editorial judgment.
+- Rank stories by importance using the Stage 2 newsworthiness scores plus freshness, source quality, source count, and editorial judgment.
 - Write or update story JSON files.
 - Update `data/published/active-stories.json` with the current set of active stories.
 
@@ -512,7 +553,7 @@ All SQLite interactions must use parameterized queries to prevent SQL injection.
 
 Configurable retention windows (defaults in `config/pipeline.json`):
 
-- **Staging articles**: Full extracted article JSON can be compacted after 7 days, but cleanup must retain durable article metadata, source links, canonical URL hashes, fingerprints, event assignments, and citation references in SQLite. Do not delete article rows that are needed for deduplication, archives, or published story source attribution.
+- **Staging articles**: Full extracted article JSON can be compacted after 3 days, but cleanup must retain durable article metadata, source links, canonical URL hashes, fingerprints, event assignments, and citation references in SQLite. Do not delete article rows that are needed for deduplication, archives, or published story source attribution.
 - **Full article text**: Extracted `content_text` may be removed or replaced with a compact excerpt after the staging retention window if the article is no longer needed for active editorial regeneration.
 - **Stale events**: Events transition to `archived` status after the retention window. Archived events are excluded from aggregation context and active story generation.
 - **Published stories**: Stories for archived events are removed from `active-stories.json` but story JSON files are retained indefinitely for archive pages.
@@ -552,13 +593,13 @@ backends remain swappable behind the same interface. The system may use:
 
 - Hosted API models for aggregation and high-quality editorial summaries.
 - Local models for fallback, development, or privacy-sensitive experiments when latency is acceptable.
-- Different models for different stages (e.g., inexpensive hosted model for batched aggregation, stronger model for editorial).
+- Different models for different stages (e.g., inexpensive hosted model for aggregation, stronger model for editorial).
 
 The abstraction should support swapping backends without changing pipeline logic.
 
 ### Cost Awareness
 
-- Aggregation uses **batched** calls with short summaries (headline + lead) to minimize token usage.
+- Aggregation uses sliding window calls with short summaries (headline + lead) to minimize token usage.
 - Editorial uses **per-event** calls with full article text where quality matters most.
 - Track token usage per run in the pipeline state database for monitoring.
 - Support dry-run mode that processes everything except LLM calls (useful for testing collection and aggregation logic).

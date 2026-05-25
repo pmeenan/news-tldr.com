@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +18,7 @@ def _relative_to_project(path: Path) -> str:
         return str(path)
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 5
 
 
 # Each migration is the SQL needed to take the database from the previous
@@ -141,6 +143,54 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         CREATE INDEX IF NOT EXISTS idx_articles_unassigned ON articles(event_id) WHERE event_id IS NULL;
         CREATE INDEX IF NOT EXISTS idx_events_status_updated ON events(status, updated_at);
         CREATE INDEX IF NOT EXISTS idx_item_errors_item ON item_errors(item_type, item_id, retry_count);
+        """,
+    ),
+    (
+        3,
+        """
+        CREATE TABLE IF NOT EXISTS aggregation_windows (
+          window_start TEXT NOT NULL,
+          window_end TEXT NOT NULL,
+          status TEXT NOT NULL,
+          run_id TEXT,
+          article_count INTEGER NOT NULL DEFAULT 0,
+          prompt_version TEXT,
+          model TEXT,
+          stats_json TEXT NOT NULL DEFAULT '{}',
+          started_at TEXT,
+          finished_at TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (window_start, window_end)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_aggregation_windows_status_end
+          ON aggregation_windows(status, window_end);
+        """,
+    ),
+    (
+        4,
+        """
+        ALTER TABLE events ADD COLUMN newsworthiness_global REAL;
+        ALTER TABLE events ADD COLUMN newsworthiness_category REAL;
+        ALTER TABLE events ADD COLUMN newsworthiness_json TEXT NOT NULL DEFAULT '{}';
+
+        CREATE INDEX IF NOT EXISTS idx_events_newsworthiness_global
+          ON events(newsworthiness_global);
+        CREATE INDEX IF NOT EXISTS idx_events_newsworthiness_category
+          ON events(category, newsworthiness_category);
+        """,
+    ),
+    (
+        5,
+        """
+        ALTER TABLE articles ADD COLUMN digest_status TEXT NOT NULL DEFAULT 'pending';
+        ALTER TABLE articles ADD COLUMN digest_generated_at TEXT;
+        ALTER TABLE articles ADD COLUMN digest_model TEXT;
+        ALTER TABLE articles ADD COLUMN digest_prompt_version TEXT;
+        ALTER TABLE articles ADD COLUMN digest_error TEXT;
+
+        CREATE INDEX IF NOT EXISTS idx_articles_digest_status_published
+          ON articles(digest_status, published_at);
         """,
     ),
 )
@@ -325,6 +375,161 @@ class StateDB:
                 ),
             )
 
+    def article_time_bounds(self, *, unassigned_only: bool = True) -> tuple[str, str] | None:
+        where = "WHERE published_at IS NOT NULL"
+        if unassigned_only:
+            where += " AND event_id IS NULL"
+        row = self.conn.execute(
+            f"""
+            SELECT MIN(published_at) AS min_published_at, MAX(published_at) AS max_published_at
+            FROM articles
+            {where}
+            """
+        ).fetchone()
+        if not row or not row["min_published_at"] or not row["max_published_at"]:
+            return None
+        return row["min_published_at"], row["max_published_at"]
+
+    def event_exists(self, event_id: str) -> bool:
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            is not None
+        )
+
+    def upsert_event(self, event: dict[str, Any], event_path: Path) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO events (
+                  event_id, title, category, thread, status, created_at, updated_at,
+                  event_path, keywords_json, entities_json, article_count, confidence,
+                  newsworthiness_global, newsworthiness_category, newsworthiness_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_id) DO UPDATE SET
+                  title=excluded.title,
+                  category=excluded.category,
+                  thread=excluded.thread,
+                  status=excluded.status,
+                  updated_at=excluded.updated_at,
+                  event_path=excluded.event_path,
+                  keywords_json=excluded.keywords_json,
+                  entities_json=excluded.entities_json,
+                  article_count=excluded.article_count,
+                  confidence=excluded.confidence,
+                  newsworthiness_global=excluded.newsworthiness_global,
+                  newsworthiness_category=excluded.newsworthiness_category,
+                  newsworthiness_json=excluded.newsworthiness_json
+                """,
+                (
+                    event["event_id"],
+                    event["title"],
+                    event["category"],
+                    event.get("thread"),
+                    event.get("status", "active"),
+                    event["created_at"],
+                    event["updated_at"],
+                    _relative_to_project(event_path),
+                    json.dumps(event.get("keywords", []), sort_keys=True),
+                    json.dumps(event.get("entities", []), sort_keys=True),
+                    int(event.get("article_count", 0)),
+                    event.get("confidence"),
+                    (event.get("newsworthiness") or {}).get("global"),
+                    (event.get("newsworthiness") or {}).get("category"),
+                    json.dumps(event.get("newsworthiness", {}), sort_keys=True),
+                ),
+            )
+
+    def assign_articles_to_event(self, article_ids: list[str], event_id: str) -> int:
+        if not article_ids:
+            return 0
+        with self.conn:
+            cursor = self.conn.executemany(
+                "UPDATE articles SET event_id = ? WHERE article_id = ?",
+                [(event_id, article_id) for article_id in article_ids],
+            )
+        return cursor.rowcount
+
+    def update_article_content_type(self, article_id: str, content_type: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE articles SET content_type = ? WHERE article_id = ?",
+                (content_type, article_id),
+            )
+
+    def update_article_digest_status(
+        self,
+        article_id: str,
+        *,
+        status: str,
+        generated_at: str | None = None,
+        model: str | None = None,
+        prompt_version: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE articles
+                SET digest_status = ?,
+                    digest_generated_at = ?,
+                    digest_model = ?,
+                    digest_prompt_version = ?,
+                    digest_error = ?
+                WHERE article_id = ?
+                """,
+                (status, generated_at, model, prompt_version, error, article_id),
+            )
+
+    def delete_event(self, event_id: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM events WHERE event_id = ?", (event_id,))
+
+    def reassign_event_articles(self, old_event_id: str, new_event_id: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE articles SET event_id = ? WHERE event_id = ?",
+                (new_event_id, old_event_id),
+            )
+
+    def merge_events_into(self, loser_event_ids: Sequence[str], winner_event_id: str) -> None:
+        if not loser_event_ids:
+            return
+        with self.conn:
+            for loser_id in loser_event_ids:
+                if loser_id == winner_event_id:
+                    continue
+                self.conn.execute(
+                    "UPDATE articles SET event_id = ? WHERE event_id = ?",
+                    (winner_event_id, loser_id),
+                )
+                self.conn.execute("DELETE FROM events WHERE event_id = ?", (loser_id,))
+
+    def record_llm_usage(
+        self,
+        run_id: str,
+        stage: str,
+        model: str,
+        prompt_version: str | None,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cost_usd: float | None = None,
+    ) -> None:
+        now = isoformat_z()
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO llm_usage (
+                  run_id, stage, model, prompt_version, input_tokens, output_tokens, cost_usd, occurred_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, stage, model, prompt_version, input_tokens, output_tokens, cost_usd, now),
+            )
+
     def start_run(self, run_id: str, stage: str) -> None:
         self.conn.execute(
             "INSERT INTO pipeline_runs(run_id, stage, status, started_at) VALUES (?, ?, 'running', ?)",
@@ -369,6 +574,113 @@ class StateDB:
         )
         self.conn.commit()
 
+    def fail_stale_running_aggregation_windows(self) -> int:
+        now = isoformat_z()
+        with self.conn:
+            cursor = self.conn.execute(
+                """
+                UPDATE aggregation_windows
+                SET status = 'failed',
+                    stats_json = COALESCE(stats_json, '{}'),
+                    finished_at = ?,
+                    updated_at = ?
+                WHERE status = 'running'
+                """,
+                (now, now),
+            )
+            return cursor.rowcount or 0
+
+    def aggregation_window_status(self, window_start: str, window_end: str) -> str | None:
+        row = self.conn.execute(
+            """
+            SELECT status
+            FROM aggregation_windows
+            WHERE window_start = ? AND window_end = ?
+            """,
+            (window_start, window_end),
+        ).fetchone()
+        return row["status"] if row else None
+
+    def unassigned_article_count_in_window(self, window_start: str, window_end: str) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM articles
+            WHERE event_id IS NULL
+              AND published_at >= ?
+              AND published_at < ?
+            """,
+            (window_start, window_end),
+        ).fetchone()
+        return int(row["count"]) if row else 0
+
+    def latest_completed_aggregation_window(self) -> tuple[str, str] | None:
+        row = self.conn.execute(
+            """
+            SELECT window_start, window_end
+            FROM aggregation_windows
+            WHERE status = 'completed'
+            ORDER BY window_end DESC, window_start DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if not row:
+            return None
+        return row["window_start"], row["window_end"]
+
+    def start_aggregation_window(
+        self,
+        *,
+        window_start: str,
+        window_end: str,
+        run_id: str,
+        prompt_version: str,
+        model: str,
+    ) -> None:
+        now = isoformat_z()
+        self.conn.execute(
+            """
+            INSERT INTO aggregation_windows (
+              window_start, window_end, status, run_id, prompt_version, model,
+              started_at, updated_at
+            )
+            VALUES (?, ?, 'running', ?, ?, ?, ?, ?)
+            ON CONFLICT(window_start, window_end) DO UPDATE SET
+              status='running',
+              run_id=excluded.run_id,
+              prompt_version=excluded.prompt_version,
+              model=excluded.model,
+              started_at=excluded.started_at,
+              updated_at=excluded.updated_at
+            """,
+            (window_start, window_end, run_id, prompt_version, model, now, now),
+        )
+        self.conn.commit()
+
+    def finish_aggregation_window(
+        self,
+        *,
+        window_start: str,
+        window_end: str,
+        status: str,
+        article_count: int,
+        stats: dict[str, Any],
+    ) -> None:
+        now = isoformat_z()
+        self.conn.execute(
+            """
+            UPDATE aggregation_windows
+            SET status = ?,
+                article_count = ?,
+                stats_json = ?,
+                finished_at = ?,
+                updated_at = ?
+            WHERE window_start = ? AND window_end = ?
+            """,
+            (status, article_count, json.dumps(stats, sort_keys=True), now, now, window_start, window_end),
+        )
+        self.conn.commit()
+
 
 def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -376,6 +688,28 @@ def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+_ADD_COLUMN_RE = re.compile(
+    r"^\s*ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)\b",
+    re.IGNORECASE,
+)
+
+
+def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {row[1] for row in rows}
+
+
+def _apply_migration_script(conn: sqlite3.Connection, sql: str) -> None:
+    statements = [stmt.strip() for stmt in sql.split(";") if stmt.strip()]
+    for statement in statements:
+        match = _ADD_COLUMN_RE.match(statement)
+        if match:
+            table, column = match.group(1), match.group(2)
+            if column in _existing_columns(conn, table):
+                continue
+        conn.execute(statement)
 
 
 def migrate(path: Path = DB_PATH) -> None:
@@ -393,7 +727,7 @@ def migrate(path: Path = DB_PATH) -> None:
         for target, sql in MIGRATIONS:
             if target <= current:
                 continue
-            conn.executescript(sql)
+            _apply_migration_script(conn, sql)
             conn.execute(
                 "INSERT INTO schema_version(version, applied_at) VALUES (?, ?)",
                 (target, isoformat_z()),

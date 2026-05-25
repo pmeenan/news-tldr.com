@@ -543,7 +543,7 @@ class Collector:
         run_id: str,
         max_feed_concurrency: int = 100,
         max_article_concurrency: int = 1000,
-        max_article_age_days: int = 7,
+        max_article_age_days: int = 3,
         progress: ProgressCallback | None = None,
     ) -> None:
         self.state = state
@@ -1085,7 +1085,7 @@ class Collector:
             self.progress(message)
 
 
-def cleanup_old_staging_data(days: int = 7, db_path: Path = DB_PATH) -> None:
+def cleanup_old_staging_data(days: int = 3, db_path: Path = DB_PATH) -> None:
     threshold = isoformat_z(utc_now() - timedelta(days=days))
 
     with StateDB(db_path) as state:
@@ -1129,7 +1129,7 @@ async def collect_once(progress: ProgressCallback | None = None) -> dict[str, in
     pipeline_config = load_pipeline_config()
     feeds = load_feeds(enabled_only=True)
     collection = pipeline_config.collection
-    retention_days = int(pipeline_config.retention.get("staging_article_days", 7))
+    retention_days = int(pipeline_config.retention.get("staging_article_days", 3))
     run_id = f"collection-{utc_now():%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
     lock_timeout = pipeline_config.pipeline.get("watchdog_timeout_minutes", 30)
     if progress:

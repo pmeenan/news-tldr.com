@@ -5,10 +5,22 @@ import asyncio
 import json
 import shutil
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
+from pipeline.aggregate import (
+    aggregate_once,
+    default_experiment_output_path,
+    run_grouping_experiment,
+    write_experiment_result,
+)
 from pipeline.collect import collect_once
 from pipeline.config import load_feeds
+from pipeline.digest import (
+    default_digest_experiment_output_path,
+    run_article_digest_experiment,
+    write_digest_experiment_result,
+)
 from pipeline.paths import ARTICLE_DIR, DATA_DIR, DB_PATH, FETCH_LOG_DIR, LOCK_PATH
 from pipeline.state import StateDB, migrate
 
@@ -69,12 +81,77 @@ def clean_data(
     return removed
 
 
+def _stderr_progress(message: str) -> None:
+    timestamp = datetime.now(UTC).strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="news-tldr-pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db", help="Initialize or migrate the SQLite state database.")
     collect_parser = sub.add_parser("collect", help="Run stage 1 data collection.")
     collect_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
+    aggregate_parser = sub.add_parser("aggregate", help="Run stage 2 story aggregation.")
+    aggregate_parser.add_argument("--range-start", help="UTC start timestamp for aggregation window planning.")
+    aggregate_parser.add_argument("--range-end", help="UTC end timestamp for aggregation window planning.")
+    aggregate_parser.add_argument("--limit-windows", type=int, help="Maximum number of planned windows to process.")
+    aggregate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run LLM grouping without mutating events, article assignments, or aggregation windows.",
+    )
+    aggregate_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
+    experiment_parser = sub.add_parser(
+        "aggregation-experiment",
+        help="Compare Gemini event grouping with titles only versus titles plus summaries.",
+    )
+    experiment_parser.add_argument("--limit", type=int, help="Number of unassigned articles to test.")
+    experiment_parser.add_argument(
+        "--published-date",
+        help="Restrict the experiment to articles published on this UTC date (YYYY-MM-DD).",
+    )
+    experiment_parser.add_argument(
+        "--published-after",
+        help="Restrict the experiment to articles published at or after this UTC timestamp.",
+    )
+    experiment_parser.add_argument(
+        "--published-before",
+        help="Restrict the experiment to articles published before this UTC timestamp.",
+    )
+    experiment_parser.add_argument(
+        "--mode",
+        choices=["both", "titles", "titles-summaries"],
+        default="both",
+        help="Which prompt mode to run.",
+    )
+    experiment_parser.add_argument("--output", type=Path, help="Optional path for the experiment JSON artifact.")
+    experiment_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
+    digest_parser = sub.add_parser(
+        "article-digest-experiment",
+        help="Generate Gemini article digests for low-signal summaries plus controls.",
+    )
+    digest_parser.add_argument("--limit", type=int, default=40, help="Number of articles to digest.")
+    digest_parser.add_argument(
+        "--controls",
+        type=int,
+        default=8,
+        help="Approximate number of normal-summary control articles to include.",
+    )
+    digest_parser.add_argument(
+        "--published-date",
+        help="Restrict the experiment to articles published on this UTC date (YYYY-MM-DD).",
+    )
+    digest_parser.add_argument(
+        "--published-after",
+        help="Restrict the experiment to articles published at or after this UTC timestamp.",
+    )
+    digest_parser.add_argument(
+        "--published-before",
+        help="Restrict the experiment to articles published before this UTC timestamp.",
+    )
+    digest_parser.add_argument("--output", type=Path, help="Optional path for the digest experiment JSON artifact.")
+    digest_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     sub.add_parser("list-feeds", help="List enabled feed source IDs.")
     clean_parser = sub.add_parser("clean-data", help="Remove local pipeline DB and staged article data.")
     clean_parser.add_argument("--yes", action="store_true", help="Confirm deletion of local generated data.")
@@ -89,14 +166,63 @@ def main() -> None:
             state.sync_feeds(feeds)
         print("initialized data/state/pipeline.db")
     elif args.command == "collect":
-        progress = None
-        if args.verbose:
-            def progress(message: str) -> None:
-                from datetime import UTC, datetime
-                timestamp = datetime.now(UTC).strftime("%H:%M:%S")
-                print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
+        progress = _stderr_progress if args.verbose else None
         stats = asyncio.run(collect_once(progress=progress))
         print(json.dumps(stats, indent=2, sort_keys=True))
+    elif args.command == "aggregate":
+        progress = _stderr_progress if args.verbose else None
+        if (args.range_start is None) != (args.range_end is None):
+            parser.error("--range-start and --range-end must be provided together")
+        if args.limit_windows is not None and args.limit_windows < 1:
+            parser.error("--limit-windows must be at least 1")
+        migrate()
+        stats = aggregate_once(
+            range_start=args.range_start,
+            range_end=args.range_end,
+            limit_windows=args.limit_windows,
+            dry_run=args.dry_run,
+            progress=progress,
+        )
+        print(json.dumps(stats, indent=2, sort_keys=True))
+    elif args.command == "aggregation-experiment":
+        progress = _stderr_progress if args.verbose else None
+        if args.limit is not None and args.limit < 1:
+            parser.error("--limit must be at least 1")
+        if args.published_date and (args.published_after or args.published_before):
+            parser.error("--published-date cannot be combined with --published-after or --published-before")
+        modes = ("titles", "titles_summaries") if args.mode == "both" else (args.mode.replace("-", "_"),)
+        has_time_filter = args.published_date or args.published_after or args.published_before
+        limit = args.limit if args.limit is not None else (None if has_time_filter else 40)
+        result = run_grouping_experiment(
+            limit=limit,
+            published_date=args.published_date,
+            published_after=args.published_after,
+            published_before=args.published_before,
+            modes=modes,
+            progress=progress,
+        )
+        output_path = args.output or default_experiment_output_path()
+        write_experiment_result(result, output_path)
+        print(json.dumps({"output": str(output_path), "result": result}, indent=2, sort_keys=True))
+    elif args.command == "article-digest-experiment":
+        progress = _stderr_progress if args.verbose else None
+        if args.limit < 1:
+            parser.error("--limit must be at least 1")
+        if args.controls < 0:
+            parser.error("--controls cannot be negative")
+        if args.published_date and (args.published_after or args.published_before):
+            parser.error("--published-date cannot be combined with --published-after or --published-before")
+        result = run_article_digest_experiment(
+            limit=args.limit,
+            control_count=args.controls,
+            published_date=args.published_date,
+            published_after=args.published_after,
+            published_before=args.published_before,
+            progress=progress,
+        )
+        output_path = args.output or default_digest_experiment_output_path()
+        write_digest_experiment_result(result, output_path)
+        print(json.dumps({"output": str(output_path), "result": result}, indent=2, sort_keys=True))
     elif args.command == "list-feeds":
         for feed in load_feeds(enabled_only=True):
             print(f"{feed.source_id}\t{feed.feed_url}")

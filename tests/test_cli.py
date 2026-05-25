@@ -160,3 +160,224 @@ def test_collect_without_verbose_keeps_stderr_quiet(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.err == ""
     assert json.loads(captured.out) == {"feeds_seen": 1}
+
+
+def test_aggregate_verbose_writes_progress_to_stderr(monkeypatch, capsys):
+    def fake_aggregate_once(*, range_start=None, range_end=None, limit_windows=None, dry_run=False, progress=None):
+        assert range_start == "2026-05-24T16:00:00Z"
+        assert range_end == "2026-05-24T22:00:00Z"
+        assert limit_windows == 1
+        assert dry_run is True
+        assert progress is not None
+        progress("aggregate: fake progress")
+        return {"windows_processed": 1}
+
+    monkeypatch.setattr("pipeline.cli.aggregate_once", fake_aggregate_once)
+    monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "news-tldr-pipeline",
+            "aggregate",
+            "--range-start",
+            "2026-05-24T16:00:00Z",
+            "--range-end",
+            "2026-05-24T22:00:00Z",
+            "--limit-windows",
+            "1",
+            "--dry-run",
+            "--verbose",
+        ],
+    )
+
+    main()
+
+    captured = capsys.readouterr()
+    assert "aggregate: fake progress" in captured.err
+    assert json.loads(captured.out) == {"windows_processed": 1}
+
+
+def test_aggregation_experiment_writes_progress_and_output(monkeypatch, capsys, tmp_path):
+    output_path = tmp_path / "experiment.json"
+
+    def fake_run_grouping_experiment(
+        *,
+        limit,
+        published_date=None,
+        published_after=None,
+        published_before=None,
+        modes=("titles", "titles_summaries"),
+        progress=None,
+    ):
+        assert limit == 3
+        assert published_date is None
+        assert published_after is None
+        assert published_before is None
+        assert modes == ("titles", "titles_summaries")
+        assert progress is not None
+        progress("aggregation experiment: fake progress")
+        return {"article_count": 3}
+
+    written = {}
+
+    def fake_write_experiment_result(result, path):
+        written["result"] = result
+        written["path"] = path
+
+    monkeypatch.setattr("pipeline.cli.run_grouping_experiment", fake_run_grouping_experiment)
+    monkeypatch.setattr("pipeline.cli.write_experiment_result", fake_write_experiment_result)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["news-tldr-pipeline", "aggregation-experiment", "--limit", "3", "--output", str(output_path), "--verbose"],
+    )
+
+    main()
+
+    captured = capsys.readouterr()
+    assert "aggregation experiment: fake progress" in captured.err
+    assert written == {"result": {"article_count": 3}, "path": output_path}
+    payload = json.loads(captured.out)
+    assert payload["output"] == str(output_path)
+    assert payload["result"] == {"article_count": 3}
+
+
+def test_aggregation_experiment_date_mode_defaults_to_full_day(monkeypatch, capsys, tmp_path):
+    output_path = tmp_path / "experiment.json"
+
+    def fake_run_grouping_experiment(
+        *,
+        limit,
+        published_date=None,
+        published_after=None,
+        published_before=None,
+        modes=("titles", "titles_summaries"),
+        progress=None,
+    ):
+        assert limit is None
+        assert published_date == "2026-05-24"
+        assert published_after is None
+        assert published_before is None
+        assert modes == ("titles_summaries",)
+        assert progress is None
+        return {"article_count": 945}
+
+    monkeypatch.setattr("pipeline.cli.run_grouping_experiment", fake_run_grouping_experiment)
+    monkeypatch.setattr("pipeline.cli.write_experiment_result", lambda result, path: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "news-tldr-pipeline",
+            "aggregation-experiment",
+            "--published-date",
+            "2026-05-24",
+            "--mode",
+            "titles-summaries",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    main()
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["result"] == {"article_count": 945}
+
+
+def test_aggregation_experiment_time_window_defaults_to_uncapped(monkeypatch, capsys, tmp_path):
+    output_path = tmp_path / "experiment.json"
+
+    def fake_run_grouping_experiment(
+        *,
+        limit,
+        published_date=None,
+        published_after=None,
+        published_before=None,
+        modes=("titles", "titles_summaries"),
+        progress=None,
+    ):
+        assert limit is None
+        assert published_date is None
+        assert published_after == "2026-05-24T16:00:00Z"
+        assert published_before == "2026-05-24T22:00:00Z"
+        assert modes == ("titles_summaries",)
+        assert progress is None
+        return {"article_count": 565}
+
+    monkeypatch.setattr("pipeline.cli.run_grouping_experiment", fake_run_grouping_experiment)
+    monkeypatch.setattr("pipeline.cli.write_experiment_result", lambda result, path: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "news-tldr-pipeline",
+            "aggregation-experiment",
+            "--published-after",
+            "2026-05-24T16:00:00Z",
+            "--published-before",
+            "2026-05-24T22:00:00Z",
+            "--mode",
+            "titles-summaries",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    main()
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["result"] == {"article_count": 565}
+
+
+def test_article_digest_experiment_writes_progress_and_output(monkeypatch, capsys, tmp_path):
+    output_path = tmp_path / "digests.json"
+
+    def fake_run_article_digest_experiment(
+        *,
+        limit,
+        control_count,
+        published_date=None,
+        published_after=None,
+        published_before=None,
+        progress=None,
+    ):
+        assert limit == 5
+        assert control_count == 2
+        assert published_date is None
+        assert published_after is None
+        assert published_before is None
+        assert progress is not None
+        progress("article digest experiment: fake progress")
+        return {"article_count": 5}
+
+    written = {}
+
+    def fake_write_digest_experiment_result(result, path):
+        written["result"] = result
+        written["path"] = path
+
+    monkeypatch.setattr("pipeline.cli.run_article_digest_experiment", fake_run_article_digest_experiment)
+    monkeypatch.setattr("pipeline.cli.write_digest_experiment_result", fake_write_digest_experiment_result)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "news-tldr-pipeline",
+            "article-digest-experiment",
+            "--limit",
+            "5",
+            "--controls",
+            "2",
+            "--output",
+            str(output_path),
+            "--verbose",
+        ],
+    )
+
+    main()
+
+    captured = capsys.readouterr()
+    assert "article digest experiment: fake progress" in captured.err
+    assert written == {"result": {"article_count": 5}, "path": output_path}
+    payload = json.loads(captured.out)
+    assert payload["output"] == str(output_path)
+    assert payload["result"] == {"article_count": 5}
