@@ -42,23 +42,19 @@ This installs the feed parser, HTTP client with HTTP/2 support, article extracti
 
 Any scripts or pipeline executions should run using the Python interpreter inside `.venv` (e.g., `./.venv/bin/python`).
 
-### Local LLM Setup
+### Hosted LLM Setup
 
-Stage 2 story aggregation is planned to use local Ollama with `gemma4:26b`. The recommended local alias is:
+Stage 2 story aggregation uses the Gemini Developer API by default. Create a
+local `.env` file with an AI Studio API key and the default aggregation model:
 
 ```bash
-ollama create gemma4-26b-news-greedy-32k -f <(printf '%s\n' \
-  'FROM gemma4:26b' \
-  'PARAMETER num_ctx 32768' \
-  'PARAMETER temperature 0' \
-  'PARAMETER top_k 1' \
-  'PARAMETER top_p 1' \
-  'PARAMETER repeat_penalty 1.5' \
-  'PARAMETER repeat_last_n -1' \
-  'PARAMETER num_predict 2048')
+GEMINI_API_KEY=your-ai-studio-api-key
+GEMINI_MODEL=gemini-3.1-flash-lite
 ```
 
-Aggregation API calls should set `think: false` and use validated structured output.
+The `.env` file is ignored by git and must not be committed. Aggregation calls
+should use Gemini structured output and deterministic generation settings, with
+all LLM responses validated before they update pipeline state.
 
 ### Pipeline Commands
 

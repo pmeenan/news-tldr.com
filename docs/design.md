@@ -13,7 +13,7 @@ news-tldr.com is a filesystem-backed RSS aggregator that collects source article
 
 ## Technology Stack
 
-- **Pipeline**: Python. Libraries: `feedparser`, `httpx` with `h2` for HTTP/2, `trafilatura` (article extraction), `beautifulsoup4` (custom scrapers), `anthropic`/`openai`/local model client (LLM). SQLite is accessed through Python's standard-library `sqlite3` module.
+- **Pipeline**: Python. Libraries: `feedparser`, `httpx` with `h2` for HTTP/2, `trafilatura` (article extraction), `beautifulsoup4` (custom scrapers), hosted LLM API client (Gemini Developer API by default). SQLite is accessed through Python's standard-library `sqlite3` module.
 - **Presentation**: Astro (or similar frontend-focused SSG). Generates static HTML/CSS/JSON from published story artifacts.
 - **State**: SQLite database for pipeline state, incremental processing tracking, and fast lookups. JSON files remain the human-readable artifacts for each stage.
 - **Deployment**: The pipeline environment (including the SQLite database, staging files, and lock states) must **never** be web-accessible. The published SSG content in `dist/` is pushed to a separate web hosting location, which is a CDN-fronted static file server. The pipeline runs on a schedule (cron, GitHub Actions, or similar) strictly isolated from the public-facing site.
@@ -109,7 +109,7 @@ Responsibilities:
 
 The collection implementation lives in the `pipeline` Python package:
 
-- `pipeline/cli.py`: command-line entrypoint. `python -m pipeline.cli init-db` initializes the state database, `python -m pipeline.cli collect` runs collection, `python -m pipeline.cli collect --verbose` streams incremental progress to stderr while preserving final JSON stats on stdout, and `python -m pipeline.cli clean-data --yes` removes local generated collection state for a fresh run.
+- `pipeline/cli.py`: command-line entrypoint. `./.venv/bin/python -m pipeline.cli init-db` initializes the state database, `./.venv/bin/python -m pipeline.cli collect` runs collection, `./.venv/bin/python -m pipeline.cli collect --verbose` streams incremental progress to stderr while preserving final JSON stats on stdout, and `./.venv/bin/python -m pipeline.cli clean-data --yes` removes local generated collection state for a fresh run.
 - `pipeline/state.py`: SQLite schema and migration entrypoint. The schema includes feeds, feed conditional request state, articles, article fingerprints, events, pipeline runs, item errors, and LLM usage.
 - `pipeline/lock.py`: atomic lock file acquisition/release with PID and Linux process start-time verification, plus stale-lock recovery based on the configured watchdog timeout.
 - `pipeline/http_client.py`: async HTTP client with browser-like desktop Chrome request headers, per-domain rate limiting, robots.txt and crawl-delay enforcement, retry/backoff handling, and manual redirect validation.
@@ -207,20 +207,20 @@ Responsibilities:
 
 ### LLM Integration for Aggregation
 
-Aggregation uses a local Ollama model by default. The selected Stage 2 model is `gemma4:26b`, run through a project alias such as `gemma4-26b-news-greedy-32k` with deterministic settings:
+Aggregation uses the Gemini Developer API by default, authenticated with an AI
+Studio API key in local `.env` configuration:
 
-```text
-FROM gemma4:26b
-PARAMETER num_ctx 32768
-PARAMETER temperature 0
-PARAMETER top_k 1
-PARAMETER top_p 1
-PARAMETER repeat_penalty 1.5
-PARAMETER repeat_last_n -1
-PARAMETER num_predict 2048
+```bash
+GEMINI_API_KEY=your-ai-studio-api-key
+GEMINI_MODEL=gemini-3.1-flash-lite
 ```
 
-All aggregation calls must pass `think: false` to the Ollama API. Local evaluation on the staged corpus showed this is required for reliable structured responses. The model supports a larger advertised context window, but `32768` is the initial operating target because it fits the local CPU/64GB RAM environment with acceptable throughput.
+The initial hosted model is `gemini-3.1-flash-lite`, called through the
+`generativelanguage.googleapis.com` API with the `x-goog-api-key` header.
+Aggregation requests should use deterministic generation settings and Gemini
+structured output (`responseMimeType: application/json` plus a response JSON
+schema). API keys must not be written to logs, command output, JSON artifacts,
+or committed files.
 
 Aggregation LLM calls are **batched**. Send a batch of article metadata (headline + a brief paragraph summary + source + publish date) along with a context list of currently active events (retrieved from the state database with their `event_id`, title, category, `keywords`, major entities, article count, and update timestamp) and ask the model to:
 
@@ -231,16 +231,23 @@ Aggregation LLM calls are **batched**. Send a batch of article metadata (headlin
 
 Prompt shape is part of the contract. The first aggregation pass should avoid free-text fields and ask for compact, order-preserving structured output using numeric enum codes rather than copied article IDs. Deterministic code maps each output row back to the input article by position. This reduces malformed JSON, repeated text inside string fields, and ID-copying errors. Event naming, keyword/entity generation, and slug suggestions should happen in a second smaller call after candidate event assignments are known.
 
-Batch size should balance context window limits against per-call overhead. Start with small validation batches, then scale toward 20-50 article summaries once output validation and retries are stable. Matching uses only the headline and a brief paragraph summary (typically the lead sentence or feed summary) to keep payloads small and avoid processing full article text at this stage. Full article text stays on disk.
+Batch size should balance context window limits, cost, latency, and retry blast
+radius. The hosted Gemini path supports much larger contexts than the local
+Ollama evaluation, but the implementation should still start with small
+validation batches, then scale once output validation and retries are stable.
+Matching uses only the headline and a brief paragraph summary (typically the
+lead sentence or feed summary) to keep payloads small and avoid processing full
+article text at this stage. Full article text stays on disk.
 
 Deterministic code validates all LLM outputs: checks category IDs against `config/categories.json`, enforces event ID uniqueness, and rejects malformed suggestions.
 
-Local model evaluation on May 24, 2026:
+Model evaluation notes:
 
-- `gemma4:26b` with `think: false` and compact numeric schema produced valid structured output in about 29 seconds for an 8-article CPU batch and had the best quality/speed balance.
+- Local model evaluation on May 24, 2026 found that `gemma4:26b` with `think: false` and compact numeric schema produced valid structured output in about 29 seconds for an 8-article CPU batch, but larger title-clustering experiments were too slow for the pipeline's needs.
 - `qwen3.6:27b` with `think: false` produced good structured output but was much slower, about 227 seconds for the same 8-article CPU batch.
 - `llama3.1:8b` produced valid structured output but lower classification quality.
-- Free-text JSON fields and calls without `think: false` caused empty responses, looping, malformed JSON, or poor reliability in local tests.
+- Free-text JSON fields and calls without local-model thinking controls caused empty responses, looping, malformed JSON, or poor reliability in local tests.
+- Direct Gemini Developer API smoke tests with an AI Studio key succeeded for `gemini-2.5-flash-lite` and `gemini-3.1-flash-lite`; the project default is now `gemini-3.1-flash-lite`.
 
 ### Event JSON Sketch
 
@@ -437,7 +444,7 @@ The presentation build runs after each pipeline run. It reads the current state 
 
 ### CLI Output Contract
 
-Pipeline commands that can run long enough to feel idle in an interactive shell must support `--verbose`. Verbose progress/status is written to stderr, while final machine-readable output remains on stdout. The collection command currently implements this contract with `python -m pipeline.cli collect --verbose`.
+Pipeline commands that can run long enough to feel idle in an interactive shell must support `--verbose`. Verbose progress/status is written to stderr, while final machine-readable output remains on stdout. The collection command currently implements this contract with `./.venv/bin/python -m pipeline.cli collect --verbose`.
 
 The `clean-data` command removes local generated collection state for a fresh run: the SQLite database and sidecars, staged article files, and fetch logs by default. It requires `--yes`, refuses to run while `data/state/pipeline.lock` exists, and can keep fetch logs with `--keep-fetch-log` or override the lock guard with `--ignore-lock`.
 
@@ -539,11 +546,13 @@ This keeps decisions auditable and makes reruns straightforward when prompts cha
 
 ### Model Flexibility
 
-The LLM integration should abstract the model backend. The Stage 2 aggregation default is local Ollama with `gemma4:26b` via the `gemma4-26b-news-greedy-32k` alias and `think: false`; other backends remain swappable behind the same interface. The system may use:
+The LLM integration should abstract the model backend. The Stage 2 aggregation
+default is the Gemini Developer API with `gemini-3.1-flash-lite`; other
+backends remain swappable behind the same interface. The system may use:
 
-- API models (Claude, GPT, etc.) for high-quality editorial summaries.
-- Local models for classification and grouping where latency, privacy, and cost matter.
-- Different models for different stages (e.g., local model for batched aggregation, API model for editorial).
+- Hosted API models for aggregation and high-quality editorial summaries.
+- Local models for fallback, development, or privacy-sensitive experiments when latency is acceptable.
+- Different models for different stages (e.g., inexpensive hosted model for batched aggregation, stronger model for editorial).
 
 The abstraction should support swapping backends without changing pipeline logic.
 

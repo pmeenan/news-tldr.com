@@ -87,5 +87,5 @@ This file serves as the coordinator and handoff state for AI agents working on t
 - **Next Steps:**
   1. Start Milestone 2: Story Aggregation. Read unprocessed articles (`event_id IS NULL`) from the state database.
   2. Implement near-duplicate reprint detection (headline similarity, exact text, or URL hashes).
-  3. Design the batched LLM classification and event grouping prompt using headline, brief paragraph summary, source, publish date, and active event context.
+  3. Design the batched LLM classification and event grouping prompt using headline, brief paragraph summary, source, publish date, and active event context. The current hosted default is the Gemini Developer API with `GEMINI_API_KEY` and `GEMINI_MODEL=gemini-3.1-flash-lite` loaded from local `.env`.
   4. Run `collect --verbose` when refreshing the corpus. The 20 new sources added on May 24 (NBC, Politico, The Hill, CNBC, MarketWatch, Scientific American, MIT Technology Review, Phys.org, NASA, Variety, The Hollywood Reporter, Billboard, DW, France 24, Electrek, Jalopnik, CBS Sports, CNET, 9to5Mac, 9to5Google) have not been fetched yet. Use `clean-data --yes` first only when a fully fresh local collection is desired.
