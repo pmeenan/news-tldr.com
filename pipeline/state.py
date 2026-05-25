@@ -18,7 +18,7 @@ def _relative_to_project(path: Path) -> str:
         return str(path)
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 
 # Each migration is the SQL needed to take the database from the previous
@@ -191,6 +191,24 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
 
         CREATE INDEX IF NOT EXISTS idx_articles_digest_status_published
           ON articles(digest_status, published_at);
+        """,
+    ),
+    (
+        6,
+        """
+        ALTER TABLE articles ADD COLUMN aggregation_status TEXT NOT NULL DEFAULT 'pending';
+        ALTER TABLE articles ADD COLUMN aggregation_reason TEXT;
+
+        CREATE INDEX IF NOT EXISTS idx_articles_aggregation_status_published
+          ON articles(aggregation_status, published_at);
+        """,
+    ),
+    (
+        7,
+        """
+        ALTER TABLE articles ADD COLUMN is_filtered INTEGER NOT NULL DEFAULT 0;
+        UPDATE articles SET is_filtered = 1 WHERE aggregation_status LIKE 'filtered_%';
+        CREATE INDEX IF NOT EXISTS idx_articles_is_filtered_published ON articles(is_filtered, published_at);
         """,
     ),
 )
@@ -378,7 +396,7 @@ class StateDB:
     def article_time_bounds(self, *, unassigned_only: bool = True) -> tuple[str, str] | None:
         where = "WHERE published_at IS NOT NULL"
         if unassigned_only:
-            where += " AND event_id IS NULL"
+            where += " AND event_id IS NULL AND is_filtered = 0"
         row = self.conn.execute(
             f"""
             SELECT MIN(published_at) AS min_published_at, MAX(published_at) AS max_published_at
@@ -448,7 +466,14 @@ class StateDB:
             return 0
         with self.conn:
             cursor = self.conn.executemany(
-                "UPDATE articles SET event_id = ? WHERE article_id = ?",
+                """
+                UPDATE articles
+                SET event_id = ?,
+                    aggregation_status = 'assigned',
+                    aggregation_reason = NULL,
+                    is_filtered = 0
+                WHERE article_id = ?
+                """,
                 [(event_id, article_id) for article_id in article_ids],
             )
         return cursor.rowcount
@@ -458,6 +483,46 @@ class StateDB:
             self.conn.execute(
                 "UPDATE articles SET content_type = ? WHERE article_id = ?",
                 (content_type, article_id),
+            )
+
+    def update_article_aggregation_status(
+        self,
+        article_id: str,
+        *,
+        status: str,
+        reason: str | None = None,
+    ) -> None:
+        is_filtered = 1 if status.startswith("filtered_") else 0
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE articles
+                SET aggregation_status = ?,
+                    aggregation_reason = ?,
+                    is_filtered = ?
+                WHERE article_id = ?
+                  AND event_id IS NULL
+                """,
+                (status, reason, is_filtered, article_id),
+            )
+
+    # Idempotent helper used after digest completion and on every sliding-window
+    # eligibility pass. Guarded by event_id IS NULL so it does not stomp an
+    # already-assigned article back to pending, and guarded by current status so
+    # repeated window passes do not generate redundant writes.
+    def set_article_aggregation_pending_if_unassigned(self, article_id: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE articles
+                SET aggregation_status = 'pending',
+                    aggregation_reason = NULL,
+                    is_filtered = 0
+                WHERE article_id = ?
+                  AND event_id IS NULL
+                  AND (aggregation_status IS NULL OR aggregation_status != 'pending')
+                """,
+                (article_id,),
             )
 
     def update_article_digest_status(
@@ -607,6 +672,7 @@ class StateDB:
             SELECT COUNT(*) AS count
             FROM articles
             WHERE event_id IS NULL
+              AND is_filtered = 0
               AND published_at >= ?
               AND published_at < ?
             """,
@@ -717,10 +783,7 @@ def migrate(path: Path = DB_PATH) -> None:
     conn = connect(path)
     try:
         conn.executescript(
-            "CREATE TABLE IF NOT EXISTS schema_version ("
-            " version INTEGER PRIMARY KEY,"
-            " applied_at TEXT NOT NULL"
-            ");"
+            "CREATE TABLE IF NOT EXISTS schema_version ( version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);"
         )
         row = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_version").fetchone()
         current = int(row[0]) if row else 0

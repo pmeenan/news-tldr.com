@@ -57,4 +57,3 @@ async def test_validate_url_handles_dns_timeout(monkeypatch):
     with pytest.raises(UnsafeURL) as excinfo:
         await validate_url("http://example.test/latest")
     assert "host resolution timed out" in str(excinfo.value)
-

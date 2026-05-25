@@ -12,11 +12,11 @@
   "aggregation": {
     "window_hours": 6,
     "window_step_hours": 1,
-    "stale_threshold_hours": 48
+    "stale_threshold_hours": 48,
+    "min_category_impact": 0.25
   },
   "digest": {
-    "enabled_before_aggregation": true,
-    "concurrency": 8,
+    "concurrency": 10,
     "content_char_limit": 12000
   },
   "retention": {

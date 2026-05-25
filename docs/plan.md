@@ -11,6 +11,7 @@ This document tracks the phased buildout of the filesystem-backed RSS aggregator
 - Filesystem JSON artifacts are the source of truth between stages.
 - Pipeline stages: data collection, story aggregation, editorial, presentation.
 - Data collection is implemented; next active work is story aggregation.
+- Article digest generation is now its own runnable stage before story aggregation.
 - The configured source catalog has 83 enabled sources, including AP News and MotorTrend custom scrapers.
 - Neutrality, attribution, and auditability are first-class requirements.
 - Pipeline runs hourly. Stories evolve as new articles arrive across runs.
@@ -91,6 +92,8 @@ gantt
 > a 6-hour window with a 1-hour step, tracked in `aggregation_windows` so
 > completed windows are not rerun on every pipeline pass. The newest completed
 > window may be rerun on the next pass to absorb late articles near the overlap.
+> By default, if no range is specified, aggregation and digestion processing starts
+> from the start of the previous UTC day to avoid processing older retained staging data.
 
 > Hosted LLM decision: Stage 2 aggregation will use the Gemini Developer API
 > by default with an AI Studio key loaded from local `.env` as
@@ -103,6 +106,11 @@ gantt
 
 - [x] Implement state database query for unprocessed articles (`event_id` is null).
 - [x] Generate and persist per-article LLM digests before aggregation, including factual summaries, key facts, content-quality signals, article-level impact scores, prompt metadata, SQLite status tracking, and bounded parallel API calls.
+- [x] Add standalone `digest --verbose` CLI stage so digest generation and impact scoring can be run and debugged before aggregation.
+- [x] Normalize common article-impact scale mistakes from digest output, clamp contradictory low-signal impact scores, support forced digest regeneration, improve key-fact prompt guidance, and filter non-news/spammy/video-carousel plus low category-impact articles before aggregation.
+- [x] Article-digest v3 prompt + cap rework (May 25, 2026): controlled `rationale_codes` vocabulary in the prompt; layered impact caps with per-axis minima (multi-topic 0.30, vendor_announcement asymmetric 0.55/0.75, unconfirmed_injury global-only 0.60, paywalled in the noisy-content set); optional `study_stage` schema field for research articles; tightened `novelty` semantics (research papers are `analysis`/`evergreen`, not `breaking`); tightened `scope` definition (actor reach, not topic reach); explicit `paywalled` vs `thin` discrimination; rule against leaking `published_at` metadata into summaries; advertorial labeling required for promotional non_news.
+- [x] Add deterministic media-page filtering before aggregation using URL/path and collection signals, so obvious video/carousel pages are excluded even when the digest model summarizes a transcript as high-impact news.
+- [x] Article-digest v6 hardening: deterministically filters stale estimated-date URL/live pages before LLM calls and code-gates `study_stage` persistence to covered biomedical/pharmaceutical/materials research contexts.
 - [x] Implement near-duplicate detection for exact reprints (content text and canonical URL hashes). Headline-hash and summary-hash signals are stored in `article_fingerprints` for future use, but are intentionally not used to short-circuit digest generation because generic shared headlines would silently propagate one story's digest onto unrelated stories.
 - [x] Implement Gemini Developer API client using stdlib HTTP, loading `GEMINI_API_KEY` and `GEMINI_MODEL` from `.env`/environment, with structured output, request timeouts, model/prompt metadata, and usage/timing capture.
 - [x] Design window-based LLM prompt for story clustering (headline + brief paragraph summary + source + date) to identify articles and angles covering the same developing news subject.

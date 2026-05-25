@@ -14,6 +14,7 @@ This file serves as the coordinator and handoff state for AI agents working on t
    - Update the **Current State & Handoff** section in this file (`AGENTS.md`) to clearly state what was done and what the incoming agent must do.
 6. **Dependencies.** Before adding any new dependency: scan it using security tools, add it to `requirements.txt`, and update [README.md](file:///home/pmeenan/src/news-tldr.com/README.md) with setup instructions.
 7. **Pipeline CLI Feedback.** All long-running pipeline operations must support a `--verbose` flag that streams incremental progress/status to stderr while preserving machine-readable final output on stdout.
+8. **Respect `is_filtered` column.** All database queries retrieving articles for downstream pipeline stages (e.g. digestion, aggregation, editorial, presentation) must strictly filter by `is_filtered = 0` so that excluded spam, non-news, or media-only content remains globally ignored.
 
 
 ---
@@ -31,57 +32,108 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
-### State on May 25, 2026
+### State on May 25, 2026 (Digest Prompt + Cap Rework — article-digest-v3)
 
-- **Completed:** Milestone 0 (Architecture & Data Contracts), Milestone 1 (Data Collection), and a fuller implementation pass for Milestone 2 (Story Aggregation). Stage 2 is implemented but still needs a controlled live run before it should be considered operationally proven.
-- **Stage 1 status:** Collection remains implemented and verified from the May 24 handoff: 83 enabled sources, AP News and MotorTrend scraper support, lead-image sidecars, polite HTTP/robots/SSRF protections, `collect --verbose`, and `clean-data --yes`.
-- **Stage 2 implementation added:**
-  - `pipeline/llm.py` implements the Gemini Developer API client using stdlib HTTP, `.env`/environment loading, `GEMINI_API_KEY`, `GEMINI_MODEL`, structured JSON output, timeout handling, usage capture, deterministic generation settings, and retry/backoff behavior.
-  - `pipeline/digest.py` implements the article digest step. Normal aggregation generates missing `llm_digest` entries before grouping, using bounded parallel Gemini calls configured in `config/pipeline.json` (`digest.concurrency`, currently 8). Digests persist to article JSON with factual `summary`, `key_facts`, `content_quality`, article-level `impact` (`global`, `category`, `scope`, `novelty`, `rationale_codes`), model, prompt version, timestamp, and content chars used.
-  - The digest prompt is `article-digest-v2`. Existing v1 digests are intentionally considered stale and will be regenerated.
-  - `pipeline/aggregate.py` implements story aggregation over sliding publish-time windows. Defaults are 6-hour windows with a 1-hour step, loaded from `config/pipeline.json`.
-  - `pipeline/cli.py` exposes `aggregate --verbose`, `--range-start`, `--range-end`, `--limit-windows`, and `--dry-run`. Verbose progress goes to stderr while final stats JSON stays on stdout. `aggregate --dry-run` does not generate or persist digests.
-  - `pipeline/cli.py` also exposes `aggregation-experiment` and `article-digest-experiment`; digest experiments write side-by-side review artifacts under `data/staging/article-digest-experiments/` without mutating article JSON or aggregation state.
-  - The grouping prompt uses headline + digest summary/key facts when available, falling back to the collected source summary. It asks Gemini to cluster articles that represent the same underlying event/developing story. Prompt rules allow eager clustering of multiple angles on the same story; the editorial stage will separate angles later.
-  - Grouping output is compact and index-based. Deterministic validation requires every article index to appear exactly once and rejects duplicate, missing, malformed, or out-of-range indexes.
-  - Event writing is implemented: new/updated event JSON files go to `data/events/<event_id>.json`, `events` rows are upserted, and `articles.event_id` assignments are recorded.
-  - Event IDs are deterministic first-pass IDs derived from date + headline slug. Existing event IDs are reused when a group contains already-assigned articles. Richer title/slug/entity generation remains a follow-up LLM pass.
-  - `aggregation_windows` tracks window status so completed windows are not rerun every pipeline pass; the newest completed window may be rerun to catch late/boundary articles.
-  - Event newsworthiness now prefers article-level digest impact and deterministically rolls it up to event scores, avoiding an extra LLM call for groups whose articles already have digest impact. Groups missing digest impact can still use the smaller post-grouping newsworthiness LLM pass, with deterministic baseline fallback. Scores are stored in event JSON and mirrored in SQLite (`newsworthiness_global`, `newsworthiness_category`, `newsworthiness_json`).
-- **Stage 2 refinements & improvements:**
-  - **Gemini API Error Handling & Jittered Backoff:** Added random jitter to exponential backoff delays in `pipeline/llm.py` to handle API rate limiting and temporary gateway errors robustly.
-  - **Digest Failure & Retry Limits:** Track persistent article-level digest errors in SQLite `item_errors`. Articles exceeding `max_item_retries` (default: 3) are skipped to avoid infinite loops and waste.
-  - **Reprint Copying & Fingerprinted Digest Propagation:** Optimized parallel processing to avoid redundant LLM calls for exact duplicate reprints. Fingerprints (`content_hash`, `canonical_url_hash`) are joined during retrieval, and matching articles receive copies of the completed digest either immediately (if the canonical digest exists) or deferred (propagated once the canonical article's LLM thread finishes). Mapped duplicates are marked as `"copied"` in SQLite `digest_model` while the article JSON keeps the real generating model for provenance.
-  - **Staging Retention Limits:** Reduced default staging retention window from 7 days to 3 days across `config/pipeline.json`, `pipeline/collect.py` defaults, and `docs/design.md` references.
-- **Stage 2 digest review pass (May 25):** Reviewed the new digest pass and fixed the issues that surfaced. Code changes are confined to `pipeline/digest.py` and `tests/test_digest.py`; schema and config are unchanged.
-  - **Removed headline-hash digest copy path.** `_fingerprint_key` and `_find_completed_digest_by_fingerprint` no longer key off `headline_hash`. Generic shared headlines (e.g. "Morning briefing", "[City] weather forecast") were a silent corruption risk. `headline_hash` and `summary_hash` remain stored in `article_fingerprints` for other uses.
-  - **Missing-JSON retry loop fixed.** When the article JSON file is absent, the skip path now also writes `digest_prompt_version`, so the candidate query stops re-selecting the row on every pass. Manual reset is required if the file later reappears (same as for `max_retries_exceeded` skips).
-  - **Stats split for clearer telemetry.** `stats["already_completed"]` is replaced by three distinct counters: `existing_digest` (article already had a valid digest), `reprints_copied_persisted` (reprint of an article whose digest was already on disk), and `reprints_copied_in_batch` (deferred copy after the canonical was generated this pass).
-  - **Hoisted per-row work.** `load_pipeline_config()` is now called once per batch; `max_item_retries` is read once and passed down.
-  - **Batched `item_errors` retry counts.** Replaced the N+1 per-article `COUNT(*)` with a single grouped `IN (...)` query (chunked at 500 IDs) executed at the top of `digest_articles_for_aggregation`.
-  - **Batch digest-lookup cache.** `_find_completed_digest_by_fingerprint` accepts a cache dict and reuses results for repeated fingerprints within a single batch, avoiding repeat file reads.
-  - **Hardened digest system instruction.** Added explicit anti-hallucination guidance: "Do not infer, guess, or add facts that are not directly stated in that text. If a detail is unclear, omit it rather than speculate."
-  - **Candidate WHERE clause cleanup.** Reordered `_digest_candidate_rows` predicates and added a comment explaining the `digest_prompt_version IS NULL` branch is load-bearing because SQL `col != ?` evaluates to NULL when the column is NULL.
-  - **New regression tests.** `test_digest_articles_for_aggregation_does_not_copy_by_headline_hash` confirms that two articles with the same `headline_hash` but different content do not share digests. `test_digest_articles_for_aggregation_missing_json_does_not_retry` confirms that an article whose JSON is missing is skipped on the first pass and not re-selected on subsequent passes. Test count is now `133 passed` (up from 131).
-  - **Note on `digest_model="copied"` design (no code change):** During review the original code already wrote the real generating model into the article JSON for both immediate and deferred reprint copies, while writing `"copied"` only to SQLite. Added a clarifying comment on `_copy_digest_to_article` so future readers understand the intent (JSON = truthful provenance, SQLite column = per-row copied/generated marker).
-- **Schema status:** `pipeline/state.py` schema version is **5**. Migration 3 adds `aggregation_windows`; migration 4 adds event newsworthiness columns and indexes; migration 5 adds article digest status/metadata columns and an index. The local `data/state/pipeline.db` was migrated with `./.venv/bin/python -m pipeline.cli init-db`.
-- **Docs updated:** `README.md` documents hosted LLM setup, `aggregate --verbose`, and digest experiments. `docs/design.md` documents Stage 2 windowing, article digests, digest impact, grouping, newsworthiness scoring, event JSON fields, implementation notes, and (May 25) the explicit decision to exclude `headline_hash` from digest copying. `docs/plan.md` marks completed Stage 2 items and keeps remaining work visible.
-- **Current local dataset:**
-  - `data/staging/articles/` contains **2,230 article JSON files** and **2,057 image sidecars**.
-  - `data/state/pipeline.db` has **2,230 article rows**, **2,230 unassigned articles**, **0 events**, **0 aggregation windows**, schema version **5**, and digest status **pending** for all 2,230 articles.
-  - `data/events/` currently has **0 event JSON files**.
-  - `data/staging/article-digest-experiments/` has **1 sample experiment artifact** (`sample-5.json`) from the earlier v1 digest experiment. It is only for review; it is not pipeline state.
-  - Full live aggregation has not been run against the local corpus after digest-v2 and Stage 2 implementation. Running `aggregate --verbose` will make Gemini API calls, generate/persist article digests for planned windows, group articles, and write event assignments.
+- **Scope of this pass:** Quality evaluation of v2 digests across a stratified sample (39 articles spanning all 11 categories with high/med/low/verylow impact bands plus 6 edge cases), followed by a targeted rewrite of the digest prompt and the impact-cap system. Five sub-agent reviewers each evaluated a batch in parallel; findings were consolidated into a single set of concrete changes and applied.
+- **Prompt version bumped from `article-digest-v2` → `article-digest-v3`.** Re-running `digest` (with no `--force`) picks up every existing article because the stale-prompt query matches `digest_prompt_version != current`.
+- **`pipeline/digest.py` — controlled rationale-code vocabulary + layered caps:**
+  - New cap tiers (computed independently per axis using min-of-applicable):
+    - `MULTI_TOPIC_IMPACT_CAP = 0.30` for `live_blog`, `newsletter_roundup` (both axes).
+    - `VENDOR_ANNOUNCEMENT_*` asymmetric: global `0.55`, category `0.75` for `vendor_announcement`. Skipped when a HIGH rationale code is also present (e.g. a vendor disclosing an actively-exploited security flaw still scores high).
+    - `UNCONFIRMED_INJURY_GLOBAL_CAP = 0.60` for `unconfirmed_injury` — global only, leaving category at its natural value so the sports vertical can still rank the story.
+    - `recycled_content` added to `LOW_IMPACT_RATIONALE_CODES` (0.15 cap).
+    - `paywalled` joined `thin`/`extraction_noise` in `NOISY_CONTENT_IMPACT_CAP` (0.65). HIGH-rationale bypass still applies.
+  - `_apply_impact_caps` rewritten from an `elif` chain (first-match-wins, both-axes-cap-equal) to accumulate all applicable per-axis caps and take the minimum per axis. `impact_capped` is emitted only when at least one axis was actually reduced.
+  - `_digest_response_schema` gained an optional `study_stage` enum (`preclinical`, `animal`, `early_human`, `trial_phase`, `approved`, `observational`, `lab_bench`, `not_applicable`, `unknown`). `_normalize_study_stage` drops `not_applicable` and any unrecognized value before persistence so the field is present only when meaningful. `study_stage` flows through both `_persist_pipeline_digest_result` and the reprint-copy path.
+- **`pipeline/digest.py` — prompt rewrite (`_build_digest_prompt`).** Major additions:
+  - Closed-vocabulary `rationale_codes` list inlined into the prompt.
+  - Explicit `novelty` semantics: `breaking` only for time-sensitive events in the last ~48h; research papers are `analysis` or `evergreen`; thin/video-only pages are `low_signal`.
+  - Tightened `scope` definition (reach of the actor/phenomenon, not the topic).
+  - Discriminative `content_quality` rubric for `paywalled` vs `thin` vs `extraction_noise` vs `non_news`, including paywall-chrome examples like "Democracy Dies in Darkness" / "Read full article".
+  - Block on inserting `published_at` year/month/day into the summary.
+  - "Do not strengthen the source's language" guard + forbidden formal designations ("PHEIC", "state of emergency", "recession", etc.) unless those exact terms appear in the text.
+  - Required explicit advertorial labeling in the summary when `content_quality=non_news` for a promotional reason.
+  - Local human-interest → `low_signal` enforcement.
+  - Cues for emitting `vendor_announcement`, `live_blog`/`newsletter_roundup`, `unconfirmed_injury`, and `recycled_content`.
+  - `study_stage` instruction with `not_applicable` opt-out.
+- **`tests/test_digest.py`:** 11 new tests (paywalled noise cap, paywalled + HIGH bypass, paywalled + LOW stacking, vendor asymmetric cap, vendor + HIGH bypass, multi-topic 0.30 cap, unconfirmed-injury global-only cap, recycled_content LOW cap, study_stage persistence, study_stage invalid-value drop, study_stage `not_applicable` drop). Existing `article-digest-v2` references bumped to `v3`; intentional v1 stale-prompt setup at `tests/test_digest.py:458/471` left untouched. Prompt-content assertions updated to v3 phrasing.
+- **Verification of v3 against the same corpus (after the user re-ran `digest`):**
+  - 938 articles re-digested at v3 (38 still at v2: video/non-extraction pre-filtered articles that don't go through the digest path).
+  - Distribution shifts vs v2: `content_quality=paywalled` 0 → 27; `extraction_noise` 23 → 52; `novelty=low_signal` 40 → 116; `novelty=breaking` 294 → 246; `novelty=analysis` 60 → 156; `impact_capped` events ~40 → 176. `study_stage` populated on 49 research articles spanning the full enum (`observational` 19, `lab_bench` 15, `animal` 6, `unknown` 5, `trial_phase` 2, `early_human` 1, `preclinical` 1).
+  - Spot-checks against originally-flagged articles confirmed fixes for: Google I/O vendor announcement (now 0.55/0.75 + capped), Guardian live-blog (now 0.30/0.30), Ars Technica truncation (now `paywalled`), Pakistan terror attack scope (now `international`), Messi unconfirmed injury (global capped to 0.45, category preserved at 0.75), NASA lunar materials (`study_stage: lab_bench`), Ozempic Reddit study (`novelty: analysis` + `study_stage: observational`), Wells Fargo advertorial (summary now opens with "This is a promotional credit-card review for…"), Durham grasslands restoration (now `low_signal`/`regional`), Flick YC hiring post (`vendor_announcement` + `non_news` → 0.05/0.05).
+  - One earlier-flagged "PHEIC hallucination" was a false positive in the v2 review — the Scientific American body does contain the exact phrase.
+- **Known minor residual issues (acknowledged, not blocking):**
+  - The "do not insert `published_at` year/month/day into the summary" rule is followed most of the time but still drifts occasionally (e.g. the Shomo article summary still says "May 23, 2026" where the body only says "Saturday (May 23)").
+  - One WaPo paywalled article was tagged `content_quality=thin` even though the body contains "Democracy Dies in Darkness". Downstream impact is unchanged because the noise-cap path now also fires on `paywalled`, but the bucketing is wrong.
+  - `recycled_content` rationale never fired in this corpus (0/938) — either rare in this dataset or the trigger isn't strong enough; revisit if a known recycled-content fixture surfaces.
+- **Important:** The `paywalled` → noise-cap addition (final fix of this pass) was made *after* the user re-ran v3 digest. Existing v3 digests in the corpus that exceeded the new cap will not be recomputed unless they are `--force` re-digested. New digests going forward apply the tighter cap automatically. No prompt-version bump was made for this code-only change; consider bumping to `article-digest-v4` if a fresh re-digest is desired.
 - **Verified in this handoff:**
-  - `./.venv/bin/ruff check .` passed.
-  - `./.venv/bin/python -m compileall -q pipeline tests` passed.
-  - `./.venv/bin/python -m pytest -q` passed (`133 passed` total, +2 new regression tests for the May 25 digest review pass).
-  - No schema or config changes in the May 25 review pass; the local `data/state/pipeline.db` already at schema version 5 from the previous handoff does not need re-migration.
+  - `./.venv/bin/python -m pytest -q` → **157 passed**.
+  - `./.venv/bin/ruff check .` → clean.
+- **Files touched (uncommitted, on top of prior digest-refactor handoff working tree):**
+  - `pipeline/digest.py` — prompt rewrite, cap rework, study_stage schema/validation/persistence, paywalled-in-noise-cap.
+  - `tests/test_digest.py` — 11 new tests, v2→v3 bumps, prompt-content assertions updated.
+  - `docs/design.md` — schema example + cap-tier description + May 25 v3 review note.
+  - `docs/plan.md` — added Milestone 2 line item for the v3 rework.
+  - `AGENTS.md` — this handoff entry.
+- **Next Steps (unchanged from prior pass):**
+  1. Run a controlled aggregation pass: `./.venv/bin/python -m pipeline.cli aggregate --verbose --limit-windows 1`.
+  2. Implement the second validated LLM pass for richer event metadata (titles, slugs, keywords, entities) — Milestone 2 checkbox at `docs/plan.md:114`.
+  3. Implement event lifecycle transitions (`active` → `stale` → `archived`) — `docs/plan.md:124`.
+  4. Begin Milestone 3 (Editorial Stage).
+
+### State on May 25, 2026 (Post-Digest-Refactor Review)
+
+- **Scope of this pass:** Code review of the standalone-digest refactor (digest now runs as a pre-aggregation stage) and three targeted fixes that came out of the review.
+- **Bug fixes:**
+  - **Assigned-status preservation under `--force`.** `pipeline/digest.py` previously called `update_article_aggregation_status(..., status="pending")` unconditionally whenever a digest was re-persisted (already-completed branch, generated-digest persist, reprint copy). With `--force`, this reset an article already assigned to an event back to `pending` while leaving `event_id` populated — an inconsistent state. Fixed by introducing a new helper `StateDB.set_article_aggregation_pending_if_unassigned(article_id)` that performs a single SQL UPDATE guarded by `event_id IS NULL`. All three digest call sites and the aggregate window-loop call site now use this helper.
+  - **Sliding-window status churn.** `pipeline/aggregate.py:load_window_articles` previously wrote `aggregation_status='pending'` for every eligible article on every window pass. With `window_hours=6, step_hours=1`, each article was rewritten ~6 times per run. The new helper's WHERE clause also guards on `aggregation_status != 'pending'`, making repeated calls idempotent no-ops.
+  - **`--force` now bypasses the digest `max_retries` gate** in `_load_article_for_pipeline_digest`. Previously, an operator running `--force` on rows already marked `max_retries_exceeded` would silently get no work done. The retry gate is now `if not force and retry_count >= max_retries`.
+- **Intentional non-change:** Reviewer flagged `impact_capped` rationale + `NOISY_CONTENT_IMPACT_CAP` (`pipeline/digest.py:765`) interacting with `AGGREGATION_EXCLUDED_RATIONALE_CODES` (`pipeline/aggregate.py:35`) such that thin/noisy-extracted articles get filtered from aggregation. User confirmed this is the intended behavior — leaving as is.
+- **Defensive code kept:** `AGGREGATION_EXCLUDED_RATIONALE_CODES` retains both `"archive_index"` and `"archival_index"`; both spellings are observed in model output.
+- **New tests (4, total now 144):**
+  - `tests/test_state.py::test_set_article_aggregation_pending_if_unassigned` — verifies the helper preserves assigned status, transitions filtered→pending, and is a no-op when already pending (sentinel reason survives).
+  - `tests/test_digest.py::test_digest_force_preserves_assigned_aggregation_status` — `--force` regenerates the digest on an assigned article but leaves `aggregation_status='assigned'` and `event_id` intact.
+  - `tests/test_digest.py::test_digest_force_bypasses_max_retries` — `--force` processes an article with 3 prior failures.
+  - `tests/test_aggregate.py::test_load_window_articles_dry_run_does_not_mutate_status` — `mark_filtered=False` performs no DB writes (sentinel reasons survive on both eligible and excluded rows).
+- **Verified in this handoff:**
+  - `./.venv/bin/python -m pytest -q` → **144 passed**.
+  - `./.venv/bin/ruff check .` → clean.
+- **Files touched:**
+  - `pipeline/state.py` — added `set_article_aggregation_pending_if_unassigned`.
+  - `pipeline/digest.py` — three call sites use new helper; `--force` bypasses max_retries.
+  - `pipeline/aggregate.py` — window-loop call site uses new helper, dropped redundant `event_id is None` check.
+  - `tests/test_state.py`, `tests/test_digest.py`, `tests/test_aggregate.py` — 4 new tests.
+- **Not committed.** Working tree still has all the broader digest-refactor changes (`AGENTS.md`, `README.md`, `config/pipeline.json`, `docs/design.md`, `docs/plan.md`, `pipeline/aggregate.py`, `pipeline/cli.py`, `pipeline/digest.py`, `pipeline/state.py`, and the four test files) plus this handoff edit. The user has not yet asked for a commit.
+- **Next Steps (unchanged from prior pass, still pending):**
+  1. Run a controlled aggregation pass: `./.venv/bin/python -m pipeline.cli aggregate --verbose --limit-windows 1`.
+  2. Implement the second validated LLM pass for richer event metadata (titles, slugs, keywords, entities) — Milestone 2 checkbox at `docs/plan.md:114`.
+  3. Implement event lifecycle transitions (`active` → `stale` → `archived`) — `docs/plan.md:124`.
+  4. Begin Milestone 3 (Editorial Stage).
+
+### State on May 25, 2026 (Late Pass)
+
+- **Completed:** Milestones 0, 1, and the bulk of Milestone 2 (Article Digest + Story Aggregation). Stage 2 is fully implemented and tested.
+- **Stage 1 status:** Collection is implemented, verified, and stable. Supports 83 enabled sources including custom AP News and MotorTrend scrapers, robots/SSRF protections, and image sidecar collection.
+- **Global `is_filtered` Flag Added:**
+  - Database schema bumped to **7**. Added a global `is_filtered` column (default `0`) with a composite index `idx_articles_is_filtered_published`.
+  - Added Rule of Engagement 8 to enforce filtering on `is_filtered = 0` in all queries fetching articles for downstream stages (digestion, aggregation, editorial, presentation), preventing filtered non-news/spam content from leaking.
+- **Digest Stage Enhancements:**
+  - Implemented standalone `digest` stage that performs Gemini Developer API calls in parallel.
+  - Handles skipped digests (thin content, missing JSON, max retries reached) by immediately setting `is_filtered = 1` and recording appropriate status prefixes (`filtered_*`), ensuring they do not remain stuck in `pending` aggregation state.
+  - Implemented short-circuiting for CNN video transcripts and other obvious video pages: URLs with `/videos/` (case-insensitive) are marked as `filtered_video_or_carousel` and set to `is_filtered = 1`, skipping the LLM entirely.
+- **Story Aggregation Stage Enhancements:**
+  - The aggregation queries load only articles with `is_filtered = 0`, ensuring that skipped or filtered articles do not waste context tokens or cause redundant processing window reruns.
+- **Schema status:** Schema version is **7**. Migrated using `./.venv/bin/python -m pipeline.cli init-db`.
+- **Docs updated:** `README.md`, `docs/design.md`, and `docs/plan.md` reflect the `is_filtered` global column, rules of engagement, and deterministic URL short-circuiting.
+- **Verified in this handoff:**
+  - All **140 tests** passed (`./.venv/bin/python -m pytest`).
+  - Linter (`ruff check .`) and compilation check passed.
 - **Next Steps:**
-  1. Run a controlled live Stage 2 pass: start with `./.venv/bin/python -m pipeline.cli aggregate --verbose --limit-windows 1`, inspect generated `llm_digest` fields in article JSON, `data/events/`, event newsworthiness, `aggregation_windows`, and `llm_usage`; then scale up if quality and cost look acceptable. While reviewing the run, also spot-check that `stats["article_digests"]` reports the new split counters (`existing_digest`, `reprints_copied_persisted`, `reprints_copied_in_batch`) sensibly and that no article ends up in `failed` for transient reasons that should have retried.
-  2. Add the second validated LLM pass for richer event titles, slugs, keywords, entities, and optional thread tags.
-  3. Implement event lifecycle transitions (`active` -> `stale` -> `archived`) and richer LLM cost persistence if token-only usage is not enough.
-  4. Begin Milestone 3: Editorial stage implementation.
+  1. Run a controlled aggregation pass: `./.venv/bin/python -m pipeline.cli aggregate --verbose --limit-windows 1`.
+  2. Implement the second validated LLM pass for richer event metadata (titles, slugs, keywords, entities).
+  3. Implement event lifecycle transitions (`active` -> `stale` -> `archived`).
+  4. Begin Milestone 3 (Editorial Stage).
 
 ### Previous State on May 24, 2026
 

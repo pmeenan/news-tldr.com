@@ -73,16 +73,23 @@ Print incremental collection progress to stderr while keeping final stats on std
 ./.venv/bin/python -m pipeline.cli collect --verbose
 ```
 
-Run stage 2 story aggregation. Normal aggregation first generates any missing
-per-article LLM digests for the planned aggregation windows, then groups
-articles into events:
+Run the article digest stage. This generates factual per-article summaries,
+key facts, and article-level impact scores before story aggregation:
 ```bash
-./.venv/bin/python -m pipeline.cli aggregate --verbose
+./.venv/bin/python -m pipeline.cli digest --verbose
 ```
 
-Generate a small article-digest experiment for low-signal source summaries plus controls:
+Regenerate existing current-version digests after prompt or validation changes:
 ```bash
-./.venv/bin/python -m pipeline.cli article-digest-experiment --limit 20 --controls 5 --verbose
+./.venv/bin/python -m pipeline.cli digest --verbose --force
+```
+
+Run stage 2 story aggregation. Aggregation consumes completed article digests,
+filters out non-news/promotional/video-carousel items and low category-impact
+articles according to `config/pipeline.json`, then groups eligible articles
+into events:
+```bash
+./.venv/bin/python -m pipeline.cli aggregate --verbose
 ```
 
 Remove the local generated SQLite state, staged articles, and fetch logs:

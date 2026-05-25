@@ -16,11 +16,7 @@ from pipeline.aggregate import (
 )
 from pipeline.collect import collect_once
 from pipeline.config import load_feeds
-from pipeline.digest import (
-    default_digest_experiment_output_path,
-    run_article_digest_experiment,
-    write_digest_experiment_result,
-)
+from pipeline.digest import digest_once
 from pipeline.paths import ARTICLE_DIR, DATA_DIR, DB_PATH, FETCH_LOG_DIR, LOCK_PATH
 from pipeline.state import StateDB, migrate
 
@@ -102,6 +98,17 @@ def main() -> None:
         help="Run LLM grouping without mutating events, article assignments, or aggregation windows.",
     )
     aggregate_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
+    digest_stage_parser = sub.add_parser("digest", help="Run the article digest stage before aggregation.")
+    digest_stage_parser.add_argument("--range-start", help="UTC start timestamp for articles to digest.")
+    digest_stage_parser.add_argument("--range-end", help="UTC end timestamp for articles to digest.")
+    digest_stage_parser.add_argument("--limit", type=int, help="Maximum number of articles to digest.")
+    digest_stage_parser.add_argument("--concurrency", type=int, help="Number of parallel article digest calls.")
+    digest_stage_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate digests even when an article already has the current digest prompt version.",
+    )
+    digest_stage_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     experiment_parser = sub.add_parser(
         "aggregation-experiment",
         help="Compare Gemini event grouping with titles only versus titles plus summaries.",
@@ -127,31 +134,6 @@ def main() -> None:
     )
     experiment_parser.add_argument("--output", type=Path, help="Optional path for the experiment JSON artifact.")
     experiment_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
-    digest_parser = sub.add_parser(
-        "article-digest-experiment",
-        help="Generate Gemini article digests for low-signal summaries plus controls.",
-    )
-    digest_parser.add_argument("--limit", type=int, default=40, help="Number of articles to digest.")
-    digest_parser.add_argument(
-        "--controls",
-        type=int,
-        default=8,
-        help="Approximate number of normal-summary control articles to include.",
-    )
-    digest_parser.add_argument(
-        "--published-date",
-        help="Restrict the experiment to articles published on this UTC date (YYYY-MM-DD).",
-    )
-    digest_parser.add_argument(
-        "--published-after",
-        help="Restrict the experiment to articles published at or after this UTC timestamp.",
-    )
-    digest_parser.add_argument(
-        "--published-before",
-        help="Restrict the experiment to articles published before this UTC timestamp.",
-    )
-    digest_parser.add_argument("--output", type=Path, help="Optional path for the digest experiment JSON artifact.")
-    digest_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     sub.add_parser("list-feeds", help="List enabled feed source IDs.")
     clean_parser = sub.add_parser("clean-data", help="Remove local pipeline DB and staged article data.")
     clean_parser.add_argument("--yes", action="store_true", help="Confirm deletion of local generated data.")
@@ -184,6 +166,24 @@ def main() -> None:
             progress=progress,
         )
         print(json.dumps(stats, indent=2, sort_keys=True))
+    elif args.command == "digest":
+        progress = _stderr_progress if args.verbose else None
+        if (args.range_start is None) != (args.range_end is None):
+            parser.error("--range-start and --range-end must be provided together")
+        if args.limit is not None and args.limit < 1:
+            parser.error("--limit must be at least 1")
+        if args.concurrency is not None and args.concurrency < 1:
+            parser.error("--concurrency must be at least 1")
+        migrate()
+        stats = digest_once(
+            range_start=args.range_start,
+            range_end=args.range_end,
+            limit=args.limit,
+            concurrency=args.concurrency,
+            force=args.force,
+            progress=progress,
+        )
+        print(json.dumps(stats, indent=2, sort_keys=True))
     elif args.command == "aggregation-experiment":
         progress = _stderr_progress if args.verbose else None
         if args.limit is not None and args.limit < 1:
@@ -203,25 +203,6 @@ def main() -> None:
         )
         output_path = args.output or default_experiment_output_path()
         write_experiment_result(result, output_path)
-        print(json.dumps({"output": str(output_path), "result": result}, indent=2, sort_keys=True))
-    elif args.command == "article-digest-experiment":
-        progress = _stderr_progress if args.verbose else None
-        if args.limit < 1:
-            parser.error("--limit must be at least 1")
-        if args.controls < 0:
-            parser.error("--controls cannot be negative")
-        if args.published_date and (args.published_after or args.published_before):
-            parser.error("--published-date cannot be combined with --published-after or --published-before")
-        result = run_article_digest_experiment(
-            limit=args.limit,
-            control_count=args.controls,
-            published_date=args.published_date,
-            published_after=args.published_after,
-            published_before=args.published_before,
-            progress=progress,
-        )
-        output_path = args.output or default_digest_experiment_output_path()
-        write_digest_experiment_result(result, output_path)
         print(json.dumps({"output": str(output_path), "result": result}, indent=2, sort_keys=True))
     elif args.command == "list-feeds":
         for feed in load_feeds(enabled_only=True):

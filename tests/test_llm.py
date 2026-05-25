@@ -19,7 +19,7 @@ def test_parse_dotenv_handles_comments_quotes_and_export() -> None:
         "# top-level comment\n"
         "GEMINI_API_KEY=plain-value\n"
         "GEMINI_MODEL=gemini-3.1-flash-lite # inline comment\n"
-        "QUOTED_DOUBLE=\"hello world\"\n"
+        'QUOTED_DOUBLE="hello world"\n'
         "QUOTED_SINGLE='another value'\n"
         "export EXPORTED_KEY=exported-value\n"
         "EMPTY_VALUE=\n"
@@ -69,9 +69,7 @@ def test_generate_json_retries_on_429(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_urlopen(request: Any, timeout: float) -> Any:
         attempts.append(1)
         if len(attempts) < 3:
-            raise urllib.error.HTTPError(
-                request.full_url, 429, "rate limited", {}, io.BytesIO(b"slow down")
-            )
+            raise urllib.error.HTTPError(request.full_url, 429, "rate limited", {}, io.BytesIO(b"slow down"))
         body = json.dumps(
             {
                 "candidates": [
@@ -112,7 +110,7 @@ def test_generate_json_raises_on_max_tokens(monkeypatch: pytest.MonkeyPatch) -> 
                     "candidates": [
                         {
                             "finishReason": "MAX_TOKENS",
-                            "content": {"parts": [{"text": "{\"partial\":"}]},
+                            "content": {"parts": [{"text": '{"partial":'}]},
                         }
                     ]
                 }

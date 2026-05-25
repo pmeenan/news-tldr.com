@@ -59,12 +59,7 @@ def _image_from_card(anchor: Any, base_url: str) -> str | None:
     img = anchor.find("img")
     if not img:
         return None
-    raw_url = (
-        img.get("src")
-        or img.get("data-src")
-        or img.get("data-original")
-        or img.get("data-lazy-src")
-    )
+    raw_url = img.get("src") or img.get("data-src") or img.get("data-original") or img.get("data-lazy-src")
     return urljoin(base_url, raw_url) if raw_url else None
 
 

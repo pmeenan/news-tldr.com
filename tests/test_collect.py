@@ -29,7 +29,8 @@ FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
 </rss>
 """
 
-FULL_FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+FULL_FEED_XML = (
+    b"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
   <channel>
     <title>Fixture</title>
@@ -40,7 +41,9 @@ FULL_FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
       <description>Short summary.</description>
       <content:encoded><![CDATA[
         <p>This is complete feed article text.</p>
-        <p>""" + (b"Full article sentence. " * 40) + b"""</p>
+        <p>"""
+    + (b"Full article sentence. " * 40)
+    + b"""</p>
       ]]></content:encoded>
       <pubDate>Sun, 24 May 2026 12:30:00 GMT</pubDate>
       <category>technology</category>
@@ -48,8 +51,10 @@ FULL_FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
   </channel>
 </rss>
 """
+)
 
-IMAGE_FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+IMAGE_FEED_XML = (
+    b"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"
      xmlns:content="http://purl.org/rss/1.0/modules/content/"
      xmlns:media="http://search.yahoo.com/mrss/">
@@ -62,7 +67,9 @@ IMAGE_FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
       <description>Short summary.</description>
       <content:encoded><![CDATA[
         <p>This is complete feed article text.</p>
-        <p>""" + (b"Full article sentence. " * 40) + b"""</p>
+        <p>"""
+    + (b"Full article sentence. " * 40)
+    + b"""</p>
       ]]></content:encoded>
       <media:content url="https://example.test/images/story.jpg" medium="image"
                      type="image/jpeg" width="1200" height="800" />
@@ -72,6 +79,7 @@ IMAGE_FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
   </channel>
 </rss>
 """
+)
 
 
 @pytest.mark.asyncio
@@ -144,7 +152,9 @@ def test_feed_parser_rejects_dtd_after_large_prefix():
     from pipeline.collect import _parse_feed_bytes
 
     with pytest.raises(ValueError):
-        _parse_feed_bytes(b"<?xml version='1.0'?>" + b" " * 4096 + b"<!ENTITY xxe SYSTEM 'file:///etc/passwd'><rss></rss>")
+        _parse_feed_bytes(
+            b"<?xml version='1.0'?>" + b" " * 4096 + b"<!ENTITY xxe SYSTEM 'file:///etc/passwd'><rss></rss>"
+        )
 
 
 def test_feed_parser_rejects_element_declaration():
@@ -447,10 +457,7 @@ async def test_scraper_feed_updates_state_and_logs_success(tmp_path, monkeypatch
                 (feed.source_id,),
             ).fetchone()
 
-    log_rows = [
-        json.loads(line)
-        for line in next(log_dir.glob("*.jsonl")).read_text(encoding="utf-8").splitlines()
-    ]
+    log_rows = [json.loads(line) for line in next(log_dir.glob("*.jsonl")).read_text(encoding="utf-8").splitlines()]
 
     assert stats["feeds_fetched"] == 1
     assert stats["articles_written"] == 1
@@ -476,7 +483,7 @@ async def test_ap_scraper_bypasses_robots_for_configured_homepage(monkeypatch):
                     '<div class="card">'
                     '<a href="/promo">Sign in to continue</a>'
                     '<h2><a href="/article/story-id">Useful AP headline</a></h2>'
-                    '</div>'
+                    "</div>"
                 ),
             )
         return httpx.Response(404)
@@ -672,6 +679,7 @@ async def test_collects_feed_entry_with_failed_article_fetch_fallback(tmp_path, 
 @pytest.mark.asyncio
 async def test_collect_unlinks_files_if_db_insert_fails(tmp_path, monkeypatch):
     import sqlite3
+
     db_path = tmp_path / "pipeline.db"
     article_dir = tmp_path / "articles"
     log_dir = tmp_path / "fetch-log"
@@ -801,27 +809,15 @@ def test_load_feeds_validates_missing_keys(tmp_path):
 
     # Test missing source_id
     config_path = tmp_path / "feeds_missing_id.json"
-    config_path.write_text(json.dumps({
-        "feeds": [
-            {
-                "source_name": "No ID Feed",
-                "feed_url": "https://example.test/feed.xml"
-            }
-        ]
-    }))
+    config_path.write_text(
+        json.dumps({"feeds": [{"source_name": "No ID Feed", "feed_url": "https://example.test/feed.xml"}]})
+    )
     with pytest.raises(ValueError, match="missing source_id"):
         load_feeds(config_path)
 
     # Test missing feed_url
     config_path = tmp_path / "feeds_missing_url.json"
-    config_path.write_text(json.dumps({
-        "feeds": [
-            {
-                "source_id": "no-url-feed",
-                "source_name": "No URL Feed"
-            }
-        ]
-    }))
+    config_path.write_text(json.dumps({"feeds": [{"source_id": "no-url-feed", "source_name": "No URL Feed"}]}))
     with pytest.raises(ValueError, match="missing feed_url"):
         load_feeds(config_path)
 
@@ -866,10 +862,11 @@ async def test_collect_skips_fetch_if_file_exists_on_disk(tmp_path, monkeypatch)
         "summary": "Pre-existing summary",
         "published_at": "2026-05-24T12:30:00Z",
         "fetched_at": "2026-05-24T12:30:00Z",
-        "collection": {}
+        "collection": {},
     }
 
     from pipeline.collect import _article_path
+
     article_path = _article_path(article_id, "2026-05-24T12:30:00Z")
     article_path.parent.mkdir(parents=True, exist_ok=True)
     with article_path.open("w", encoding="utf-8") as f:
@@ -916,6 +913,7 @@ async def test_watchdog_reports_active_tasks_on_inactivity(monkeypatch):
     collector.last_activity_time = time.time() - 35
 
     sleep_called = False
+
     async def mock_sleep(seconds):
         nonlocal sleep_called
         if sleep_called:
@@ -966,6 +964,7 @@ async def test_collect_skips_fetch_if_db_identity_matches(tmp_path, monkeypatch)
     final_id = hashlib.sha256(final_url.encode("utf-8")).hexdigest()
 
     from pipeline.collect import _article_path
+
     article_path = _article_path(final_id, "2026-05-24T12:30:00Z")
 
     article_data = {
@@ -979,7 +978,7 @@ async def test_collect_skips_fetch_if_db_identity_matches(tmp_path, monkeypatch)
         "summary": "Pre-existing summary",
         "published_at": "2026-05-24T12:30:00Z",
         "fetched_at": "2026-05-24T12:30:00Z",
-        "collection": {}
+        "collection": {},
     }
 
     article_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1013,6 +1012,7 @@ async def test_collect_skips_fetch_if_db_identity_matches(tmp_path, monkeypatch)
 
 def test_is_supported_image_url():
     from pipeline.collect import _is_supported_image_url
+
     assert _is_supported_image_url("https://example.test/img.jpg") is True
     assert _is_supported_image_url("https://example.test/img.JPEG") is True
     assert _is_supported_image_url("https://example.test/img.png?w=200") is True
@@ -1434,4 +1434,3 @@ async def test_collect_once_preserves_collection_error_if_finish_run_also_fails(
 
     assert any("collect: failed collection-" in message for message in progress_messages)
     assert any("collect: finish_run failed: finish failed" in message for message in progress_messages)
-

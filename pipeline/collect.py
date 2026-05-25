@@ -633,6 +633,7 @@ class Collector:
                 try:
                     if getattr(feed, "feed_type", "rss") == "scraper":
                         from pipeline.scrapers import run_scraper
+
                         self._progress(f"feed {feed.source_id}: scraping {feed.feed_url}")
                         entries = await run_scraper(self.client, feed)
                         self.stats["feeds_fetched"] += 1
@@ -776,8 +777,7 @@ class Collector:
                                         )
                         self.stats["articles_skipped"] += 1
                         self._progress(
-                            f"article {feed.source_id}: skipped duplicate "
-                            f"(already on disk after fetch) {entry_label}"
+                            f"article {feed.source_id}: skipped duplicate (already on disk after fetch) {entry_label}"
                         )
                         return
 
@@ -838,9 +838,7 @@ class Collector:
         finally:
             self._deregister_task(task_id)
 
-    async def _article_from_entry(
-        self, feed: FeedConfig, entry: Any
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    async def _article_from_entry(self, feed: FeedConfig, entry: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         fetched_at = isoformat_z()
         entry_url, canonical_url, guid = _entry_url_and_identity(feed, entry)
         headline = _clean_text(entry.get("title")) or "(untitled)"
@@ -897,8 +895,7 @@ class Collector:
                     )
             except Exception as exc:
                 self._progress(
-                    f"article {feed.source_id}: failed to fetch page {canonical_url} - "
-                    f"{type(exc).__name__}: {exc}"
+                    f"article {feed.source_id}: failed to fetch page {canonical_url} - {type(exc).__name__}: {exc}"
                 )
                 self.state.record_error(
                     self.run_id,

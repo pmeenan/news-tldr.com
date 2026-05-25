@@ -46,7 +46,7 @@ def parse_dotenv(text: str) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         if line.startswith("export "):
-            line = line[len("export "):].lstrip()
+            line = line[len("export ") :].lstrip()
         key, value = line.split("=", 1)
         key = key.strip()
         if not key:
@@ -148,14 +148,10 @@ class GeminiClient:
             except urllib.error.HTTPError as exc:
                 error_body = exc.read().decode("utf-8", errors="replace")
                 if exc.code in RETRYABLE_STATUS_CODES and attempt < self.max_attempts:
-                    last_error = GeminiRetryableError(
-                        f"HTTP {exc.code}: {error_body[:500]}", status_code=exc.code
-                    )
+                    last_error = GeminiRetryableError(f"HTTP {exc.code}: {error_body[:500]}", status_code=exc.code)
                     self._sleep(self._backoff_delay(attempt))
                     continue
-                raise RuntimeError(
-                    f"Gemini API request failed with HTTP {exc.code}: {error_body[:1000]}"
-                ) from exc
+                raise RuntimeError(f"Gemini API request failed with HTTP {exc.code}: {error_body[:1000]}") from exc
             except (urllib.error.URLError, TimeoutError) as exc:
                 if attempt < self.max_attempts:
                     last_error = GeminiRetryableError(f"transport error: {exc}")
@@ -180,6 +176,7 @@ class GeminiClient:
 
     def _backoff_delay(self, attempt: int) -> float:
         import random
+
         delay = self.backoff_base_seconds * (2 ** (attempt - 1))
         jitter = random.uniform(0.0, 0.5)
         return min(delay + jitter, self.backoff_max_seconds)

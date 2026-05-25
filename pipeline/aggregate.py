@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pipeline.config import load_categories, load_feeds, load_pipeline_config
-from pipeline.digest import digest_articles_for_aggregation
 from pipeline.llm import GeminiClient, GeminiResult
 from pipeline.lock import PipelineLock
 from pipeline.paths import EVENT_DIR, LOCK_PATH, PROJECT_ROOT
@@ -22,6 +21,44 @@ AGGREGATION_PROMPT_VERSION = "aggregation-v6"
 AGGREGATION_EXPERIMENT_PROMPT_VERSION = "aggregation-experiment-v6"
 NEWSWORTHINESS_PROMPT_VERSION = "newsworthiness-v1"
 GROUPING_MODES = ("titles", "titles_summaries")
+AGGREGATION_EXCLUDED_RATIONALE_CODES = {
+    "advertorial",
+    "affiliate_content",
+    "affiliate_deals",
+    "aggregation_noise",
+    "archive_index",
+    "archival_index",
+    "carousel",
+    "deal_content",
+    "gambling_advice",
+    "gambling_content",
+    "gallery_page",
+    "impact_capped",
+    "index_page",
+    "media_transcript",
+    "no_substantive_content",
+    "product_advice",
+    "product_deal",
+    "product_deals",
+    "product_recommendation",
+    "profile_or_background",
+    "promotional",
+    "promotional_content",
+    "promotional_links",
+    "promotional_material",
+    "puzzle_guide",
+    "shopping_content",
+    "video_carousel",
+    "video_page",
+}
+VIDEO_OR_CAROUSEL_RATIONALE_CODES = {
+    "carousel",
+    "gallery_page",
+    "media_transcript",
+    "no_substantive_content",
+    "video_carousel",
+    "video_page",
+}
 
 
 class JsonGenerator(Protocol):
@@ -49,6 +86,7 @@ class ArticleForAggregation:
     event_id: str | None = None
     digest_summary: str | None = None
     digest_key_facts: tuple[str, ...] = ()
+    digest_content_quality: str | None = None
     digest_impact: dict[str, Any] | None = None
 
 
@@ -78,7 +116,7 @@ def load_unprocessed_articles(
     state = db or StateDB()
     try:
         params: list[Any] = []
-        where = "event_id IS NULL"
+        where = "event_id IS NULL AND is_filtered = 0"
         if published_date is not None:
             where += " AND substr(published_at, 1, 10) = ?"
             params.append(published_date)
@@ -125,6 +163,8 @@ def load_window_articles(
     *,
     window_start: str,
     window_end: str,
+    min_category_impact: float | None = None,
+    mark_filtered: bool = True,
     db: StateDB | None = None,
 ) -> list[ArticleForAggregation]:
     _validate_iso_timestamp(window_start)
@@ -137,11 +177,12 @@ def load_window_articles(
             SELECT article_id, source_id, source_name, headline, summary, published_at, article_path, event_id
             FROM articles
             WHERE published_at >= ? AND published_at < ?
+              AND is_filtered = 0
             ORDER BY published_at DESC, fetched_at DESC
             """,
             (window_start, window_end),
         ).fetchall()
-        return [
+        articles = [
             ArticleForAggregation(
                 article_id=row["article_id"],
                 source_id=row["source_id"],
@@ -155,6 +196,34 @@ def load_window_articles(
             )
             for row in rows
         ]
+        if min_category_impact is None:
+            return articles
+        included = []
+        for article in articles:
+            exclusion_reason = _article_aggregation_exclusion_reason(article)
+            if exclusion_reason:
+                if mark_filtered:
+                    state.update_article_aggregation_status(
+                        article.article_id,
+                        status=f"filtered_{exclusion_reason}",
+                        reason=exclusion_reason,
+                    )
+                continue
+            score = _article_category_impact(article)
+            if score is None:
+                continue
+            if score < min_category_impact:
+                if mark_filtered:
+                    state.update_article_aggregation_status(
+                        article.article_id,
+                        status="filtered_low_impact",
+                        reason=f"category_impact {score:.3f} below {min_category_impact:.3f}",
+                    )
+                continue
+            if mark_filtered:
+                state.set_article_aggregation_pending_if_unassigned(article.article_id)
+            included.append(article)
+        return included
     finally:
         if close_db:
             state.close()
@@ -269,8 +338,7 @@ def plan_sliding_windows(
                 window_end=_format_iso_timestamp(end_dt),
             )
             already_present = any(
-                w.window_start == tail_window.window_start and w.window_end == tail_window.window_end
-                for w in windows
+                w.window_start == tail_window.window_start and w.window_end == tail_window.window_end for w in windows
             )
             if not already_present:
                 if not should_skip_window(tail_window):
@@ -296,9 +364,7 @@ def aggregate_once(
     config = load_pipeline_config()
     window_hours = int(config.aggregation.get("window_hours", 6))
     step_hours = int(config.aggregation.get("window_step_hours", 1))
-    digest_enabled = bool(config.digest.get("enabled_before_aggregation", True))
-    digest_concurrency = int(config.digest.get("concurrency", 8))
-    digest_content_char_limit = int(config.digest.get("content_char_limit", 12000))
+    min_category_impact = float(config.aggregation.get("min_category_impact", 0.25))
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"aggregation-{uuid.uuid4().hex}"
     state = StateDB()
@@ -314,7 +380,7 @@ def aggregate_once(
         "article_assignments": 0,
         "newsworthiness_scored": 0,
         "newsworthiness_fallbacks": 0,
-        "article_digests": {},
+        "min_category_impact": min_category_impact,
         "dry_run": dry_run,
     }
     try:
@@ -334,10 +400,27 @@ def aggregate_once(
                     bounds = state.article_time_bounds(unassigned_only=True)
                     if not bounds:
                         return stats
-                    range_start = _format_iso_timestamp(_floor_hour(_parse_iso_timestamp(bounds[0])))
-                    range_end = _format_iso_timestamp(
-                        _ceil_hour(_parse_iso_timestamp(bounds[1])) + timedelta(hours=window_hours)
-                    )
+                    from datetime import time
+
+                    from pipeline.util import utc_now
+
+                    ref = utc_now()
+                    today_start = datetime.combine(ref.date(), time.min, tzinfo=UTC)
+                    limit_dt = today_start - timedelta(days=1)
+
+                    bounds_start = _parse_iso_timestamp(bounds[0])
+                    bounds_end = _parse_iso_timestamp(bounds[1])
+
+                    if bounds_end < limit_dt:
+                        if progress:
+                            progress("aggregate: no unassigned articles in the current and previous day")
+                        return stats
+
+                    if bounds_start < limit_dt:
+                        bounds_start = limit_dt
+
+                    range_start = _format_iso_timestamp(_floor_hour(bounds_start))
+                    range_end = _format_iso_timestamp(_ceil_hour(bounds_end) + timedelta(hours=window_hours))
 
                 windows = plan_sliding_windows(
                     range_start=range_start,
@@ -351,25 +434,6 @@ def aggregate_once(
                 stats["windows_planned"] = len(windows)
                 if progress:
                     progress(f"aggregate: planned {len(windows)} windows")
-
-                if windows and digest_enabled and not dry_run:
-                    digest_range_start = min(window.window_start for window in windows)
-                    digest_range_end = max(window.window_end for window in windows)
-                    if progress:
-                        progress(
-                            "aggregate: preparing article digests "
-                            f"from {digest_range_start} to {digest_range_end}"
-                        )
-                    stats["article_digests"] = digest_articles_for_aggregation(
-                        state=state,
-                        run_id=run_id,
-                        published_after=digest_range_start,
-                        published_before=digest_range_end,
-                        concurrency=digest_concurrency,
-                        content_char_limit=digest_content_char_limit,
-                        client=generator,
-                        progress=progress,
-                    )
 
                 for window in windows:
                     if progress:
@@ -386,6 +450,8 @@ def aggregate_once(
                         articles = load_window_articles(
                             window_start=window.window_start,
                             window_end=window.window_end,
+                            min_category_impact=min_category_impact,
+                            mark_filtered=not dry_run,
                             db=state,
                         )
                         if not articles:
@@ -565,9 +631,7 @@ def apply_grouping_result(
                     atomic_write_json(abs_path, data)
                 except Exception as exc:
                     if progress:
-                        progress(
-                            f"aggregate: content_type backfill failed for {article.article_id}: {exc}"
-                        )
+                        progress(f"aggregate: content_type backfill failed for {article.article_id}: {exc}")
                     if run_id:
                         try:
                             state.record_error(
@@ -692,9 +756,7 @@ def score_groups_newsworthiness(
             "usage": {},
         }
     groups_for_model = [
-        group
-        for group in groups
-        if baseline[int(group["group_index"])].get("model") != "deterministic-digest-impact"
+        group for group in groups if baseline[int(group["group_index"])].get("model") != "deterministic-digest-impact"
     ]
     if not groups_for_model:
         return {
@@ -707,8 +769,7 @@ def score_groups_newsworthiness(
     try:
         result = client.generate_json(
             system_instruction=(
-                "You score story clusters for editorial ranking. "
-                "Return only valid JSON matching the schema."
+                "You score story clusters for editorial ranking. Return only valid JSON matching the schema."
             ),
             prompt=_build_newsworthiness_prompt(articles, groups_for_model, feeds_by_source=feeds_by_source),
             response_schema=_newsworthiness_response_schema(),
@@ -821,8 +882,7 @@ def validate_grouping_response(
         raise ValueError("grouping response must contain an articles list")
     if len(raw_articles) != article_count:
         raise ValueError(
-            f"articles classification count ({len(raw_articles)}) "
-            f"must match article count ({article_count})"
+            f"articles classification count ({len(raw_articles)}) must match article count ({article_count})"
         )
 
     classifications: dict[int, dict[str, Any]] = {}
@@ -1063,7 +1123,7 @@ def _grouping_response_schema(valid_categories: list[str]) -> dict[str, Any]:
                     },
                     "required": ["article_indexes"],
                 },
-            }
+            },
         },
         "required": ["articles", "groups"],
     }
@@ -1142,24 +1202,64 @@ def _brief_summary(article: ArticleForAggregation) -> str:
 def _load_digest_fields(article_path: str) -> dict[str, Any]:
     path = PROJECT_ROOT / article_path
     if not path.exists():
-        return {"digest_summary": None, "digest_key_facts": ()}
+        return {"digest_summary": None, "digest_key_facts": (), "digest_content_quality": None}
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return {"digest_summary": None, "digest_key_facts": ()}
+        return {"digest_summary": None, "digest_key_facts": (), "digest_content_quality": None}
     digest = data.get("llm_digest")
     if not isinstance(digest, dict):
-        return {"digest_summary": None, "digest_key_facts": ()}
+        return {"digest_summary": None, "digest_key_facts": (), "digest_content_quality": None}
     summary = digest.get("summary")
     key_facts = digest.get("key_facts")
     if not isinstance(summary, str) or not isinstance(key_facts, list):
-        return {"digest_summary": None, "digest_key_facts": ()}
+        return {"digest_summary": None, "digest_key_facts": (), "digest_content_quality": None}
     clean_facts = tuple(str(fact).strip() for fact in key_facts if str(fact).strip())
+    content_quality = digest.get("content_quality")
+    if not isinstance(content_quality, str):
+        content_quality = None
     impact = digest.get("impact")
     if not isinstance(impact, dict):
         impact = None
-    return {"digest_summary": summary.strip() or None, "digest_key_facts": clean_facts, "digest_impact": impact}
+    return {
+        "digest_summary": summary.strip() or None,
+        "digest_key_facts": clean_facts,
+        "digest_content_quality": content_quality,
+        "digest_impact": impact,
+    }
+
+
+def _article_aggregation_exclusion_reason(article: ArticleForAggregation) -> str | None:
+    content_quality = (article.digest_content_quality or "").strip().lower()
+    rationale_codes: set[str] = set()
+    if isinstance(article.digest_impact, dict):
+        rationale_codes = {
+            sanitize_id(str(code)).lower()
+            for code in article.digest_impact.get("rationale_codes", [])
+            if str(code).strip()
+        }
+    headline = article.headline.strip().lower()
+    if content_quality == "non_news":
+        return "non_news"
+    if headline == "(untitled)" and (
+        content_quality in {"thin", "extraction_noise"} or rationale_codes & VIDEO_OR_CAROUSEL_RATIONALE_CODES
+    ):
+        return "video_or_carousel"
+    if rationale_codes & VIDEO_OR_CAROUSEL_RATIONALE_CODES:
+        return "video_or_carousel"
+    if rationale_codes & AGGREGATION_EXCLUDED_RATIONALE_CODES:
+        return "low_signal_content"
+    return None
+
+
+def _article_category_impact(article: ArticleForAggregation) -> float | None:
+    if not isinstance(article.digest_impact, dict):
+        return None
+    value = article.digest_impact.get("category")
+    if not isinstance(value, int | float):
+        return None
+    return max(0.0, min(1.0, float(value)))
 
 
 def _normalize_mode(mode: str) -> str:
@@ -1238,9 +1338,7 @@ def _build_event_payload(
     article_ids = sorted(set((existing or {}).get("article_ids", [])) | {article.article_id for article in articles})
     title = (existing or {}).get("title") or _event_title(articles)
     category = (
-        (existing or {}).get("category")
-        or category_override
-        or _category_for_articles(articles, feeds_by_source)
+        (existing or {}).get("category") or category_override or _category_for_articles(articles, feeds_by_source)
     )
     created_at = (existing or {}).get("created_at") or _earliest_published_at(articles) or now
     return {
@@ -1367,11 +1465,9 @@ def _baseline_newsworthiness(
         return {
             "global": round(max(0.0, min(1.0, global_score)), 3),
             "category": round(max(0.0, min(1.0, category_score)), 3),
-            "rationale_codes": sorted({
-                sanitize_id(str(code)).lower()
-                for code in rationale_codes
-                if str(code).strip()
-            }),
+            "rationale_codes": sorted(
+                {sanitize_id(str(code)).lower() for code in rationale_codes if str(code).strip()}
+            ),
             "scored_at": isoformat_z(),
             "model": "deterministic-digest-impact",
             "prompt_version": NEWSWORTHINESS_PROMPT_VERSION,

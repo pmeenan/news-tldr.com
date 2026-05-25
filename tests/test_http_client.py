@@ -137,6 +137,7 @@ async def test_retry_after_capped(monkeypatch, capsys):
         return ResolvedURL(url=url, hostname=httpx.URL(url).host or "example.test", port=80, ips=("93.184.216.34",))
 
     called_sleeps = []
+
     async def fake_sleep(seconds):
         called_sleeps.append(seconds)
 
@@ -145,6 +146,7 @@ async def test_retry_after_capped(monkeypatch, capsys):
     progress_messages = []
 
     attempts = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         if request.url.path == "/robots.txt":
@@ -180,6 +182,7 @@ async def test_robots_policy_uses_zero_retries(monkeypatch):
     monkeypatch.setattr("pipeline.http_client.validate_url", fake_validate)
 
     robots_attempts = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal robots_attempts
         if request.url.path == "/robots.txt":
@@ -198,12 +201,14 @@ async def test_robots_policy_uses_zero_retries(monkeypatch):
 @pytest.mark.asyncio
 async def test_robots_policy_deduplicates_concurrent_fetches(monkeypatch):
     import asyncio
+
     async def fake_validate(url: str) -> ResolvedURL:
         return ResolvedURL(url=url, hostname=httpx.URL(url).host or "example.test", port=80, ips=("93.184.216.34",))
 
     monkeypatch.setattr("pipeline.http_client.validate_url", fake_validate)
 
     robots_attempts = 0
+
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal robots_attempts
         if request.url.path == "/robots.txt":
@@ -229,6 +234,7 @@ async def test_crawl_delay_is_capped_at_10_seconds(monkeypatch):
         return ResolvedURL(url=url, hostname=httpx.URL(url).host or "example.test", port=80, ips=("93.184.216.34",))
 
     called_sleeps = []
+
     async def fake_sleep(seconds):
         called_sleeps.append(seconds)
 
@@ -261,9 +267,11 @@ async def test_network_backend_decrements_timeout_across_ips(monkeypatch):
 
     async def fake_resolve(host, port):
         return ("1.1.1.1", "2.2.2.2")
+
     monkeypatch.setattr("pipeline.http_client.resolve_host_port", fake_resolve)
 
     called_timeouts = []
+
     async def fake_connect_tcp(ip, port, timeout=None, local_address=None, socket_options=None):
         called_timeouts.append(timeout)
         if ip == "1.1.1.1":

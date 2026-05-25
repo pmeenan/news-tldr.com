@@ -16,9 +16,7 @@ async def run_scraper(client: PoliteHTTPClient, feed: FeedConfig) -> list[dict[s
     if not module_name:
         raise ValueError(f"No scraper_module configured for {feed.source_id}")
     if not module_name.startswith("pipeline.scrapers."):
-        raise ValueError(
-            f"scraper_module must live under pipeline.scrapers.*: {module_name} ({feed.source_id})"
-        )
+        raise ValueError(f"scraper_module must live under pipeline.scrapers.*: {module_name} ({feed.source_id})")
 
     try:
         module = importlib.import_module(module_name)

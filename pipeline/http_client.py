@@ -21,8 +21,7 @@ from pipeline.security import UnsafeURL, resolve_host_port, validate_url
 from pipeline.util import sanitize_id
 
 USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
 )
 
 MAX_RESPONSE_BYTES = 25 * 1024 * 1024
@@ -30,6 +29,7 @@ MAX_RESPONSE_BYTES = 25 * 1024 * 1024
 
 class ResponseTooLarge(httpx.HTTPError):
     pass
+
 
 BROWSER_HEADERS = {
     "User-Agent": USER_AGENT,
@@ -67,6 +67,7 @@ class SSRFProtectedAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
         socket_options: typing.Iterable[typing.Any] | None = None,
     ) -> httpcore.AsyncNetworkStream:
         import time
+
         start_time = time.time()
         ips = await resolve_host_port(host, port)
         last_exc: Exception | None = None
@@ -251,9 +252,7 @@ class PoliteHTTPClient:
                 async for chunk in response.aiter_bytes():
                     body.extend(chunk)
                     if len(body) > self.max_response_bytes:
-                        raise ResponseTooLarge(
-                            f"response exceeded {self.max_response_bytes} byte cap: {url}"
-                        )
+                        raise ResponseTooLarge(f"response exceeded {self.max_response_bytes} byte cap: {url}")
             finally:
                 await response.aclose()
             return response, bytes(body)
@@ -322,6 +321,7 @@ class PoliteHTTPClient:
                 return self._robots[key]
 
             import time
+
             cache_dir = self.robots_cache_dir
             cache_file = cache_dir / f"{scheme}_{sanitize_id(domain.lower())}_{actual_port}.txt"
 

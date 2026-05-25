@@ -37,12 +37,7 @@ def _image_from_card(anchor: Any, base_url: str) -> str | None:
             break
         img = node.find("img")
         if img:
-            raw_url = (
-                img.get("src")
-                or img.get("data-src")
-                or img.get("data-original")
-                or img.get("data-lazy-src")
-            )
+            raw_url = img.get("src") or img.get("data-src") or img.get("data-original") or img.get("data-lazy-src")
             if raw_url:
                 return urljoin(base_url, raw_url)
         node = node.parent

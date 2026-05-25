@@ -37,10 +37,15 @@ def test_fresh_migrate_creates_full_schema(tmp_path: Path) -> None:
             "digest_model",
             "digest_prompt_version",
             "digest_error",
+            "aggregation_status",
+            "aggregation_reason",
+            "is_filtered",
         } <= _columns(conn, "articles")
         assert {"window_start", "window_end", "status", "stats_json"} <= _columns(conn, "aggregation_windows")
         assert _indexes(conn, "articles") >= {"idx_articles_canonical_url", "idx_articles_unassigned"}
         assert "idx_articles_digest_status_published" in _indexes(conn, "articles")
+        assert "idx_articles_aggregation_status_published" in _indexes(conn, "articles")
+        assert "idx_articles_is_filtered_published" in _indexes(conn, "articles")
         assert "idx_events_status_updated" in _indexes(conn, "events")
         assert "idx_events_newsworthiness_global" in _indexes(conn, "events")
         assert "idx_aggregation_windows_status_end" in _indexes(conn, "aggregation_windows")
@@ -56,10 +61,7 @@ def test_migrate_upgrades_existing_v1_database(tmp_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(
-            "CREATE TABLE IF NOT EXISTS schema_version ("
-            " version INTEGER PRIMARY KEY,"
-            " applied_at TEXT NOT NULL"
-            ");"
+            "CREATE TABLE IF NOT EXISTS schema_version ( version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);"
         )
         v1_sql = next(sql for version, sql in MIGRATIONS if version == 1)
         conn.executescript(v1_sql)
@@ -82,7 +84,9 @@ def test_migrate_upgrades_existing_v1_database(tmp_path: Path) -> None:
         }
         assert "newsworthiness_json" in _columns(conn, "events")
         assert "digest_status" in _columns(conn, "articles")
-        assert versions == [1, 2, 3, 4, 5]
+        assert "aggregation_status" in _columns(conn, "articles")
+        assert "is_filtered" in _columns(conn, "articles")
+        assert versions == [1, 2, 3, 4, 5, 6, 7]
     finally:
         conn.close()
 
@@ -126,6 +130,53 @@ def test_state_tracks_aggregation_window_status(tmp_path: Path) -> None:
             "2026-05-24T16:00:00Z",
             "2026-05-24T22:00:00Z",
         )
+
+
+def test_unassigned_window_count_ignores_filtered_articles(tmp_path: Path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+
+    with StateDB(db_path) as state:
+        for article_id in ("pending", "filtered"):
+            article = {
+                "article_id": article_id,
+                "source_id": "source",
+                "source_name": "Source",
+                "url": f"https://example.com/{article_id}",
+                "headline": f"Headline {article_id}",
+                "summary": "Summary",
+                "published_at": "2026-05-24T16:30:00Z",
+                "publish_date_estimated": False,
+                "fetched_at": "2026-05-24T16:31:00Z",
+                "content_type": "unknown",
+                "language": "en",
+                "collection": {},
+                "fingerprints": {},
+            }
+            state.insert_article(article, tmp_path / f"{article_id}.json")
+        state.update_article_aggregation_status("filtered", status="filtered_non_news")
+
+        # Verify that is_filtered is updated to 1
+        filtered_row = state.conn.execute("SELECT is_filtered FROM articles WHERE article_id = 'filtered'").fetchone()
+        assert filtered_row["is_filtered"] == 1
+
+        assert (
+            state.unassigned_article_count_in_window(
+                "2026-05-24T16:00:00Z",
+                "2026-05-24T22:00:00Z",
+            )
+            == 1
+        )
+        assert state.article_time_bounds(unassigned_only=True) == (
+            "2026-05-24T16:30:00Z",
+            "2026-05-24T16:30:00Z",
+        )
+        state.update_article_aggregation_status("pending", status="filtered_low_impact")
+
+        pending_row = state.conn.execute("SELECT is_filtered FROM articles WHERE article_id = 'pending'").fetchone()
+        assert pending_row["is_filtered"] == 1
+
+        assert state.article_time_bounds(unassigned_only=True) is None
 
 
 def test_state_upserts_event_and_assigns_articles(tmp_path: Path) -> None:
@@ -181,6 +232,62 @@ def test_state_upserts_event_and_assigns_articles(tmp_path: Path) -> None:
         assert event_row["newsworthiness_category"] == 0.9
 
 
+def test_update_article_aggregation_status_preserves_assigned_articles(tmp_path: Path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+
+    with StateDB(db_path) as state:
+        article = {
+            "article_id": "assigned",
+            "source_id": "source",
+            "source_name": "Source",
+            "url": "https://example.com/assigned",
+            "headline": "Headline",
+            "summary": "Summary",
+            "published_at": "2026-05-24T16:00:00Z",
+            "publish_date_estimated": False,
+            "fetched_at": "2026-05-24T16:00:00Z",
+            "content_type": "unknown",
+            "language": "en",
+            "collection": {},
+            "fingerprints": {},
+        }
+        state.insert_article(article, tmp_path / "assigned.json")
+        state.upsert_event(
+            {
+                "event_id": "event-1",
+                "title": "Event",
+                "category": "world",
+                "thread": None,
+                "status": "active",
+                "created_at": "2026-05-24T16:00:00Z",
+                "updated_at": "2026-05-24T16:00:00Z",
+                "article_ids": ["assigned"],
+                "article_count": 1,
+                "confidence": 0.7,
+                "newsworthiness": None,
+                "llm_metadata": {},
+            },
+            tmp_path / "event-1.json",
+        )
+        state.assign_articles_to_event(["assigned"], "event-1")
+
+        state.update_article_aggregation_status(
+            "assigned",
+            status="filtered_low_impact",
+            reason="below threshold",
+        )
+
+        row = state.conn.execute(
+            "SELECT aggregation_status, aggregation_reason, is_filtered, event_id "
+            "FROM articles WHERE article_id = 'assigned'"
+        ).fetchone()
+        assert row["aggregation_status"] == "assigned"
+        assert row["aggregation_reason"] is None
+        assert row["is_filtered"] == 0
+        assert row["event_id"] == "event-1"
+
+
 def test_state_updates_metadata_and_logs_usage(tmp_path: Path) -> None:
     db_path = tmp_path / "pipeline.db"
     migrate(db_path)
@@ -230,3 +337,78 @@ def test_state_updates_metadata_and_logs_usage(tmp_path: Path) -> None:
         assert usage_row["input_tokens"] == 100
         assert usage_row["output_tokens"] == 200
         assert usage_row["cost_usd"] == 0.001
+
+
+def test_set_article_aggregation_pending_if_unassigned(tmp_path: Path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+
+    def _make(article_id: str) -> dict[str, object]:
+        return {
+            "article_id": article_id,
+            "source_id": "source",
+            "source_name": "Source",
+            "url": f"https://example.com/{article_id}",
+            "headline": f"Headline {article_id}",
+            "summary": "Summary",
+            "published_at": "2026-05-24T16:30:00Z",
+            "publish_date_estimated": False,
+            "fetched_at": "2026-05-24T16:31:00Z",
+            "content_type": "unknown",
+            "language": "en",
+            "collection": {},
+            "fingerprints": {},
+        }
+
+    with StateDB(db_path) as state:
+        for article_id in ("unassigned", "assigned", "filtered"):
+            state.insert_article(_make(article_id), tmp_path / f"{article_id}.json")
+
+        # Setup: one assigned to an event, one filtered, one untouched.
+        state.upsert_event(
+            {
+                "event_id": "ev-1",
+                "title": "Event",
+                "category": "world",
+                "thread": None,
+                "status": "active",
+                "created_at": "2026-05-24T16:30:00Z",
+                "updated_at": "2026-05-24T16:30:00Z",
+                "article_ids": ["assigned"],
+                "article_count": 1,
+                "confidence": 0.7,
+                "newsworthiness": None,
+                "llm_metadata": {},
+            },
+            tmp_path / "events" / "ev-1.json",
+        )
+        state.assign_articles_to_event(["assigned"], "ev-1")
+        state.update_article_aggregation_status("filtered", status="filtered_low_impact", reason="below cutoff")
+
+        # Assigned: must NOT be reset to pending.
+        state.set_article_aggregation_pending_if_unassigned("assigned")
+        row = state.conn.execute(
+            "SELECT aggregation_status, event_id FROM articles WHERE article_id = 'assigned'"
+        ).fetchone()
+        assert row["aggregation_status"] == "assigned"
+        assert row["event_id"] == "ev-1"
+
+        # Filtered (event_id IS NULL): SHOULD be reset to pending and unfilter.
+        state.set_article_aggregation_pending_if_unassigned("filtered")
+        row = state.conn.execute(
+            "SELECT aggregation_status, aggregation_reason, is_filtered FROM articles WHERE article_id = 'filtered'"
+        ).fetchone()
+        assert row["aggregation_status"] == "pending"
+        assert row["aggregation_reason"] is None
+        assert row["is_filtered"] == 0
+
+        # Already-pending row: no-op. Plant a sentinel reason that the helper
+        # would clear if it ran, then assert it survives the call.
+        state.conn.execute("UPDATE articles SET aggregation_reason = 'sentinel' WHERE article_id = 'unassigned'")
+        state.conn.commit()
+        state.set_article_aggregation_pending_if_unassigned("unassigned")
+        row = state.conn.execute(
+            "SELECT aggregation_status, aggregation_reason FROM articles WHERE article_id = 'unassigned'"
+        ).fetchone()
+        assert row["aggregation_status"] == "pending"
+        assert row["aggregation_reason"] == "sentinel"

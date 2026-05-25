@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
 import pytest
 
 from pipeline.aggregate import (
     ArticleForAggregation,
+    _floor_hour,
+    _format_iso_timestamp,
     aggregate_once,
     apply_grouping_result,
     compare_groupings,
     group_articles_with_gemini,
     load_unprocessed_articles,
+    load_window_articles,
     plan_sliding_windows,
     score_groups_newsworthiness,
     validate_grouping_response,
@@ -85,7 +89,8 @@ def test_validate_grouping_response_accepts_complete_groups() -> None:
                 {"article_index": 1, "content_type": "news", "category": "world"},
                 {"article_index": 2, "content_type": "opinion", "category": "us"},
             ],
-            "groups": [{"article_indexes": [1, 0]}, {"article_indexes": [2]}]},
+            "groups": [{"article_indexes": [1, 0]}, {"article_indexes": [2]}],
+        },
         article_count=3,
         valid_categories=["world", "us"],
     )
@@ -129,7 +134,8 @@ def test_validate_grouping_response_accepts_complete_groups() -> None:
                     {"article_index": 1, "content_type": "news", "category": "world"},
                     {"article_index": 2, "content_type": "news", "category": "world"},
                 ],
-                "groups": [{"article_indexes": [3]}]},
+                "groups": [{"article_indexes": [3]}],
+            },
             "out of range",
         ),
     ],
@@ -140,14 +146,16 @@ def test_validate_grouping_response_rejects_invalid_output(payload: dict[str, An
 
 
 def test_group_articles_with_gemini_validates_and_summarizes_response() -> None:
-    client = FakeJsonGenerator({
-        "articles": [
-            {"article_index": 0, "content_type": "news", "category": "world"},
-            {"article_index": 1, "content_type": "news", "category": "world"},
-            {"article_index": 2, "content_type": "news", "category": "world"},
-        ],
-        "groups": [{"article_indexes": [0, 1]}, {"article_indexes": [2]}]
-    })
+    client = FakeJsonGenerator(
+        {
+            "articles": [
+                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 1, "content_type": "news", "category": "world"},
+                {"article_index": 2, "content_type": "news", "category": "world"},
+            ],
+            "groups": [{"article_indexes": [0, 1]}, {"article_indexes": [2]}],
+        }
+    )
 
     result = group_articles_with_gemini(_articles(), mode="titles_summaries", client=client)
 
@@ -161,14 +169,16 @@ def test_group_articles_with_gemini_validates_and_summarizes_response() -> None:
 
 
 def test_titles_mode_omits_summaries_from_prompt() -> None:
-    client = FakeJsonGenerator({
-        "articles": [
-            {"article_index": 0, "content_type": "news", "category": "world"},
-            {"article_index": 1, "content_type": "news", "category": "world"},
-            {"article_index": 2, "content_type": "news", "category": "world"},
-        ],
-        "groups": [{"article_indexes": [0]}, {"article_indexes": [1]}, {"article_indexes": [2]}]
-    })
+    client = FakeJsonGenerator(
+        {
+            "articles": [
+                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 1, "content_type": "news", "category": "world"},
+                {"article_index": 2, "content_type": "news", "category": "world"},
+            ],
+            "groups": [{"article_indexes": [0]}, {"article_indexes": [1]}, {"article_indexes": [2]}],
+        }
+    )
 
     group_articles_with_gemini(_articles(), mode="titles", client=client)
 
@@ -176,12 +186,14 @@ def test_titles_mode_omits_summaries_from_prompt() -> None:
 
 
 def test_grouping_prompt_prefers_digest_summary_and_key_facts() -> None:
-    client = FakeJsonGenerator({
-        "articles": [
-            {"article_index": 0, "content_type": "news", "category": "world"},
-        ],
-        "groups": [{"article_indexes": [0]}],
-    })
+    client = FakeJsonGenerator(
+        {
+            "articles": [
+                {"article_index": 0, "content_type": "news", "category": "world"},
+            ],
+            "groups": [{"article_indexes": [0]}],
+        }
+    )
     article = ArticleForAggregation(
         article_id="a1",
         source_id="source-a",
@@ -359,6 +371,199 @@ def test_load_unprocessed_articles_filters_time_window(tmp_path) -> None:
     assert [article.article_id for article in articles] == ["a2", "a1"]
 
 
+def test_load_window_articles_filters_low_impact_and_marks_status(tmp_path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        for article_id, global_impact, category_impact in (
+            ("high", 0.1, 0.7),
+            ("low", 0.9, 0.1),
+            ("missing", None, None),
+        ):
+            article_path = tmp_path / f"{article_id}.json"
+            payload = {
+                "article_id": article_id,
+                "source_id": "source",
+                "source_name": "Source",
+                "url": f"https://example.com/{article_id}",
+                "headline": f"Headline {article_id}",
+                "summary": f"Summary {article_id}",
+                "published_at": "2026-05-24T16:30:00Z",
+                "publish_date_estimated": False,
+                "fetched_at": "2026-05-24T16:31:00Z",
+                "content_type": "unknown",
+                "language": "en",
+                "collection": {},
+                "fingerprints": {},
+            }
+            if category_impact is not None:
+                payload["llm_digest"] = {
+                    "summary": "Generated digest.",
+                    "key_facts": ["A key fact."],
+                    "impact": {"global": global_impact, "category": category_impact},
+                }
+            article_path.write_text(json.dumps(payload), encoding="utf-8")
+            state.insert_article(payload, article_path)
+
+        articles = load_window_articles(
+            window_start="2026-05-24T16:00:00Z",
+            window_end="2026-05-24T22:00:00Z",
+            min_category_impact=0.25,
+            db=state,
+        )
+        statuses = {
+            row["article_id"]: (row["aggregation_status"], row["is_filtered"])
+            for row in state.conn.execute(
+                "SELECT article_id, aggregation_status, is_filtered FROM articles ORDER BY article_id"
+            )
+        }
+
+    assert [article.article_id for article in articles] == ["high"]
+    assert statuses == {
+        "high": ("pending", 0),
+        "low": ("filtered_low_impact", 1),
+        "missing": ("pending", 0),
+    }
+
+
+def test_load_window_articles_filters_non_news_and_spammy_content(tmp_path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        cases = (
+            ("eligible", "Real news headline", "ok", ["public_safety"], "pending"),
+            ("non-news", "Product roundup", "non_news", ["product_recommendation"], "filtered_non_news"),
+            ("promo", "Sports betting picks", "ok", ["gambling_advice"], "filtered_low_signal_content"),
+            ("video", "(untitled)", "ok", ["video_page"], "filtered_video_or_carousel"),
+            ("gallery", "Campaign photos", "ok", ["gallery_page"], "filtered_video_or_carousel"),
+            (
+                "background",
+                "Candidate profile",
+                "ok",
+                ["profile_or_background"],
+                "filtered_low_signal_content",
+            ),
+        )
+        for article_id, headline, content_quality, rationale_codes, _expected_status in cases:
+            article_path = tmp_path / f"{article_id}.json"
+            payload = {
+                "article_id": article_id,
+                "source_id": "source",
+                "source_name": "Source",
+                "url": f"https://example.com/{article_id}",
+                "headline": headline,
+                "summary": f"Summary {article_id}",
+                "published_at": "2026-05-24T16:30:00Z",
+                "publish_date_estimated": False,
+                "fetched_at": "2026-05-24T16:31:00Z",
+                "content_type": "unknown",
+                "language": "en",
+                "collection": {},
+                "fingerprints": {},
+                "llm_digest": {
+                    "summary": "Generated digest.",
+                    "key_facts": ["A key fact."],
+                    "content_quality": content_quality,
+                    "impact": {
+                        "global": 0.9,
+                        "category": 0.9,
+                        "rationale_codes": rationale_codes,
+                    },
+                },
+            }
+            article_path.write_text(json.dumps(payload), encoding="utf-8")
+            state.insert_article(payload, article_path)
+
+        articles = load_window_articles(
+            window_start="2026-05-24T16:00:00Z",
+            window_end="2026-05-24T22:00:00Z",
+            min_category_impact=0.25,
+            db=state,
+        )
+        statuses = {
+            row["article_id"]: (row["aggregation_status"], row["is_filtered"])
+            for row in state.conn.execute(
+                "SELECT article_id, aggregation_status, is_filtered FROM articles ORDER BY article_id"
+            )
+        }
+
+    assert [article.article_id for article in articles] == ["eligible"]
+    assert statuses == {
+        "background": ("filtered_low_signal_content", 1),
+        "eligible": ("pending", 0),
+        "gallery": ("filtered_video_or_carousel", 1),
+        "non-news": ("filtered_non_news", 1),
+        "promo": ("filtered_low_signal_content", 1),
+        "video": ("filtered_video_or_carousel", 1),
+    }
+
+
+def test_load_window_articles_dry_run_does_not_mutate_status(tmp_path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        for article_id, content_quality, rationale_codes in (
+            ("eligible", "ok", ["public_safety"]),
+            ("non-news", "non_news", ["product_recommendation"]),
+        ):
+            article_path = tmp_path / f"{article_id}.json"
+            payload = {
+                "article_id": article_id,
+                "source_id": "source",
+                "source_name": "Source",
+                "url": f"https://example.com/{article_id}",
+                "headline": f"Headline {article_id}",
+                "summary": "Summary",
+                "published_at": "2026-05-24T16:30:00Z",
+                "publish_date_estimated": False,
+                "fetched_at": "2026-05-24T16:31:00Z",
+                "content_type": "unknown",
+                "language": "en",
+                "collection": {},
+                "fingerprints": {},
+                "llm_digest": {
+                    "summary": "Generated digest.",
+                    "key_facts": ["A key fact."],
+                    "content_quality": content_quality,
+                    "impact": {
+                        "global": 0.9,
+                        "category": 0.9,
+                        "rationale_codes": rationale_codes,
+                    },
+                },
+            }
+            article_path.write_text(json.dumps(payload), encoding="utf-8")
+            state.insert_article(payload, article_path)
+
+        # Plant a sentinel reason that the helper would clear if it ran.
+        state.conn.execute("UPDATE articles SET aggregation_reason = 'sentinel'")
+        state.conn.commit()
+
+        articles = load_window_articles(
+            window_start="2026-05-24T16:00:00Z",
+            window_end="2026-05-24T22:00:00Z",
+            min_category_impact=0.25,
+            mark_filtered=False,
+            db=state,
+        )
+        statuses = {
+            row["article_id"]: (row["aggregation_status"], row["aggregation_reason"], row["is_filtered"])
+            for row in state.conn.execute(
+                "SELECT article_id, aggregation_status, aggregation_reason, is_filtered "
+                "FROM articles ORDER BY article_id"
+            )
+        }
+
+    assert [article.article_id for article in articles] == ["eligible"]
+    # No DB writes happened: both rows retain the sentinel and their default
+    # pending/0 status. The non-news row is excluded from the returned list
+    # but not flipped to filtered.
+    assert statuses == {
+        "eligible": ("pending", "sentinel", 0),
+        "non-news": ("pending", "sentinel", 0),
+    }
+
+
 def test_plan_sliding_windows_skips_completed_except_latest(tmp_path) -> None:
     db_path = tmp_path / "pipeline.db"
     migrate(db_path)
@@ -399,9 +604,7 @@ def test_plan_sliding_windows_reruns_completed_windows_with_unassigned_articles(
     db_path = tmp_path / "pipeline.db"
     migrate(db_path)
     with StateDB(db_path) as state:
-        for index, window_start in enumerate(
-            ("2026-05-24T00:00:00Z", "2026-05-24T01:00:00Z", "2026-05-24T02:00:00Z")
-        ):
+        for index, window_start in enumerate(("2026-05-24T00:00:00Z", "2026-05-24T01:00:00Z", "2026-05-24T02:00:00Z")):
             window_end = f"2026-05-24T0{index + 6}:00:00Z"
             state.start_aggregation_window(
                 window_start=window_start,
@@ -593,12 +796,14 @@ def test_apply_grouping_result_event_merging(tmp_path, monkeypatch) -> None:
         event_dir.mkdir(parents=True, exist_ok=True)
         # Event A: contains historical a0 and current a1
         (event_dir / "event-A.json").write_text(
-            json.dumps({
-                "event_id": "event-A",
-                "title": "Event A",
-                "category": "world",
-                "article_ids": ["a0", "a1"],
-            }),
+            json.dumps(
+                {
+                    "event_id": "event-A",
+                    "title": "Event A",
+                    "category": "world",
+                    "article_ids": ["a0", "a1"],
+                }
+            ),
             encoding="utf-8",
         )
         state.conn.execute(
@@ -608,12 +813,14 @@ def test_apply_grouping_result_event_merging(tmp_path, monkeypatch) -> None:
 
         # Event B: contains historical b0 and current a2
         (event_dir / "event-B.json").write_text(
-            json.dumps({
-                "event_id": "event-B",
-                "title": "Event B",
-                "category": "world",
-                "article_ids": ["b0", "a2"],
-            }),
+            json.dumps(
+                {
+                    "event_id": "event-B",
+                    "title": "Event B",
+                    "category": "world",
+                    "article_ids": ["b0", "a2"],
+                }
+            ),
             encoding="utf-8",
         )
         state.conn.execute(
@@ -693,7 +900,6 @@ def test_apply_grouping_result_event_merging(tmp_path, monkeypatch) -> None:
         assert state.conn.execute("SELECT 1 FROM events WHERE event_id = 'event-B'").fetchone() is None
 
 
-
 def test_aggregate_once_dry_run_does_not_mutate_window_or_run_state(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "pipeline.db"
     migrate(db_path)
@@ -713,10 +919,13 @@ def test_aggregate_once_dry_run_does_not_mutate_window_or_run_state(tmp_path, mo
 
     assert stats["stale_windows_recovered"] == 0
     with StateDB(db_path) as state:
-        assert state.aggregation_window_status(
-            "2026-05-24T00:00:00Z",
-            "2026-05-24T06:00:00Z",
-        ) == "running"
+        assert (
+            state.aggregation_window_status(
+                "2026-05-24T00:00:00Z",
+                "2026-05-24T06:00:00Z",
+            )
+            == "running"
+        )
         assert state.conn.execute("SELECT COUNT(*) AS count FROM pipeline_runs").fetchone()["count"] == 0
 
 
@@ -725,23 +934,31 @@ def test_aggregate_once_marks_failed_run_when_all_windows_fail(tmp_path, monkeyp
     migrate(db_path)
     with StateDB(db_path) as state:
         article = _articles()[0]
-        state.insert_article(
-            {
-                "article_id": article.article_id,
-                "source_id": article.source_id,
-                "source_name": article.source_name,
-                "url": f"https://example.com/{article.article_id}",
-                "headline": article.headline,
-                "summary": article.summary,
-                "published_at": "2026-05-24T01:00:00Z",
-                "publish_date_estimated": False,
-                "fetched_at": "2026-05-24T01:01:00Z",
-                "content_type": "unknown",
-                "language": "en",
-                "collection": {},
-                "fingerprints": {},
+        article_payload = {
+            "article_id": article.article_id,
+            "source_id": article.source_id,
+            "source_name": article.source_name,
+            "url": f"https://example.com/{article.article_id}",
+            "headline": article.headline,
+            "summary": article.summary,
+            "published_at": "2026-05-24T01:00:00Z",
+            "publish_date_estimated": False,
+            "fetched_at": "2026-05-24T01:01:00Z",
+            "content_type": "unknown",
+            "language": "en",
+            "collection": {},
+            "fingerprints": {},
+            "llm_digest": {
+                "summary": "Eligible generated digest.",
+                "key_facts": ["A key fact."],
+                "impact": {"global": 0.7, "category": 0.7},
             },
-            tmp_path / "a1.json",
+        }
+        article_path = tmp_path / "a1.json"
+        article_path.write_text(json.dumps(article_payload), encoding="utf-8")
+        state.insert_article(
+            article_payload,
+            article_path,
         )
 
     monkeypatch.setattr("pipeline.aggregate.StateDB", lambda: StateDB(db_path))
@@ -795,16 +1012,12 @@ def test_fail_stale_running_aggregation_windows(tmp_path) -> None:
             prompt_version="aggregation-v6",
             model="gemini-3.1-flash-lite",
         )
-        assert state.aggregation_window_status(
-            "2026-05-24T00:00:00Z", "2026-05-24T06:00:00Z"
-        ) == "running"
+        assert state.aggregation_window_status("2026-05-24T00:00:00Z", "2026-05-24T06:00:00Z") == "running"
 
         recovered = state.fail_stale_running_aggregation_windows()
         assert recovered == 1
 
-        assert state.aggregation_window_status(
-            "2026-05-24T00:00:00Z", "2026-05-24T06:00:00Z"
-        ) == "failed"
+        assert state.aggregation_window_status("2026-05-24T00:00:00Z", "2026-05-24T06:00:00Z") == "failed"
 
         assert state.fail_stale_running_aggregation_windows() == 0
 
@@ -845,9 +1058,10 @@ def test_merge_events_into(tmp_path) -> None:
 
         state.merge_events_into(["loser"], "winner")
 
-        assert state.conn.execute(
-            "SELECT event_id FROM articles WHERE article_id = 'a1'"
-        ).fetchone()["event_id"] == "winner"
+        assert (
+            state.conn.execute("SELECT event_id FROM articles WHERE article_id = 'a1'").fetchone()["event_id"]
+            == "winner"
+        )
         assert state.conn.execute("SELECT 1 FROM events WHERE event_id = 'loser'").fetchone() is None
         assert state.conn.execute("SELECT 1 FROM events WHERE event_id = 'winner'").fetchone() is not None
 
@@ -866,3 +1080,83 @@ def test_validate_newsworthiness_filters_collapsed_rationale_codes() -> None:
     scores = validate_newsworthiness_response(payload, valid_group_indexes={0})
     # "!!!" sanitizes to "unknown" and is dropped; whitespace-only codes dropped.
     assert scores[0]["rationale_codes"] == ["valid_code", "another-valid"]
+
+
+def test_aggregate_once_default_range(tmp_path, monkeypatch) -> None:
+    from pipeline.util import utc_now
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    state = StateDB(db_path)
+
+    # Insert an unassigned article older than limit_dt (e.g. 2 days ago)
+    ref = utc_now()
+    today_start = datetime.combine(ref.date(), time.min, tzinfo=UTC)
+    limit_dt = today_start - timedelta(days=1)
+
+    # 2 days ago
+    old_time = limit_dt - timedelta(hours=12)
+    old_time_str = old_time.isoformat().replace("+00:00", "Z")
+
+    # Yesterday 12 hours ago (within range)
+    new_time = limit_dt + timedelta(hours=12)
+    new_time_str = new_time.isoformat().replace("+00:00", "Z")
+
+    state.insert_article({
+        "article_id": "old-article",
+        "source_id": "src",
+        "source_name": "Src",
+        "url": "https://example.com/old",
+        "headline": "Old article",
+        "summary": "Summary",
+        "published_at": old_time_str,
+        "publish_date_estimated": False,
+        "fetched_at": old_time_str,
+        "content_type": "unknown",
+        "language": "en",
+        "collection": {},
+        "fingerprints": {},
+        "llm_digest": {
+            "summary": "Old summary",
+            "key_facts": ["fact"],
+            "impact": {"global": 0.5, "category": 0.5},
+        },
+    }, tmp_path / "old.json")
+
+    state.insert_article({
+        "article_id": "new-article",
+        "source_id": "src",
+        "source_name": "Src",
+        "url": "https://example.com/new",
+        "headline": "New article",
+        "summary": "Summary",
+        "published_at": new_time_str,
+        "publish_date_estimated": False,
+        "fetched_at": new_time_str,
+        "content_type": "unknown",
+        "language": "en",
+        "collection": {},
+        "fingerprints": {},
+        "llm_digest": {
+            "summary": "New summary",
+            "key_facts": ["fact"],
+            "impact": {"global": 0.5, "category": 0.5},
+        },
+    }, tmp_path / "new.json")
+
+    monkeypatch.setattr("pipeline.aggregate.StateDB", lambda: StateDB(db_path))
+    monkeypatch.setattr("pipeline.aggregate.LOCK_PATH", tmp_path / "pipeline.lock")
+
+    planned_windows = []
+
+    def fake_plan_sliding_windows(*args, **kwargs):
+        planned_windows.append((kwargs.get("range_start"), kwargs.get("range_end")))
+        return []
+
+    monkeypatch.setattr("pipeline.aggregate.plan_sliding_windows", fake_plan_sliding_windows)
+
+    aggregate_once(client=FakeJsonGenerator({}))
+
+    assert len(planned_windows) == 1
+    expected_start = _format_iso_timestamp(_floor_hour(limit_dt))
+    assert planned_windows[0][0] == expected_start

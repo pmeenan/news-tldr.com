@@ -24,7 +24,8 @@ news-tldr.com is a filesystem-backed RSS aggregator that collects source article
 graph TD
     Feeds[config/feeds.json] --> Collect[1. Data Collection]
     Collect --> Articles[data/staging/articles/]
-    Articles --> Aggregate[2. Story Aggregation]
+    Articles --> Digest[2a. Article Digest]
+    Digest --> Aggregate[2b. Story Aggregation]
     Aggregate --> Events[data/events/]
     Events --> Editorial[3. Editorial]
     Editorial --> Stories[data/published/stories/]
@@ -32,10 +33,12 @@ graph TD
     Present --> Site[dist/ — Static HTML/CSS/JSON]
 
     State[(data/state/pipeline.db)] -.-> Collect
+    State -.-> Digest
     State -.-> Aggregate
     State -.-> Editorial
 
     Collect -->|HTTP + readability| Pages[Article pages]
+    Digest -->|Article LLM| ArticleDigest[Summaries, key facts & impact]
     Aggregate -->|Window LLM| Classify[Grouping & classification]
     Editorial -->|Per-event LLM| Summarize[Summary & framing]
 ```
@@ -160,6 +163,7 @@ Custom scraper entries use `"feed_type": "scraper"` and a `fetch.scraper_module`
     "summary": "Neutral factual digest generated from content_text",
     "key_facts": ["Important fact with source-article context"],
     "content_quality": "ok | thin | extraction_noise | paywalled | non_news",
+    "study_stage": "preclinical | animal | early_human | trial_phase | approved | observational | lab_bench | unknown",
     "impact": {
       "global": 0.72,
       "category": 0.88,
@@ -169,7 +173,7 @@ Custom scraper entries use `"feed_type": "scraper"` and a `fetch.scraper_module`
     },
     "generated_at": "2026-05-24T12:50:00Z",
     "model": "gemini-3.1-flash-lite",
-    "prompt_version": "article-digest-v2",
+    "prompt_version": "article-digest-v6",
     "content_chars_used": 12000
   },
   "published_at": "2026-05-24T12:30:00Z",
@@ -201,11 +205,43 @@ Custom scraper entries use `"feed_type": "scraper"` and a `fetch.scraper_module`
 }
 ```
 
-## Stage 2: Story Aggregation
+## Stage 2a: Article Digest
 
 Inputs:
 
-- Unprocessed article records from the pipeline state database
+- Article JSON files from `data/staging/articles/`
+- Article records and fingerprints from the pipeline state database
+
+Responsibilities:
+
+- Generate factual per-article LLM digests as a standalone pipeline step before aggregation.
+- Write `llm_digest` into each article JSON with summary, standalone key facts suitable for later editorial summarization, content-quality signal, article-level impact, model, prompt version, timestamp, and input character count.
+- Run with bounded parallelism (`digest.concurrency` in `config/pipeline.json`) and a verbose CLI mode that streams progress to stderr while final stats stay on stdout.
+- Avoid redundant spend by copying completed digests across exact reprints that share content-text or canonical-URL fingerprints. Headline hashes are not used for digest copying because generic shared headlines can describe unrelated stories.
+- Validate impact scores and normalize common model scale mistakes: requested output is `0.0` through `1.0`, but otherwise sensible `1-10` and percentage-like values are converted to the configured decimal scale.
+- Clamp contradictory low-signal impact scores after validation using a controlled `rationale_codes` vocabulary and `content_quality`. Cap tiers are layered (the minimum applicable cap per axis wins, with global and category capped independently):
+  - `non_news` → both axes capped at `0.10`.
+  - `LOW_IMPACT_RATIONALE_CODES` (affiliate, archival_index, gambling, low_public_interest, product_recommendation, promotional, puzzle_guide, recycled_content) → both axes capped at `0.15`.
+  - `MULTI_TOPIC_RATIONALE_CODES` (`live_blog`, `newsletter_roundup`) → both axes capped at `0.30`.
+  - `VENDOR_ANNOUNCEMENT_RATIONALE_CODES` (`vendor_announcement`) → global capped at `0.55`, category capped at `0.75` (asymmetric: vendor keynotes are legitimate vertical news but should not lead a general homepage). Skipped when any HIGH rationale code (`public_health`, `national_security`, `public_safety`, etc.) is also present.
+  - `UNCONFIRMED_INJURY_RATIONALE_CODES` (`unconfirmed_injury`) → global capped at `0.60`; category left alone so the sports vertical can still rank the story.
+  - `content_quality in {thin, extraction_noise, paywalled}` (without a HIGH rationale code) → both axes capped at `0.65`.
+- Schema-emit an optional `study_stage` enum on medical/biological/materials research articles (`preclinical`, `animal`, `early_human`, `trial_phase`, `approved`, `observational`, `lab_bench`, `unknown`); `not_applicable`, unrecognized values, and stages attached to uncovered domains such as climate, astronomy, aeronautics, software, or general engineering research are dropped before persistence so the field stays present only when meaningful.
+- Reset aggregation status to `pending` when a digest is generated or refreshed, so a changed impact score can make a previously filtered article eligible again.
+
+The CLI entrypoint is:
+
+```bash
+./.venv/bin/python -m pipeline.cli digest --verbose
+```
+
+Optional `--range-start`, `--range-end`, `--limit`, and `--concurrency` flags make the stage practical to debug independently from aggregation. `--force` regenerates current-version digests instead of treating them as completed, which is useful after prompt or validation changes. By default, if no range is specified, the processing window is restricted to articles published within the current and previous UTC days (starting at 00:00:00 UTC of yesterday) to avoid processing older retained data.
+
+## Stage 2b: Story Aggregation
+
+Inputs:
+
+- Digested, unprocessed article records from the pipeline state database
 - Article JSON files from `data/staging/articles/`
 - Existing event files from `data/events/`
 - `config/categories.json` for valid category IDs
@@ -213,8 +249,10 @@ Inputs:
 Responsibilities:
 
 - Query the state database for articles not yet assigned to an event.
-- Generate missing per-article LLM digests before grouping. To avoid redundant LLM requests and costs, exact article reprints sharing the same content hash or canonical URL hash are grouped: we run the LLM digest only on one canonical article and propagate/copy the resulting `llm_digest` block to all matching duplicate reprint JSON files on disk, marking them as completed with a `"copied"` model status in SQLite. The article JSON keeps the real generating model for provenance; the SQLite `digest_model` column carries `"copied"` so downstream queries can distinguish generated from copied digests without re-reading files. Headline-hash matches are intentionally excluded from digest copying because generic shared headlines (e.g. "Morning briefing", "[City] weather forecast") would silently propagate one story's digest onto unrelated stories. Digests are written back to the article JSON as `llm_digest` with a concise factual summary, `key_facts`, content-quality signal, article-level impact scores, model, prompt version, and timestamp. Digest calls run with bounded parallelism and are tracked in SQLite so reruns skip completed articles.
-- Deduplicate near-identical exact article reprints (e.g., wire service stories) using content and canonical URL hashes during the digest pass and aggregation stages. Headline and summary hashes remain available in `article_fingerprints` for collection-time near-duplicate suppression, but are not used to short-circuit digest generation.
+- Use completed article digests instead of site-provided teaser summaries where available.
+- Filter out non-news, promotional/affiliate/product/deals, puzzle/game help, gambling picks, archive/index, video-carousel, and no-substantive-content artifacts before grouping. Remaining low-impact articles are filtered using the article digest's category/vertical impact score and `aggregation.min_category_impact` from `config/pipeline.json`. Filtered articles are marked with `aggregation_status = filtered_*` so completed windows do not rerun forever on intentionally skipped rows.
+- Video/carousel exclusion should not rely only on the digest model. Aggregation should also apply deterministic URL/path and collection-signal checks for obvious media pages (for example `/videos/`, `/video/`, gallery/carousel paths, and untitled pages whose extracted text is dominated by video listings) before grouping.
+- Deduplicate near-identical exact article reprints (e.g., wire service stories) using content and canonical URL hashes during digest and aggregation stages. Headline and summary hashes remain available in `article_fingerprints` for collection-time near-duplicate suppression, but are not used to short-circuit digest generation.
 - Classify each article's content type: news, opinion, analysis, review, or unknown.
 - Assign each article to a category from `config/categories.json`.
 - Group articles into durable story clusters: either match an existing event or create a new one. A cluster may include multiple angles on the same developing news subject, such as updates, reactions, analysis, and local/international framing. The editorial stage is responsible for separating those angles in the summary. Match using the headline and a brief paragraph summary, not the full article text.
@@ -240,7 +278,7 @@ structured output (`responseMimeType: application/json` plus a response JSON
 schema). API keys must not be written to logs, command output, JSON artifacts,
 or committed files.
 
-Aggregation runs over sliding publish-time windows. The default window is 6 hours with a 1-hour step, so adjacent windows overlap and boundary-adjacent articles can still be grouped. Before grouping, the pipeline generates missing article digests for the planned windows. The digest prompt uses `content_text`, allows more than one or two sentences when needed to preserve important facts, returns `key_facts`, scores article-level impact, and avoids recreating the full article. Digest generation uses the configured Gemini backend with bounded parallelism (`digest.concurrency` in `config/pipeline.json`). The state database records completed aggregation windows; normal pipeline runs skip windows already completed, while allowing the latest completed window from the previous run to be rerun so the overlap can absorb late-arriving articles. For each sliding window, we load all articles published within those hours (both assigned and unassigned) and send their metadata (headline + digest summary/key facts when available, otherwise collected summary + source + publish date) to the LLM to:
+Aggregation runs over sliding publish-time windows. The default window is 6 hours with a 1-hour step, so adjacent windows overlap and boundary-adjacent articles can still be grouped. The digest stage should run before aggregation; aggregation then filters non-news/spammy/video-carousel artifacts and articles whose digest category/vertical impact score is below the configured threshold. The state database records completed aggregation windows; normal pipeline runs skip windows already completed, while allowing the latest completed window from the previous run to be rerun so the overlap can absorb late-arriving articles. For each sliding window, we load all eligible articles published within those hours (both assigned and unassigned) and send their metadata (headline + digest summary/key facts when available, otherwise collected summary + source + publish date) to the LLM to:
 
 1. Classify each article's content type and category.
 2. Group articles into story clusters (matching and referencing existing event IDs where applicable) by identifying multiple outlets and angles reporting on the same developing news subject.
@@ -264,11 +302,13 @@ Scores are normalized from `0.0` to `1.0`, validated by deterministic code, stor
 
 ### Stage 2 Implementation
 
-The initial aggregation implementation lives in `pipeline/aggregate.py` and is exposed by `./.venv/bin/python -m pipeline.cli aggregate`. It plans sliding 6-hour windows with 1-hour steps, skips completed windows using `aggregation_windows`, generates missing article digests for the planned windows, loads all articles in each window so overlap runs can attach new articles to existing event assignments, calls Gemini with headline + digest/summary metadata, validates that every article index appears exactly once, scores resulting groups for newsworthiness from digest impact or fallback scoring, writes `data/events/<event_id>.json`, upserts the `events` table, assigns `articles.event_id`, and records completed windows. The command supports `--range-start`, `--range-end`, `--limit-windows`, `--dry-run`, and `--verbose`. Dry runs do not generate or persist digests.
+The initial aggregation implementation lives in `pipeline/aggregate.py` and is exposed by `./.venv/bin/python -m pipeline.cli aggregate`. It plans sliding 6-hour windows with 1-hour steps, skips completed windows using `aggregation_windows`, loads category-impact-eligible articles in each window so overlap runs can attach new articles to existing event assignments, calls Gemini with headline + digest/summary metadata, validates that every article index appears exactly once, scores resulting groups for newsworthiness from digest impact or fallback scoring, writes `data/events/<event_id>.json`, upserts the `events` table, assigns `articles.event_id`, and records completed windows. The command supports `--range-start`, `--range-end`, `--limit-windows`, `--dry-run`, and `--verbose`. By default, if no range is specified, aggregation window planning starts from the earliest unassigned article published within the current and previous UTC days (starting at 00:00:00 UTC of yesterday) up to the latest published article. If no unassigned articles exist within this window, the run completes early without planning windows.
 
 Event naming in this first pass is deterministic and intentionally simple: existing event IDs are reused when a group contains already-assigned articles; otherwise code derives a stable date + headline slug and stores lightweight keyword metadata. Richer title/slug/entity generation remains a follow-up LLM pass.
 
-An article-digest experiment command remains available as `./.venv/bin/python -m pipeline.cli article-digest-experiment`. It samples articles whose collected site summaries look weak (missing, very short, headline-only, generic teaser text, or feed boilerplate) plus a configurable control set, then writes side-by-side review artifacts under `data/staging/article-digest-experiments/` without mutating article JSON or aggregation state.
+Digest regeneration and review on May 25, 2026 (article-digest-v3) verified the layered cap system and controlled-vocabulary rationale codes against a stratified sample (39 across all 11 categories + 6 edge cases). Compared with v2: `paywalled` started being used (0 → 27 articles), `extraction_noise` doubled (23 → 52), `novelty=low_signal` nearly tripled (40 → 116), `novelty=breaking` dropped from 294 → 246 (research papers no longer auto-tagged as breaking), `novelty=analysis` more than doubled (60 → 156), `impact_capped` events roughly quadrupled (~40 → 176) as the new vendor_announcement / multi-topic / unconfirmed_injury / recycled_content rationales started firing, and `study_stage` was populated on 49 research articles with the full enum spread. Asymmetric caps (vendor_announcement, unconfirmed_injury) and HIGH-rationale cap bypass (public_health Ebola wires) were both confirmed working on sampled articles. Known residual minor issues: the date-leak rule against inserting `published_at` year/month/day into the summary is followed most of the time but still drifts occasionally, and one paywalled WaPo article was tagged `thin` despite the prompt explicitly naming "Democracy Dies in Darkness" as a paywall signal (caps still fired correctly via the noise-cap path so downstream behavior is unaffected).
+
+Prompt version `article-digest-v6` includes URL, canonical URL, and estimated-publish-date metadata in the digest prompt; tightens guidance for video, gallery, profile/background, media-transcript, stale estimated-date, and stale archive/background pages; narrows `study_stage` to covered medical/biological/pharmaceutical/materials research; and gives category-impact guidance for legitimate vertical stories whose global impact is low. The digest stage also deterministically filters obvious `/video/`, `/videos/`, `/gallery/`, and `/galleries/` URL paths before LLM calls, filters stale estimated-date pages when URL or live-page text dates are clearly older than the collected timestamp, and drops irrelevant `study_stage` values before writing `llm_digest`. The code-side `study_stage` gate uses word-boundary matching and excludes climate, space, aeronautical, software, paleontology, and general earth-science contexts unless there is a strong biomedical or materials signal.
 
 #### Event Merging and Reassignment
 
@@ -514,7 +554,7 @@ Lock release is wrapped in a `try/finally` to ensure cleanup on ordinary failure
 
 The pipeline state database (`data/state/pipeline.db`) tracks what has been processed:
 
-- **Articles**: Each collected article is registered with its `article_id`, `source_id`, file path, publish date, fetch date, and assigned `event_id` (null until aggregation processes it).
+- **Articles**: Each collected article is registered with its `article_id`, `source_id`, file path, publish date, fetch date, assigned `event_id` (null until aggregation processes it), and global exclusion flag `is_filtered` (so subsequent stages ignore spam/low-impact/media-only content).
 - **Events**: Event ID, status, category, title, keywords, last-updated timestamp, and article count for fast lookups without scanning event JSON files.
 - **Pipeline runs**: Run ID, start/end timestamps, status, counts of articles fetched/processed/errors.
 
@@ -530,7 +570,7 @@ Initial tables:
 
 - `schema_version`: current schema version and applied timestamp.
 - `feeds`: source ID, feed URL, conditional request metadata (`etag`, `last_modified`), last fetch status, and timestamps.
-- `articles`: article ID, source ID, canonical URL, URL hash input, headline, summary, file path, publish/fetch timestamps, language, content type, paywall status, retry/error state, and `event_id` nullable until aggregation (articles can only belong to one event).
+- `articles`: article ID, source ID, canonical URL, URL hash input, headline, summary, file path, publish/fetch timestamps, language, content type, paywall status, retry/error state, `is_filtered` (global exclusion flag), and `event_id` nullable until aggregation (articles can only belong to one event).
 - `article_fingerprints`: article ID, normalized headline fingerprint, content hash, compact text fingerprint, and near-duplicate metadata retained after full staging cleanup.
 - `events`: event ID, title, category, thread, keywords/entities JSON, status, created/updated timestamps, last editorial timestamp, article count, and confidence.
 - `pipeline_runs`: run ID, stage, start/end timestamps, status, counters, and error summary.
