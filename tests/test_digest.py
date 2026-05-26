@@ -453,7 +453,7 @@ def test_generate_article_digest_builds_variable_length_summary_prompt() -> None
     assert "preclinical, animal, early_human" in client.prompts[0]
     assert "vendor_announcement" in client.prompts[0]
     assert "profile_or_background" in client.prompts[0]
-    assert "major_sports_event" in client.prompts[0]
+    assert "critical_infrastructure" in client.prompts[0]
     assert "consumer_review" in client.prompts[0]
     assert '"publish_date_estimated":true' in client.prompts[0]
     assert (

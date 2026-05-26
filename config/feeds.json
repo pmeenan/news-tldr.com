@@ -698,25 +698,6 @@
       "notes": "Entertainment and arts headlines from BBC News."
     },
     {
-      "source_id": "bbc-sport",
-      "source_name": "BBC Sport",
-      "feed_url": "https://feeds.bbci.co.uk/sport/rss.xml",
-      "site_url": "https://www.bbc.com/sport",
-      "enabled": true,
-      "default_category": "sports",
-      "category_hints": [
-        "sports"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Sports headlines from BBC Sport."
-    },
-    {
       "source_id": "abc-news-politics",
       "source_name": "ABC News - Politics",
       "feed_url": "https://feeds.abcnews.com/abcnews/politicsheadlines",
@@ -791,25 +772,6 @@
         "timeout_seconds": 30
       },
       "notes": "Entertainment headlines from ABC News."
-    },
-    {
-      "source_id": "abc-news-sports",
-      "source_name": "ABC News - Sports",
-      "feed_url": "https://feeds.abcnews.com/abcnews/sportsheadlines",
-      "site_url": "https://abcnews.go.com/Sports",
-      "enabled": true,
-      "default_category": "sports",
-      "category_hints": [
-        "sports"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Sports headlines from ABC News."
     },
     {
       "source_id": "cbs-news-top",
@@ -1063,25 +1025,6 @@
       "notes": "Science coverage from The Guardian."
     },
     {
-      "source_id": "guardian-sport",
-      "source_name": "The Guardian - Sport",
-      "feed_url": "https://www.theguardian.com/sport/rss",
-      "site_url": "https://www.theguardian.com/sport",
-      "enabled": true,
-      "default_category": "sports",
-      "category_hints": [
-        "sports"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Sports coverage from The Guardian."
-    },
-    {
       "source_id": "al-jazeera",
       "source_name": "Al Jazeera",
       "feed_url": "https://www.aljazeera.com/xml/rss/all.xml",
@@ -1198,25 +1141,6 @@
         "timeout_seconds": 30
       },
       "notes": "Top environment and climate research news from ScienceDaily."
-    },
-    {
-      "source_id": "espn-top",
-      "source_name": "ESPN - Top News",
-      "feed_url": "https://www.espn.com/espn/rss/news",
-      "site_url": "https://www.espn.com",
-      "enabled": true,
-      "default_category": "sports",
-      "category_hints": [
-        "sports"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Top sports news from ESPN."
     },
     {
       "source_id": "nbc-news",
@@ -1524,25 +1448,6 @@
         "timeout_seconds": 30
       },
       "notes": "Automotive news and culture from Jalopnik."
-    },
-    {
-      "source_id": "cbs-sports",
-      "source_name": "CBS Sports",
-      "feed_url": "https://www.cbssports.com/rss/headlines/",
-      "site_url": "https://www.cbssports.com",
-      "enabled": true,
-      "default_category": "sports",
-      "category_hints": [
-        "sports"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Sports headlines from CBS Sports."
     },
     {
       "source_id": "cnet",

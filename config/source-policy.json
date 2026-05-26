@@ -254,13 +254,6 @@
       "notes": "Entertainment and arts headlines from BBC News."
     },
     {
-      "source_id": "bbc-sport",
-      "bias_label": "center",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "Sports headlines from BBC Sport."
-    },
-    {
       "source_id": "abc-news-politics",
       "bias_label": "center",
       "reliability": "high",
@@ -287,13 +280,6 @@
       "reliability": "high",
       "paywall": "none",
       "notes": "Entertainment headlines from ABC News."
-    },
-    {
-      "source_id": "abc-news-sports",
-      "bias_label": "center",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "Sports headlines from ABC News."
     },
     {
       "source_id": "cbs-news-top",
@@ -387,13 +373,6 @@
       "notes": "Science coverage from The Guardian."
     },
     {
-      "source_id": "guardian-sport",
-      "bias_label": "center-left",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "Sports coverage from The Guardian."
-    },
-    {
       "source_id": "al-jazeera",
       "bias_label": "center",
       "reliability": "medium",
@@ -434,13 +413,6 @@
       "reliability": "medium",
       "paywall": "none",
       "notes": "Top environment and climate research news from ScienceDaily."
-    },
-    {
-      "source_id": "espn-top",
-      "bias_label": "center",
-      "reliability": "medium",
-      "paywall": "none",
-      "notes": "Top sports news from ESPN."
     },
     {
       "source_id": "nbc-news",
@@ -553,13 +525,6 @@
       "reliability": "medium",
       "paywall": "none",
       "notes": "Automotive news and culture from Jalopnik."
-    },
-    {
-      "source_id": "cbs-sports",
-      "bias_label": "center",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "Sports headlines from CBS Sports."
     },
     {
       "source_id": "cnet",

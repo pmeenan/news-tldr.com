@@ -486,7 +486,7 @@ def test_score_groups_newsworthiness_merges_model_scores_with_baseline() -> None
                     "group_index": 0,
                     "global_score": 0.6,
                     "category_score": 0.8,
-                    "rationale_codes": ["major_sports_result"],
+                    "rationale_codes": ["entertainment_major_release"],
                 }
             ]
         }
@@ -1635,7 +1635,7 @@ def test_category_compatibility_bridges_politics_with_us_and_world() -> None:
 
     assert _in_same_category_group("politics", "us")
     assert _in_same_category_group("politics", "world")
-    assert not _in_same_category_group("politics", "sports")
+    assert not _in_same_category_group("politics", "entertainment")
     assert _candidate_categories_for_group(["politics"]) == {"politics", "us", "world"}
     assert "politics" in _candidate_categories_for_group(["us", "world", "business"])
 
@@ -1907,11 +1907,11 @@ def test_deduplicate_active_events_llm_cross_category_same_group(tmp_path, monke
             "article_ids": ["art2"],
             "article_count": 1,
         }
-        # event3: category sports (group: leisure)
+        # event3: category entertainment (group: leisure)
         event3 = {
-            "event_id": "2026-05-25-thunder-beat-spurs-western-conference-finals",
-            "title": "Thunder beat Spurs in Western Conference finals",
-            "category": "sports",
+            "event_id": "2026-05-25-mandalorian-grogu-opens-disney-box-office",
+            "title": "Mandalorian and Grogu opens at Disney box office",
+            "category": "entertainment",
             "created_at": "2026-05-25T12:00:00Z",
             "updated_at": "2026-05-25T12:00:00Z",
             "article_ids": ["art3"],
@@ -1963,7 +1963,7 @@ def test_deduplicate_active_events_llm_cross_category_same_group(tmp_path, monke
             "source_id": "src",
             "source_name": "Src",
             "url": "https://example.com/3",
-            "headline": "Thunder beat Spurs in Western Conference finals",
+            "headline": "Mandalorian and Grogu opens at Disney box office",
             "summary": "Summary",
             "published_at": "2026-05-25T12:00:00Z",
             "publish_date_estimated": False,
@@ -1991,7 +1991,7 @@ def test_deduplicate_active_events_llm_cross_category_same_group(tmp_path, monke
 
         # event2 (us) should be merged into event1 (world) because they are in the same category group (news_business)
         assert not (event_dir / "2026-05-25-sudans-war-economy-2.json").exists()
-        # event3 (sports) should NOT be merged because it is in a different category group (leisure)
+        # event3 (entertainment) should NOT be merged because it is in a different category group (leisure)
         assert (event_dir / f"{event3['event_id']}.json").exists()
 
 
@@ -2076,7 +2076,7 @@ def test_aggregate_once_splits_articles_into_category_groups(tmp_path, monkeypat
     # Insert articles from three different category groups:
     # 1. politics (group: politics_gov)
     # 2. technology (group: sci_tech)
-    # 3. sports (group: leisure)
+    # 3. entertainment (group: leisure)
 
     from pipeline.config import FeedConfig
     mock_feeds = [
@@ -2103,19 +2103,19 @@ def test_aggregate_once_splits_articles_into_category_groups(tmp_path, monkeypat
             fetch={}
         ),
         FeedConfig(
-            source_id="src-sports",
-            source_name="Sports Source",
-            feed_url="http://sports",
+            source_id="src-ent",
+            source_name="Entertainment Source",
+            feed_url="http://ent",
             site_url=None,
             enabled=True,
-            default_category="sports",
+            default_category="entertainment",
             category_hints=[],
             content_hints={},
             fetch={}
         ),
     ]
     monkeypatch.setattr("pipeline.aggregate.load_feeds", lambda enabled_only=False: mock_feeds)
-    monkeypatch.setattr("pipeline.aggregate.load_categories", lambda: ["politics", "technology", "sports"])
+    monkeypatch.setattr("pipeline.aggregate.load_categories", lambda: ["politics", "technology", "entertainment"])
 
     t = "2026-05-25T10:00:00Z"
 
@@ -2165,12 +2165,12 @@ def test_aggregate_once_splits_articles_into_category_groups(tmp_path, monkeypat
     (tmp_path / "art-tech.json").write_text(json.dumps(art_tech), encoding="utf-8")
     state.insert_article(art_tech, tmp_path / "art-tech.json")
 
-    art_sports = {
-        "article_id": "art-sports",
-        "source_id": "src-sports",
-        "source_name": "Sports Source",
-        "url": "https://example.com/sports",
-        "headline": "Sports headline",
+    art_ent = {
+        "article_id": "art-ent",
+        "source_id": "src-ent",
+        "source_name": "Entertainment Source",
+        "url": "https://example.com/ent",
+        "headline": "Entertainment headline",
         "summary": "Summary",
         "published_at": t,
         "publish_date_estimated": False,
@@ -2180,13 +2180,13 @@ def test_aggregate_once_splits_articles_into_category_groups(tmp_path, monkeypat
         "collection": {},
         "fingerprints": {},
         "llm_digest": {
-            "summary": "Sports digest",
+            "summary": "Ent digest",
             "key_facts": ["fact"],
             "impact": {"global": 0.5, "category": 0.5},
         },
     }
-    (tmp_path / "art-sports.json").write_text(json.dumps(art_sports), encoding="utf-8")
-    state.insert_article(art_sports, tmp_path / "art-sports.json")
+    (tmp_path / "art-ent.json").write_text(json.dumps(art_ent), encoding="utf-8")
+    state.insert_article(art_ent, tmp_path / "art-ent.json")
 
     monkeypatch.setattr("pipeline.aggregate.StateDB", lambda: StateDB(db_path))
     monkeypatch.setattr("pipeline.aggregate.LOCK_PATH", tmp_path / "pipeline.lock")
@@ -2211,9 +2211,9 @@ def test_aggregate_once_splits_articles_into_category_groups(tmp_path, monkeypat
                 "articles": [{"article_index": 0, "content_type": "news", "category": "technology"}],
                 "groups": [{"article_indexes": [0]}]
             }
-        elif "Sports headline" in prompt:
+        elif "Entertainment headline" in prompt:
             payload = {
-                "articles": [{"article_index": 0, "content_type": "news", "category": "sports"}],
+                "articles": [{"article_index": 0, "content_type": "news", "category": "entertainment"}],
                 "groups": [{"article_indexes": [0]}]
             }
         else:
@@ -2240,9 +2240,9 @@ def test_aggregate_once_splits_articles_into_category_groups(tmp_path, monkeypat
     assert len(called_prompts) == 3
     assert any("Politics headline" in p for p in called_prompts)
     assert any("Tech headline" in p for p in called_prompts)
-    assert any("Sports headline" in p for p in called_prompts)
+    assert any("Entertainment headline" in p for p in called_prompts)
     for p in called_prompts:
-        count = sum(h in p for h in ["Politics headline", "Tech headline", "Sports headline"])
+        count = sum(h in p for h in ["Politics headline", "Tech headline", "Entertainment headline"])
         assert count == 1
 
 
@@ -2524,3 +2524,432 @@ def test_active_event_candidate_filter_requires_two_word_overlap() -> None:
     assert matches("Pakistan")
     # Empty/stopwords-only title doesn't match.
     assert not matches("the and of")
+
+
+def test_dynamic_keyword_stopwords_marks_hot_words_above_threshold() -> None:
+    from pipeline.aggregate import _dynamic_keyword_stopwords
+
+    events = [
+        ("e1", ["trump", "iran", "deal", "abraham"]),
+        ("e2", ["trump", "iran", "tehran", "abraham"]),
+        ("e3", ["trump", "iran", "strait", "hormuz"]),
+        ("e4", ["trump", "graham", "abraham"]),
+        ("e5", ["trump", "lapid", "israel"]),
+        ("e6", ["trump", "wapo", "editorial"]),
+        ("e7", ["trump", "pelosi", "speech"]),
+        ("e8", ["trump", "campaign", "donation"]),
+    ]
+    stopwords = _dynamic_keyword_stopwords(events, threshold=0.2)
+    # trump appears in 8/8 events (well above absolute_floor=4) → stopworded.
+    assert "trump" in stopwords
+    # distinctive words only appearing once should not be stopworded
+    assert "tehran" not in stopwords
+    assert "hormuz" not in stopwords
+    assert "lapid" not in stopwords
+
+
+def test_dynamic_keyword_stopwords_skips_small_batches() -> None:
+    from pipeline.aggregate import _dynamic_keyword_stopwords
+
+    # Below min_events guard — even a word appearing in every event isn't stopworded.
+    events = [
+        ("e1", ["ferrari", "luce"]),
+        ("e2", ["ferrari", "ive"]),
+    ]
+    assert _dynamic_keyword_stopwords(events) == set()
+
+
+def test_dynamic_keyword_stopwords_respects_absolute_floor() -> None:
+    """A distinctive entity that appears in only 2 events of a 10-event batch must NOT
+    be stopworded just because 2 is above the 20% threshold — the absolute_floor of 4
+    keeps it visible so the keyword-overlap gate can match it."""
+    from pipeline.aggregate import _dynamic_keyword_stopwords
+
+    # 10 events, "ferrari" in 2 of them — 20% of batch.
+    events = [
+        ("ferrari-1", ["ferrari", "luce", "ev"]),
+        ("ferrari-2", ["ferrari", "luce", "ive"]),
+        ("e3", ["disney", "marvel"]),
+        ("e4", ["netflix", "queue"]),
+        ("e5", ["spotify", "music"]),
+        ("e6", ["youtube", "video"]),
+        ("e7", ["hbo", "show"]),
+        ("e8", ["paramount", "film"]),
+        ("e9", ["apple", "tv"]),
+        ("e10", ["roku", "stick"]),
+    ]
+    stopwords = _dynamic_keyword_stopwords(events, threshold=0.2)
+    assert "ferrari" not in stopwords
+    assert "luce" not in stopwords
+
+
+def test_filtered_event_keywords_drops_static_and_dynamic_stopwords() -> None:
+    from pipeline.aggregate import _filtered_event_keywords
+
+    keywords = ["the", "trump", "ferrari", "luce", "ive", "jony", "ev", "electric"]
+    dynamic = {"trump"}
+    # Static stopword "the" + dynamic "trump" stripped; rest kept up to max_n=6.
+    filtered = _filtered_event_keywords(keywords, dynamic, max_n=6)
+    assert filtered == ["ferrari", "luce", "ive", "jony", "ev", "electric"]
+
+
+def test_filtered_event_keywords_deduplicates_case_insensitive() -> None:
+    from pipeline.aggregate import _filtered_event_keywords
+
+    keywords = ["Ferrari", "ferrari", "FERRARI", "Luce"]
+    filtered = _filtered_event_keywords(keywords, set(), max_n=6)
+    assert filtered == ["ferrari", "luce"]
+
+
+def test_keyword_overlap_candidates_pairs_events_with_shared_distinctive_keywords() -> None:
+    from pipeline.aggregate import _keyword_overlap_candidates
+
+    events = [
+        {"event_id": "ferrari-1", "keywords": ["ferrari", "luce", "ev", "electric"]},
+        {"event_id": "ferrari-2", "keywords": ["ferrari", "luce", "ive", "jony"]},
+        {"event_id": "unrelated", "keywords": ["pope", "encyclical", "ai"]},
+    ]
+    pairs = _keyword_overlap_candidates(events, set(), min_overlap=2)
+    assert ("ferrari-1", "ferrari-2") in pairs
+    # No spurious pair with the unrelated event.
+    assert all("unrelated" not in p for p in pairs)
+
+
+def test_keyword_overlap_candidates_respects_dynamic_stopwords() -> None:
+    from pipeline.aggregate import _keyword_overlap_candidates
+
+    # Both events share "trump"+"iran" but those are stopworded; only "tehran"
+    # is shared distinctive, which is below min_overlap=2.
+    events = [
+        {"event_id": "e1", "keywords": ["trump", "iran", "tehran", "deal"]},
+        {"event_id": "e2", "keywords": ["trump", "iran", "tehran", "abraham"]},
+    ]
+    dynamic = {"trump", "iran"}
+    pairs = _keyword_overlap_candidates(events, dynamic, min_overlap=2)
+    assert pairs == []
+
+
+def test_llm_prescreen_candidates_returns_pairs_from_model_payload() -> None:
+    from pipeline.aggregate import _llm_prescreen_candidates
+
+    events = [
+        {
+            "event_id": "ferrari-1",
+            "title": "Ferrari Goes Electric: The Luce",
+            "keywords": ["ferrari", "luce", "ev"],
+        },
+        {
+            "event_id": "ferrari-2",
+            "title": "Ferrari reveals first EV with Jony Ive",
+            "keywords": ["ferrari", "luce", "ive"],
+        },
+        {
+            "event_id": "pope",
+            "title": "Pope Leo encyclical on AI",
+            "keywords": ["pope", "ai", "encyclical"],
+        },
+    ]
+    headlines = {
+        "ferrari-1": ["Ferrari Goes Electric: The Luce Is Here!"],
+        "ferrari-2": ["Ferrari reveals its first EV"],
+        "pope": ["Pope Leo takes aim at big tech in AI encyclical"],
+    }
+    client = FakeJsonGenerator({
+        "candidate_pairs": [
+            {"event_a": "ferrari-1", "event_b": "ferrari-2", "reason": "Same Ferrari Luce launch"},
+            # Invalid pair (unknown id) — should be dropped silently.
+            {"event_a": "ferrari-1", "event_b": "bogus", "reason": "should drop"},
+            # Self-pair — should be dropped.
+            {"event_a": "pope", "event_b": "pope", "reason": "self"},
+        ]
+    })
+
+    pairs = _llm_prescreen_candidates(
+        events,
+        headlines,
+        set(),
+        client=client,
+        batch_label="leisure",
+    )
+    assert pairs == [("ferrari-1", "ferrari-2")]
+    # Prompt should include event ids and headlines for the LLM to compare.
+    prompt = client.prompts[0]
+    assert "ferrari-1" in prompt and "ferrari-2" in prompt
+    assert "Ferrari Goes Electric" in prompt
+    assert "Jony Ive" in prompt
+
+
+def test_llm_prescreen_candidates_short_circuits_on_too_few_events() -> None:
+    from pipeline.aggregate import _llm_prescreen_candidates
+
+    client = FakeJsonGenerator({"candidate_pairs": []})
+    pairs = _llm_prescreen_candidates(
+        [{"event_id": "only-one", "title": "Only one", "keywords": []}],
+        {},
+        set(),
+        client=client,
+        batch_label="leisure",
+    )
+    assert pairs == []
+    # LLM must not be invoked for a single-event batch.
+    assert client.prompts == []
+
+
+def test_llm_prescreen_candidates_handles_llm_failure_gracefully() -> None:
+    from pipeline.aggregate import _llm_prescreen_candidates
+
+    client = FailingJsonGenerator()
+    progress_msgs: list[str] = []
+
+    pairs = _llm_prescreen_candidates(
+        [
+            {"event_id": "a", "title": "A", "keywords": []},
+            {"event_id": "b", "title": "B", "keywords": []},
+        ],
+        {},
+        set(),
+        client=client,
+        batch_label="leisure",
+        progress=progress_msgs.append,
+    )
+    assert pairs == []
+    assert any("prescreen[leisure] failed" in m for m in progress_msgs)
+
+
+def test_deduplicate_active_events_llm_uses_keyword_overlap_gate(tmp_path, monkeypatch) -> None:
+    """Two events that share distinctive keywords but no title-word overlap should be paired
+    by the keyword-overlap gate and then merged by the strict per-pair merge LLM."""
+    from pipeline.aggregate import deduplicate_active_events_llm
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    state = StateDB(db_path)
+
+    event_dir = tmp_path / "events"
+    event_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("pipeline.aggregate.EVENT_DIR", event_dir)
+
+    # Two events about the same Ferrari Luce launch with no title-word overlap.
+    event1 = {
+        "event_id": "2026-05-25-ferrari-goes-electric-luce",
+        "title": "Ferrari Goes Electric: The Luce Is Here!",
+        "category": "automotive",
+        "created_at": "2026-05-25T10:00:00Z",
+        "updated_at": "2026-05-25T10:00:00Z",
+        "article_ids": ["art1"],
+        "article_count": 1,
+        "keywords": ["ferrari", "luce", "electric", "ev", "polarizing"],
+    }
+    event2 = {
+        "event_id": "2026-05-25-reveals-first-design-help-jony-ive",
+        "title": "Reveals first EV with design help from Jony Ive",
+        "category": "automotive",
+        "created_at": "2026-05-25T11:00:00Z",
+        "updated_at": "2026-05-25T11:00:00Z",
+        "article_ids": ["art2"],
+        "article_count": 1,
+        "keywords": ["ferrari", "luce", "ive", "jony", "ev"],
+    }
+    e1_path = event_dir / f"{event1['event_id']}.json"
+    e2_path = event_dir / f"{event2['event_id']}.json"
+    e1_path.write_text(json.dumps(event1), encoding="utf-8")
+    e2_path.write_text(json.dumps(event2), encoding="utf-8")
+    state.upsert_event(event1, e1_path)
+    state.upsert_event(event2, e2_path)
+
+    state.insert_article({
+        "article_id": "art1",
+        "source_id": "car-and-driver",
+        "source_name": "Car and Driver",
+        "url": "https://example.com/1",
+        "headline": "Ferrari Goes Electric: The Luce Is Here!",
+        "summary": "Ferrari Luce EV details.",
+        "published_at": "2026-05-25T10:00:00Z",
+        "publish_date_estimated": False,
+        "fetched_at": "2026-05-25T10:00:00Z",
+        "content_type": "unknown",
+        "language": "en",
+        "collection": {},
+        "fingerprints": {},
+    }, tmp_path / "art1.json")
+    state.insert_article({
+        "article_id": "art2",
+        "source_id": "the-verge",
+        "source_name": "The Verge",
+        "url": "https://example.com/2",
+        "headline": "Ferrari reveals its first EV, with design help from Jony Ive",
+        "summary": "Ferrari unveils Luce with Jony Ive design.",
+        "published_at": "2026-05-25T11:00:00Z",
+        "publish_date_estimated": False,
+        "fetched_at": "2026-05-25T11:00:00Z",
+        "content_type": "unknown",
+        "language": "en",
+        "collection": {},
+        "fingerprints": {},
+    }, tmp_path / "art2.json")
+    state.conn.execute("UPDATE articles SET event_id = ? WHERE article_id = 'art1'", (event1["event_id"],))
+    state.conn.execute("UPDATE articles SET event_id = ? WHERE article_id = 'art2'", (event2["event_id"],))
+    state.conn.commit()
+
+    class PrescreenAndMergeClient:
+        model = "fake-model"
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            prompt = kwargs["prompt"]
+            self.prompts.append(prompt)
+            if "candidate_pairs" in prompt:
+                # Prescreen call — return empty so we know the merge happened via the
+                # deterministic keyword-overlap gate, not via LLM prescreen.
+                return GeminiResult(
+                    payload={"candidate_pairs": []},
+                    model=self.model,
+                    elapsed_ms=5,
+                    usage={"promptTokenCount": 20, "candidatesTokenCount": 5},
+                )
+            # Per-pair merge call.
+            return GeminiResult(
+                payload={"should_merge": True, "confidence": 0.95, "rationale": "Same Ferrari Luce launch."},
+                model=self.model,
+                elapsed_ms=10,
+                usage={"promptTokenCount": 40, "candidatesTokenCount": 10},
+            )
+
+    client = PrescreenAndMergeClient()
+    deduplicate_active_events_llm(
+        state=state,
+        client=client,
+        feeds_by_source={},
+    )
+
+    # Loser event file should be gone; winner should remain.
+    remaining = sorted(p.name for p in event_dir.glob("*.json"))
+    assert len(remaining) == 1
+    # Both articles should now belong to the surviving event.
+    row = state.conn.execute(
+        "SELECT COUNT(*) FROM articles WHERE event_id = ?",
+        (remaining[0].replace(".json", ""),),
+    ).fetchone()
+    assert row[0] == 2
+
+
+def test_deduplicate_active_events_llm_uses_prescreen_when_keywords_miss(tmp_path, monkeypatch) -> None:
+    """When keyword overlap is below threshold, the LLM prescreen should still surface
+    the candidate pair and feed it to the strict per-pair merge call."""
+    from pipeline.aggregate import deduplicate_active_events_llm
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    state = StateDB(db_path)
+
+    event_dir = tmp_path / "events"
+    event_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("pipeline.aggregate.EVENT_DIR", event_dir)
+
+    # Two events with only 1 shared keyword — keyword gate (min_overlap=2) won't match,
+    # but LLM prescreen should surface them.
+    event1 = {
+        "event_id": "2026-05-25-event-one",
+        "title": "First framing of the news",
+        "category": "technology",
+        "created_at": "2026-05-25T10:00:00Z",
+        "updated_at": "2026-05-25T10:00:00Z",
+        "article_ids": ["art1"],
+        "article_count": 1,
+        "keywords": ["something", "alpha", "framing"],
+    }
+    event2 = {
+        "event_id": "2026-05-25-event-two",
+        "title": "Second framing of the news",
+        "category": "technology",
+        "created_at": "2026-05-25T11:00:00Z",
+        "updated_at": "2026-05-25T11:00:00Z",
+        "article_ids": ["art2"],
+        "article_count": 1,
+        "keywords": ["something", "beta", "different"],
+    }
+    e1_path = event_dir / f"{event1['event_id']}.json"
+    e2_path = event_dir / f"{event2['event_id']}.json"
+    e1_path.write_text(json.dumps(event1), encoding="utf-8")
+    e2_path.write_text(json.dumps(event2), encoding="utf-8")
+    state.upsert_event(event1, e1_path)
+    state.upsert_event(event2, e2_path)
+
+    state.insert_article({
+        "article_id": "art1",
+        "source_id": "src",
+        "source_name": "Src",
+        "url": "https://example.com/1",
+        "headline": "First framing of the news",
+        "summary": "Summary",
+        "published_at": "2026-05-25T10:00:00Z",
+        "publish_date_estimated": False,
+        "fetched_at": "2026-05-25T10:00:00Z",
+        "content_type": "unknown",
+        "language": "en",
+        "collection": {},
+        "fingerprints": {},
+    }, tmp_path / "art1.json")
+    state.insert_article({
+        "article_id": "art2",
+        "source_id": "src",
+        "source_name": "Src",
+        "url": "https://example.com/2",
+        "headline": "Second framing of the news",
+        "summary": "Summary",
+        "published_at": "2026-05-25T11:00:00Z",
+        "publish_date_estimated": False,
+        "fetched_at": "2026-05-25T11:00:00Z",
+        "content_type": "unknown",
+        "language": "en",
+        "collection": {},
+        "fingerprints": {},
+    }, tmp_path / "art2.json")
+    state.conn.execute("UPDATE articles SET event_id = ? WHERE article_id = 'art1'", (event1["event_id"],))
+    state.conn.execute("UPDATE articles SET event_id = ? WHERE article_id = 'art2'", (event2["event_id"],))
+    state.conn.commit()
+
+    prescreen_calls: list[str] = []
+    merge_calls: list[str] = []
+
+    class Client:
+        model = "fake-model"
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            prompt = kwargs["prompt"]
+            if "candidate_pairs" in prompt:
+                prescreen_calls.append(prompt)
+                return GeminiResult(
+                    payload={
+                        "candidate_pairs": [
+                            {
+                                "event_a": event1["event_id"],
+                                "event_b": event2["event_id"],
+                                "reason": "Same underlying story, different framing.",
+                            }
+                        ]
+                    },
+                    model=self.model,
+                    elapsed_ms=5,
+                    usage={"promptTokenCount": 20, "candidatesTokenCount": 5},
+                )
+            merge_calls.append(prompt)
+            return GeminiResult(
+                payload={"should_merge": True, "confidence": 0.95, "rationale": "Same story."},
+                model=self.model,
+                elapsed_ms=10,
+                usage={"promptTokenCount": 40, "candidatesTokenCount": 10},
+            )
+
+    deduplicate_active_events_llm(
+        state=state,
+        client=Client(),
+        feeds_by_source={},
+    )
+
+    assert len(prescreen_calls) == 1  # one prescreen per category-group batch
+    assert len(merge_calls) == 1  # the prescreen surfaced exactly one pair
+    remaining = sorted(p.name for p in event_dir.glob("*.json"))
+    assert len(remaining) == 1

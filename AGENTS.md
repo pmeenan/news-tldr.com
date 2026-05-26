@@ -32,6 +32,102 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on May 26, 2026 (Dedupe Candidate Gates: Keyword Overlap + LLM Pre-screen)
+
+- **Scope of this pass**: Followed up on the missed-merge analysis (Ferrari Luce split across 2 events, Congo Ebola fragmented into 4 events, etc.) by widening post-aggregation dedupe candidate retrieval without weakening the strict per-pair merge decision.
+- **Architecture**: The post-aggregation dedupe pipeline now unions candidate pairs from four complementary gates and feeds each unique pair into the existing per-pair LLM merge call (`should_merge` + confidence ≥ 0.8). Over-merging protection lives entirely in the per-pair call; recall is improved at the candidate-discovery layer.
+  1. **Slug/title heuristics** — unchanged: `_base_slug` equality, `_titles_similar` (≥4 shared content tokens, or ≥3 if both titles are short), highly similar article headlines (`_events_have_similar_article_headline`).
+  2. **Keyword-overlap gate** (`_keyword_overlap_candidates`) — restricted to one category-group batch at a time (politics_gov, news_business_{us,world,business}, sci_tech, leisure). Pairs events whose top-6 event keywords share ≥2 distinct tokens after stripping a global static stopword list and a per-batch *dynamic* stopword list.
+  3. **LLM pre-screen gate** (`_llm_prescreen_candidates`) — one loose-recall LLM call per category-group batch (chunked at 40 events per call). Each event is rendered as `{id, title, keywords(top-6 filtered), headlines(top-3)}`. Prompt is intentionally inclusive; the strict per-pair call is the precision filter. Prompt version: `deduplication-prescreen-v1`. LLM usage is recorded under stage `deduplication_prescreen`.
+  4. **Per-pair merge LLM** — unchanged.
+- **Dynamic stopword design**: `_dynamic_keyword_stopwords` flags a keyword as "hot" only when it appears in ≥20% of the batch's events **and** in ≥4 events absolute (the absolute floor was raised from 2 to 4 after a live dry-run showed the Ferrari Luce pair being stopworded out of the leisure batch). Batches with fewer than 8 events get no dynamic stopwords at all.
+- **New tunables** (`pipeline/aggregate.py`):
+  - `DEDUPLICATION_KEYWORD_OVERLAP_MIN = 2`
+  - `DEDUPLICATION_KEYWORDS_PER_EVENT = 6`
+  - `DEDUPLICATION_HEADLINES_PER_EVENT = 3`
+  - `DEDUPLICATION_HOT_STOPWORD_THRESHOLD = 0.2`
+  - `DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH = 40`
+  - `DEDUPLICATION_PRESCREEN_PROMPT_VERSION = "deduplication-prescreen-v1"`
+- **`deduplicate_active_events_llm` changes**: SELECT now includes `keywords_json`; events get a `keywords: list[str]` field hydrated. Events are grouped by category-group batch (news_business further split by us/world/business). For each batch the keyword and pre-screen gates run; pairs are unioned into a `frozenset` set so duplicate candidates from multiple gates are deduped before the per-pair merge step. Progress callback now reports gate provenance: `candidate pairs total=X (heuristic=H, keyword_overlap_new=K, prescreen_new=P)`.
+- **Tests added** (`tests/test_aggregate.py`, **+11 tests**, all green):
+  - `_dynamic_keyword_stopwords` — flags above-threshold words, respects min_events guard, respects absolute_floor (the Ferrari Luce regression test).
+  - `_filtered_event_keywords` — drops static + dynamic stopwords, dedupes case-insensitively.
+  - `_keyword_overlap_candidates` — pairs distinctive-keyword sharers, respects dynamic stopwords.
+  - `_llm_prescreen_candidates` — returns model pairs, drops invalid/self/unknown ids, short-circuits on single-event batches, handles LLM failures via the progress callback.
+  - `deduplicate_active_events_llm` end-to-end — verifies keyword-overlap gate alone surfaces a Ferrari Luce-style pair that title heuristics miss, and verifies the LLM pre-screen gate surfaces a pair when keywords don't overlap.
+- **Live dry-run on current data** (221 active events): keyword-overlap gate alone finds 13 candidate pairs that the slug/title heuristics would have missed, including the Ferrari Luce pair and 4 of the 4 Congo Ebola event pairs. The 5 of those that are not actual duplicates (e.g. China mine vs. Bangladesh truck, two separate Trump EOs) will be correctly rejected by the strict per-pair LLM. Politics group correctly stopworded "trump" via the dynamic stopword path.
+- **Tests & Verification**:
+  - Aggregate-only: `PYTHONPATH=. ./.venv/bin/pytest tests/test_aggregate.py -q` → **73 passed**.
+  - Full suite: `PYTHONPATH=. ./.venv/bin/pytest -q` → **206 passed**.
+  - Linter: `./.venv/bin/ruff check .` → clean.
+- **Files touched in this pass**:
+  - `pipeline/aggregate.py` (new helpers, tunables, `deduplicate_active_events_llm` updated)
+  - `tests/test_aggregate.py` (+11 tests)
+  - `docs/design.md` (post-aggregation dedup section rewritten)
+  - `AGENTS.md` (this entry)
+- **Not committed.** Working tree continues to accumulate uncommitted pipeline work.
+- **Next Steps**:
+  1. Re-run `aggregate --verbose` against the live data to actually merge the surfaced duplicate pairs (Ferrari Luce, Congo Ebola fragmentation). The dry-run found 13 keyword-overlap candidates; the live run will also exercise the LLM pre-screen which should find additional semantic matches.
+  2. Inspect post-merge event count to confirm no over-merging happened (expect ~221 → ~215 events).
+  3. Continue with the previously planned work: richer event-metadata LLM pass (Milestone 2), event lifecycle transitions, Milestone 3 Editorial Stage.
+
+### State on May 26, 2026 (Sports Sources & Category Removal)
+
+- **Scope of this pass**: Removed the `sports` category and all sports-only sources from the pipeline. Major sports stories that come through general-news sources (AP, NPR, BBC News, etc.) will now be categorized as `world` or `us` by scope rather than getting a dedicated bucket. Routine sports content from general sources is expected to fall out via the existing low-impact/low-signal filters.
+- **Configs**:
+  - `config/categories.json` — removed the `sports` entry. Remaining 10 categories: `world`, `us`, `politics`, `business`, `technology`, `science`, `health`, `environment`, `automotive`, `entertainment`.
+  - `config/feeds.json` — removed 5 sports-only sources (`bbc-sport`, `abc-news-sports`, `guardian-sport`, `espn-top`, `cbs-sports`). Now 78 enabled sources (was 83).
+  - `config/source-policy.json` — removed the matching 5 source-policy entries. Now 78 entries; symmetric with `feeds.json`.
+- **Code**:
+  - `pipeline/aggregate.py`
+    - Dropped `sports` from the `leisure` category group (`CATEGORY_GROUPS`).
+    - Removed `"sports": 0.03` weight from deterministic baseline newsworthiness scoring.
+    - Removed `sports` from the entertainment/automotive lower-global-vertical penalty set.
+    - Cleaned sports-specific language from the grouping prompt (deleted "For sports, group previews..." rule; dropped "sports result" / "a sports tournament" from event-type and not-grouping lists).
+    - Cleaned sports-specific language from the newsworthiness and event-merge prompts (removed "routine sports results", "playoff final" example, `major_sports_result` rationale code mention, "sports game" / "sports games" wording).
+  - `pipeline/digest.py`
+    - Removed `major_sports_event` from the closed rationale-code vocabulary in the digest prompt.
+    - Replaced "For sports injuries described with hedged language…" with the more general "For injuries described with hedged language…"; the `unconfirmed_injury` rationale code itself is unchanged.
+    - Removed "sports" from the example list of legitimate verticals (now: automotive, technology, science, health, business, entertainment, local-news) and from the personal-health backstory caveat.
+  - Digest and aggregation prompt versions were intentionally **not** bumped. Existing v3 digests / v6 aggregations stay valid; the prompt edits only affect future calls.
+- **Tests** (`tests/test_aggregate.py`, `tests/test_digest.py`):
+  - Replaced sports-category fixtures with `entertainment` (still in the `leisure` group) so the cross-group dedup and category-group-splitting tests still exercise three distinct groups.
+  - Updated `_in_same_category_group` assertion to compare `politics` vs `entertainment` (was `politics` vs `sports`).
+  - Updated the newsworthiness rationale-code fixture from `major_sports_result` → `entertainment_major_release`.
+  - Updated the digest prompt-content assertion from `major_sports_event` → `critical_infrastructure`.
+- **Docs**: Updated `docs/design.md` (leisure group definition, rationale-code example, unconfirmed-injury cap note).
+- **Live data cleanup**:
+  - Set `is_filtered=1` on all **115** articles from the 5 removed sports sources; aggregation_status set to `filtered_sports_source`, `event_id` cleared.
+  - Set `is_filtered=1` on the **28** articles from general sources that had been assigned to the now-deleted sports events; aggregation_status set to `filtered_sports_category`, `event_id` cleared.
+  - Deleted **70** `category=sports` rows from the `events` table and the matching **70** `data/events/*.json` files (every row had a matching file).
+  - Deleted the **5** stale sports-source rows from the cached `feeds` table.
+- **Final live state**:
+  - Events remaining: **221** (was 291). Categories now: world 48, politics 39, business 32, technology 26, us 20, health 19, environment 17, science 10, entertainment 7, automotive 3. Zero sports.
+  - Event JSON files on disk: 221, matching SQLite.
+  - Unfiltered articles from removed sports sources: 0.
+  - New `is_filtered=1` buckets in `aggregation_status`: `filtered_sports_source` (115), `filtered_sports_category` (28).
+- **Tests & Verification**:
+  - Full test suite passed: `PYTHONPATH=. ./.venv/bin/pytest -q` → **195 passed**.
+  - Linter passed: `./.venv/bin/ruff check .` → clean.
+  - `./.venv/bin/python -m pipeline.cli list-feeds | wc -l` → 78; no sports lines.
+- **Files touched in this pass**:
+  - `config/categories.json`
+  - `config/feeds.json`
+  - `config/source-policy.json`
+  - `pipeline/aggregate.py`
+  - `pipeline/digest.py`
+  - `tests/test_aggregate.py`
+  - `tests/test_digest.py`
+  - `docs/design.md`
+  - `AGENTS.md`
+  - SQLite state and `data/events/` (live cleanup; not source-controlled)
+- **Not committed.** Working tree remains intentionally dirty with these changes and all prior uncommitted pipeline work.
+- **Next Steps**:
+  1. Run a fresh `collect --verbose` to refresh from the 78 remaining sources (no sports feeds will be fetched anymore).
+  2. Re-run `digest --verbose` to digest newly collected articles. Existing v3 digests are unaffected. Optionally `--force` if you want general-news sports articles re-scored against the trimmed rationale-code vocabulary.
+  3. Re-run `aggregate --verbose`. New aggregations will no longer accept `sports` as a category; major sports stories from general sources should land in `world` or `us`.
+  4. Continue with the previously planned work (richer event-metadata LLM pass, event lifecycle transitions, Milestone 3 Editorial Stage).
+
 ### State on May 25, 2026 (Aggregation Hardening, Clean Reset, and Verified Rerun)
 
 - **Scope of this pass**: Fixed live aggregation failures and quality issues found after a clean full-pipeline run, reset aggregation artifacts, reran aggregation end-to-end, and inspected the resulting event clusters.

@@ -20,15 +20,21 @@ from pipeline.util import atomic_write_json, isoformat_z, sanitize_id
 AGGREGATION_PROMPT_VERSION = "aggregation-v6"
 AGGREGATION_EXPERIMENT_PROMPT_VERSION = "aggregation-experiment-v6"
 NEWSWORTHINESS_PROMPT_VERSION = "newsworthiness-v1"
+DEDUPLICATION_PRESCREEN_PROMPT_VERSION = "deduplication-prescreen-v1"
 GROUPING_MODES = ("titles", "titles_summaries")
 DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD = 0.8
+DEDUPLICATION_KEYWORD_OVERLAP_MIN = 2
+DEDUPLICATION_KEYWORDS_PER_EVENT = 6
+DEDUPLICATION_HEADLINES_PER_EVENT = 3
+DEDUPLICATION_HOT_STOPWORD_THRESHOLD = 0.2
+DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH = 40
 MAX_CATEGORY_GROUP_ARTICLES = 50
 NULL_EXISTING_EVENT_ID_VALUES = {"null", "none", "nil", "n/a", "na", "unknown"}
 CATEGORY_GROUPS = [
     {"name": "politics_gov", "categories": ["politics"]},
     {"name": "news_business", "categories": ["us", "world", "business"]},
     {"name": "sci_tech", "categories": ["technology", "science", "health", "environment"]},
-    {"name": "leisure", "categories": ["sports", "entertainment", "automotive"]},
+    {"name": "leisure", "categories": ["entertainment", "automotive"]},
 ]
 CATEGORY_COMPATIBILITY_BRIDGES = (
     frozenset({"politics", "us"}),
@@ -1596,21 +1602,18 @@ def _build_grouping_prompt(
         "Clusters must be mutually exclusive. If one article could plausibly fit more than one cluster, assign it "
         "only to the strongest matching cluster. If no strongest cluster is obvious, make that article a singleton.\n"
         "A valid cluster should share a central named subject or incident: the same negotiation, attack, trial, "
-        "election development, company announcement, product launch, disaster, sports result, death, recall, "
+        "election development, company announcement, product launch, disaster, death, recall, "
         "lawsuit, or official decision. Articles can emphasize different facts or perspectives and still belong "
         "together.\n"
         "Keep articles separate when they only share a broad beat or setting without a shared central subject: "
-        "for example different companies in the same industry, different games in the same league, different "
+        "for example different companies in the same industry, different "
         "celebrities at the same festival, unrelated statements by the same politician, or separate incidents "
         "in the same country.\n"
-        "For ongoing wars, negotiations, elections, trials, disasters, tournaments, and major political stories, "
+        "For ongoing wars, negotiations, elections, trials, disasters, and major political stories, "
         "group related developments if they are part of the same immediate news arc in this window. Split only "
         "when they would require a clearly different headline and summary.\n"
         "Do not group unrelated stories merely because they share a keyword or domain such as AI, climate, "
-        "markets, a sports tournament, a holiday, a party, or a country.\n"
-        "For sports, group previews, live/result coverage, reactions, and analysis for the same game/race/match "
-        "or same league-table outcome. Do not group separate games unless the shared story is the combined "
-        "standings/relegation/title outcome.\n"
+        "markets, a holiday, a party, or a country.\n"
         "For politics and policy, group reactions and analysis with the same bill, ruling, negotiation, "
         "investigation, appointment, statement, or incident they discuss.\n"
         "Exact duplicates, syndications, translations, or near-identical wire reprints of the same article should "
@@ -1703,12 +1706,12 @@ def _build_newsworthiness_prompt(
         "global_score: importance to a general worldwide news homepage. "
         "Wars, major geopolitical escalation, mass casualties, public safety emergencies, democratic crises, "
         "major economic shocks, major legal rulings, and high-impact health/science events score high. "
-        "Entertainment releases, routine sports results, product updates, lifestyle items, and ads score lower "
+        "Entertainment releases, product updates, lifestyle items, and ads score lower "
         "unless they have unusually broad impact.\n"
         "category_score: importance within the story's own vertical/category. A film release may be low global "
-        "but high entertainment; a playoff final may be high sports but moderate global.\n"
+        "but high entertainment; a major recall may be high automotive but moderate global.\n"
         "Use compact rationale_codes such as geopolitical_escalation, public_safety, mass_casualty_risk, "
-        "major_policy, economic_impact, major_sports_result, entertainment_major_release, niche_update, "
+        "major_policy, economic_impact, entertainment_major_release, niche_update, "
         "low_public_impact, duplicate_reprint.\n"
         "Do not include prose explanations. Return every group_index exactly once.\n\n"
         f"Clusters:\n{json.dumps(rows, ensure_ascii=False, separators=(',', ':'))}"
@@ -2037,7 +2040,6 @@ def _baseline_newsworthiness(
         "environment": 0.1,
         "automotive": 0.04,
         "entertainment": 0.03,
-        "sports": 0.03,
     }.get(category, 0.05)
     global_score += global_weight
     category_score += min(0.25, global_weight + 0.08)
@@ -2068,7 +2070,7 @@ def _baseline_newsworthiness(
             category_score += 0.06
             rationale_codes.append(code)
 
-    if category in {"entertainment", "sports", "automotive"} and not set(rationale_codes) & {
+    if category in {"entertainment", "automotive"} and not set(rationale_codes) & {
         "public_safety",
         "mass_casualty_risk",
         "economic_impact",
@@ -2278,8 +2280,8 @@ def _build_event_merge_prompt(event1: dict[str, Any], event2: dict[str, Any]) ->
         "Compare these two news event clusters and decide if they represent the exact same "
         "underlying real-world news event and should be merged into a single event.\n"
         "They should be merged if they cover the same development, announcement, decision, "
-        "sports game, or incident.\n"
-        "They should remain separate if they are different incidents, different sports games, "
+        "or incident.\n"
+        "They should remain separate if they are different incidents, "
         "unrelated actions by the same actor, or distinct developments in a broader topic "
         "(e.g., separate space launches, separate policy announcements, separate trials).\n\n"
         "Event 1:\n"
@@ -2311,6 +2313,236 @@ def _event_merge_response_schema() -> dict[str, Any]:
     }
 
 
+def _dynamic_keyword_stopwords(
+    events_with_keywords: Sequence[tuple[str, Sequence[str]]],
+    *,
+    threshold: float = DEDUPLICATION_HOT_STOPWORD_THRESHOLD,
+    min_events: int = 8,
+    absolute_floor: int = 4,
+) -> set[str]:
+    """Compute per-batch stopwords: any keyword appearing in more than `threshold` of events
+    in this batch is treated as too generic to distinguish duplicates.
+
+    Guards against over-stripping on small batches:
+    - `min_events`: batches with fewer than this many events get no dynamic stopwords at all.
+    - `absolute_floor`: a keyword must appear in at least this many events to be considered hot,
+      regardless of the percentage. This keeps distinctive entity words (e.g. "ferrari" in a
+      10-event leisure batch where it appears in exactly the 2 candidate duplicates) from being
+      stripped before they can be matched."""
+    if len(events_with_keywords) < min_events:
+        return set()
+    counts: Counter[str] = Counter()
+    for _, keywords in events_with_keywords:
+        seen: set[str] = set()
+        for kw in keywords:
+            word = kw.lower().strip()
+            if word and word not in seen:
+                counts[word] += 1
+                seen.add(word)
+    cutoff = max(absolute_floor, int(len(events_with_keywords) * threshold))
+    return {word for word, count in counts.items() if count >= cutoff}
+
+
+def _filtered_event_keywords(
+    keywords: Sequence[str],
+    dynamic_stopwords: set[str],
+    *,
+    max_n: int = DEDUPLICATION_KEYWORDS_PER_EVENT,
+) -> list[str]:
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for kw in keywords:
+        word = kw.lower().strip()
+        if not word or word in seen:
+            continue
+        if word in _KEYWORD_STOPWORDS or word in dynamic_stopwords:
+            continue
+        filtered.append(word)
+        seen.add(word)
+        if len(filtered) >= max_n:
+            break
+    return filtered
+
+
+def _keyword_overlap_candidates(
+    events: Sequence[dict[str, Any]],
+    dynamic_stopwords: set[str],
+    *,
+    min_overlap: int = DEDUPLICATION_KEYWORD_OVERLAP_MIN,
+    max_keywords: int = DEDUPLICATION_KEYWORDS_PER_EVENT,
+) -> list[tuple[str, str]]:
+    """Return pairs of event_ids whose filtered keyword sets share at least `min_overlap` tokens.
+    Caller is responsible for restricting `events` to a single category group."""
+    filtered_by_id: dict[str, set[str]] = {}
+    for event in events:
+        kws = _filtered_event_keywords(
+            event.get("keywords") or [], dynamic_stopwords, max_n=max_keywords
+        )
+        filtered_by_id[event["event_id"]] = set(kws)
+
+    pairs: list[tuple[str, str]] = []
+    ids = list(filtered_by_id.keys())
+    for i, eid1 in enumerate(ids):
+        kw1 = filtered_by_id[eid1]
+        if len(kw1) < min_overlap:
+            continue
+        for eid2 in ids[i + 1 :]:
+            kw2 = filtered_by_id[eid2]
+            if len(kw1 & kw2) >= min_overlap:
+                pairs.append((eid1, eid2))
+    return pairs
+
+
+def _build_prescreen_prompt(events_payload: Sequence[dict[str, Any]]) -> str:
+    return (
+        "You are screening a list of active news events for potential duplicates that should "
+        "be reviewed by a strict per-pair merge step.\n"
+        "Each event has an ID, title, a short list of distinctive keywords, and the top article "
+        "headlines.\n"
+        "Return ALL pairs of events that MIGHT describe the same underlying news event: the same "
+        "incident, same launch, same announcement, same negotiation, or same development covered "
+        "from a different angle or framing. Err on the side of inclusion when in doubt; a separate "
+        "strict review will reject false positives.\n"
+        "INCLUDE pairs when:\n"
+        "- One outlet's framing (e.g. consumer-tech blog) and another's (e.g. trade press) "
+        "appear to describe the same product launch, court ruling, or incident.\n"
+        "- The same named entity is the subject of both events and the underlying event sounds "
+        "like the same news beat.\n"
+        "- Two events plausibly cover the same incident in different sub-stories (e.g. an attack "
+        "and reactions to that attack on the same day).\n"
+        "EXCLUDE pairs when:\n"
+        "- The events are different incidents within the same broader topic (e.g. two separate "
+        "attacks in the same conflict, two separate games in the same league, two separate "
+        "product launches by the same company).\n"
+        "- The events share only a general topic, beat, or actor without a shared specific event.\n"
+        "Return JSON only matching this schema:\n"
+        "{ \"candidate_pairs\": [ {\"event_a\": \"<id>\", \"event_b\": \"<id>\", "
+        "\"reason\": \"<short>\"} ] }\n"
+        "If no candidates, return {\"candidate_pairs\": []}.\n\n"
+        f"Events:\n{json.dumps(list(events_payload), ensure_ascii=False, separators=(',', ':'))}"
+    )
+
+
+def _prescreen_response_schema() -> dict[str, Any]:
+    return {
+        "type": "OBJECT",
+        "properties": {
+            "candidate_pairs": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "event_a": {"type": "STRING"},
+                        "event_b": {"type": "STRING"},
+                        "reason": {"type": "STRING"},
+                    },
+                    "required": ["event_a", "event_b"],
+                },
+            },
+        },
+        "required": ["candidate_pairs"],
+    }
+
+
+def _llm_prescreen_candidates(
+    events: Sequence[dict[str, Any]],
+    article_headlines_by_event: dict[str, list[str]],
+    dynamic_stopwords: set[str],
+    *,
+    client: JsonGenerator,
+    batch_label: str,
+    progress: Callable[[str], None] | None = None,
+    state: StateDB | None = None,
+    run_id: str | None = None,
+) -> list[tuple[str, str]]:
+    """Run a loose LLM pre-screen over a single category-group batch of events.
+    Returns event_id pairs the LLM thinks MIGHT be duplicates. The per-pair merge LLM
+    is the strict filter that prevents over-merging."""
+    if len(events) < 2:
+        return []
+
+    valid_ids = {event["event_id"] for event in events}
+    chunks: list[list[dict[str, Any]]] = []
+    for start in range(0, len(events), DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH):
+        chunks.append(list(events[start : start + DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH]))
+
+    collected: list[tuple[str, str]] = []
+    for chunk_index, chunk in enumerate(chunks, start=1):
+        chunk_label = batch_label if len(chunks) == 1 else f"{batch_label}-{chunk_index}"
+        payload = [
+            {
+                "id": event["event_id"],
+                "title": event["title"],
+                "keywords": _filtered_event_keywords(
+                    event.get("keywords") or [], dynamic_stopwords
+                ),
+                "headlines": list(
+                    article_headlines_by_event.get(event["event_id"], [])
+                )[:DEDUPLICATION_HEADLINES_PER_EVENT],
+            }
+            for event in chunk
+        ]
+
+        try:
+            result = client.generate_json(
+                system_instruction=(
+                    "You are an expert news editor screening event clusters for possible "
+                    "duplicates. Recall matters more than precision at this stage."
+                ),
+                prompt=_build_prescreen_prompt(payload),
+                response_schema=_prescreen_response_schema(),
+                temperature=0,
+            )
+            if state is not None and run_id:
+                try:
+                    state.record_llm_usage(
+                        run_id=run_id,
+                        stage="deduplication_prescreen",
+                        model=client.model,
+                        prompt_version=DEDUPLICATION_PRESCREEN_PROMPT_VERSION,
+                        input_tokens=result.usage.get("promptTokenCount"),
+                        output_tokens=result.usage.get("candidatesTokenCount"),
+                    )
+                except Exception:
+                    pass
+
+            raw_pairs = result.payload.get("candidate_pairs") or []
+            kept = 0
+            for entry in raw_pairs:
+                if not isinstance(entry, dict):
+                    continue
+                a = entry.get("event_a")
+                b = entry.get("event_b")
+                if not isinstance(a, str) or not isinstance(b, str):
+                    continue
+                if a == b or a not in valid_ids or b not in valid_ids:
+                    continue
+                collected.append((a, b))
+                kept += 1
+            if progress:
+                progress(
+                    f"deduplicate: prescreen[{chunk_label}] over {len(chunk)} events returned "
+                    f"{kept} candidate pair(s)"
+                )
+        except Exception as exc:
+            if progress:
+                progress(f"deduplicate: prescreen[{chunk_label}] failed: {exc}")
+            if state is not None and run_id:
+                try:
+                    state.record_error(
+                        run_id,
+                        "deduplication_prescreen",
+                        "batch",
+                        chunk_label,
+                        None,
+                        exc,
+                    )
+                except Exception:
+                    pass
+
+    return collected
+
+
 def deduplicate_active_events_llm(
     *,
     state: StateDB,
@@ -2324,7 +2556,7 @@ def deduplicate_active_events_llm(
 
     rows = state.conn.execute(
         """
-        SELECT event_id, title, category, updated_at, article_count, created_at
+        SELECT event_id, title, category, updated_at, article_count, created_at, keywords_json
         FROM events
         WHERE status = 'active' AND updated_at >= ?
         ORDER BY category, updated_at DESC
@@ -2335,6 +2567,11 @@ def deduplicate_active_events_llm(
     events = [dict(row) for row in rows]
     if len(events) < 2:
         return
+    for event in events:
+        try:
+            event["keywords"] = json.loads(event.get("keywords_json") or "[]") or []
+        except (TypeError, ValueError):
+            event["keywords"] = []
     article_headlines_by_event: dict[str, list[str]] = {}
     for row in state.conn.execute(
         """
@@ -2346,7 +2583,10 @@ def deduplicate_active_events_llm(
     ).fetchall():
         article_headlines_by_event.setdefault(row["event_id"], []).append(row["headline"])
 
-    candidates = []
+    candidate_pairs: set[frozenset[str]] = set()
+    events_by_id = {event["event_id"]: event for event in events}
+
+    # Heuristic candidates: slug match, title overlap, or article-headline match
     for i in range(len(events)):
         for j in range(i + 1, len(events)):
             e1 = events[i]
@@ -2361,13 +2601,70 @@ def deduplicate_active_events_llm(
                     article_headlines_by_event,
                 )
             if slug_match or title_match or headline_match:
-                candidates.append((e1, e2))
+                candidate_pairs.add(frozenset((e1["event_id"], e2["event_id"])))
+    heuristic_count = len(candidate_pairs)
 
-    if not candidates:
+    # Keyword-overlap candidates + LLM pre-screen, both restricted to one
+    # category-group batch at a time. news_business splits further into
+    # world/us/business to keep batches focused.
+    events_by_group: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        cat = event.get("category") or ""
+        group = _category_group_for_category(cat)
+        if group["name"] == "news_business" and cat in group["categories"]:
+            batch_key = f"news_business_{cat}"
+        else:
+            batch_key = group["name"]
+        events_by_group.setdefault(batch_key, []).append(event)
+
+    keyword_added = 0
+    prescreen_added = 0
+    for batch_key, batch_events in events_by_group.items():
+        if len(batch_events) < 2:
+            continue
+        kw_events = [(event["event_id"], event.get("keywords") or []) for event in batch_events]
+        dynamic_stopwords = _dynamic_keyword_stopwords(kw_events)
+        for eid1, eid2 in _keyword_overlap_candidates(batch_events, dynamic_stopwords):
+            pair = frozenset((eid1, eid2))
+            if pair not in candidate_pairs:
+                candidate_pairs.add(pair)
+                keyword_added += 1
+        prescreen_pairs = _llm_prescreen_candidates(
+            batch_events,
+            article_headlines_by_event,
+            dynamic_stopwords,
+            client=client,
+            batch_label=batch_key,
+            progress=progress,
+            state=state,
+            run_id=run_id,
+        )
+        for eid1, eid2 in prescreen_pairs:
+            pair = frozenset((eid1, eid2))
+            if pair not in candidate_pairs:
+                candidate_pairs.add(pair)
+                prescreen_added += 1
+
+    if not candidate_pairs:
         return
 
     if progress:
-        progress(f"deduplicate: found {len(candidates)} candidate event pair(s) for LLM evaluation")
+        progress(
+            f"deduplicate: candidate pairs total={len(candidate_pairs)} "
+            f"(heuristic={heuristic_count}, keyword_overlap_new={keyword_added}, "
+            f"prescreen_new={prescreen_added})"
+        )
+
+    candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for pair in candidate_pairs:
+        ids = sorted(pair)
+        if len(ids) != 2:
+            continue
+        e1 = events_by_id.get(ids[0])
+        e2 = events_by_id.get(ids[1])
+        if e1 is None or e2 is None:
+            continue
+        candidates.append((e1, e2))
 
     merges_count = 0
     for e1, e2 in candidates:

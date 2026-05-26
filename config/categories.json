@@ -60,12 +60,6 @@
       "name": "Entertainment",
       "description": "Film, TV, music, gaming, and cultural events",
       "sort_order": 10
-    },
-    {
-      "id": "sports",
-      "name": "Sports",
-      "description": "Professional and amateur sports news",
-      "sort_order": 11
     }
   ]
 }
