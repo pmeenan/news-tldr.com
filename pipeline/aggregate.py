@@ -28,6 +28,7 @@ DEDUPLICATION_KEYWORDS_PER_EVENT = 6
 DEDUPLICATION_HEADLINES_PER_EVENT = 3
 DEDUPLICATION_HOT_STOPWORD_THRESHOLD = 0.2
 DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH = 40
+DEDUPLICATION_MAX_PASSES = 3
 MAX_CATEGORY_GROUP_ARTICLES = 50
 NULL_EXISTING_EVENT_ID_VALUES = {"null", "none", "nil", "n/a", "na", "unknown"}
 CATEGORY_GROUPS = [
@@ -610,29 +611,14 @@ def aggregate_once(
                             group_articles = batch["articles"]
 
                             try:
-                                # Tightened candidate filter: an active event is a candidate only if
-                                # its title shares at least 2 non-stopword words with at least one
-                                # individual article headline (or shares the single word if the event
-                                # title only has one). This avoids the union-of-all-words false-positive
-                                # mode that pulled ~all active events into the prompt on large windows.
-                                article_word_sets = [
-                                    set(re.findall(r"[A-Za-z0-9]+", art.headline.lower()))
-                                    - _KEYWORD_STOPWORDS
-                                    for art in group_articles
-                                ]
+                                # Tightened candidate filter: active events need a real headline
+                                # cohesion edge with at least one article, not just a broad shared beat.
                                 candidates: list[dict[str, Any]] = []
                                 for cat in _candidate_categories_for_group(batch["categories"]):
                                     for ev in active_rows_by_category.get(cat, []):
-                                        title_words = (
-                                            set(re.findall(r"[A-Za-z0-9]+", ev["title"].lower()))
-                                            - _KEYWORD_STOPWORDS
-                                        )
-                                        if not title_words:
-                                            continue
-                                        required = 1 if len(title_words) == 1 else 2
                                         if any(
-                                            len(title_words & art_words) >= required
-                                            for art_words in article_word_sets
+                                            _headlines_have_cohesion_edge(ev["title"], art.headline)
+                                            for art in group_articles
                                         ):
                                             candidates.append(ev)
 
@@ -1348,24 +1334,20 @@ def _component_matches_existing_event(
     event = active_events_by_id.get(existing_event_id)
     if not event:
         return True
-    event_words = _headline_word_set(str(event.get("title", "")))
-    if not event_words:
+    title = str(event.get("title", ""))
+    if not _headline_word_set(title):
         return False
-    return any(len(event_words & _headline_word_set(articles[index].headline)) >= 2 for index in indexes)
+    return any(_headlines_have_cohesion_edge(title, articles[index].headline) for index in indexes)
 
 
 def _headline_cohesion_components(
     indexes: Sequence[int],
     articles: Sequence[ArticleForAggregation],
 ) -> list[list[int]]:
-    word_sets = {
-        index: _headline_word_set(articles[index].headline)
-        for index in indexes
-    }
     neighbors = {index: set() for index in indexes}
     for left_pos, left in enumerate(indexes):
         for right in indexes[left_pos + 1 :]:
-            if len(word_sets[left] & word_sets[right]) >= 2:
+            if _headlines_have_cohesion_edge(articles[left].headline, articles[right].headline):
                 neighbors[left].add(right)
                 neighbors[right].add(left)
 
@@ -1392,8 +1374,8 @@ def _headline_cohesion_components(
 def _headline_word_set(text: str) -> set[str]:
     return {
         word
-        for word in re.findall(r"[A-Za-z0-9]+", text.lower())
-        if len(word) >= 3 and word not in _KEYWORD_STOPWORDS
+        for raw, word in _headline_token_pairs(text)
+        if _is_headline_cohesion_word(raw, word)
     }
 
 
@@ -2121,6 +2103,165 @@ _KEYWORD_STOPWORDS = {
     "news", "says", "said", "amid", "report", "reports", "according", "u", "s", "us"
 }
 
+_HEADLINE_COHESION_STOPWORDS = _KEYWORD_STOPWORDS | {
+    "analysis",
+    "briefing",
+    "check",
+    "explainer",
+    "fact",
+    "focus",
+    "here",
+    "live",
+    "old",
+    "opinion",
+    "photo",
+    "photos",
+    "picture",
+    "pictures",
+    "takeaway",
+    "takeaways",
+    "thing",
+    "things",
+    "update",
+    "updates",
+    "video",
+    "watch",
+    "year",
+}
+_HEADLINE_COHESION_GENERIC_WORDS = {
+    "administration",
+    "advice",
+    "america",
+    "american",
+    "americans",
+    "case",
+    "cases",
+    "cells",
+    "city",
+    "claim",
+    "claims",
+    "concern",
+    "concerns",
+    "crisis",
+    "decision",
+    "district",
+    "day",
+    "dead",
+    "deadly",
+    "death",
+    "deaths",
+    "executive",
+    "government",
+    "health",
+    "issue",
+    "issues",
+    "killed",
+    "killing",
+    "kills",
+    "letter",
+    "man",
+    "memorial",
+    "media",
+    "open",
+    "order",
+    "people",
+    "plan",
+    "plans",
+    "policy",
+    "president",
+    "probe",
+    "program",
+    "proposal",
+    "researchers",
+    "review",
+    "school",
+    "scientists",
+    "social",
+    "story",
+    "warning",
+    "warnings",
+    "weekend",
+}
+_HEADLINE_FORMAT_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"fact\s+focus|fact\s+check|explainer|analysis|opinion|live\s+updates?|"
+    r"in\s+pictures|photos?|video|watch|what\s+to\s+know|things\s+to\s+know|"
+    r"\d+\s+(?:big\s+)?takeaways?"
+    r")\s*(?::|--|-|\.)?\s*",
+    re.IGNORECASE,
+)
+
+
+def _normalize_headline_for_cohesion(text: str) -> str:
+    previous = text.strip()
+    while True:
+        normalized = _HEADLINE_FORMAT_PREFIX_RE.sub("", previous, count=1).strip()
+        if normalized == previous:
+            return normalized
+        previous = normalized
+
+
+def _headline_token_pairs(text: str) -> list[tuple[str, str]]:
+    normalized = _normalize_headline_for_cohesion(text)
+    return [(match.group(0), match.group(0).lower()) for match in re.finditer(r"[A-Za-z0-9]+", normalized)]
+
+
+def _is_headline_cohesion_word(raw: str, word: str) -> bool:
+    if word in _HEADLINE_COHESION_STOPWORDS:
+        return False
+    if len(word) >= 3:
+        return True
+    if len(word) >= 2 and raw.isupper():
+        return True
+    return len(word) >= 2 and any(char.isdigit() for char in word)
+
+
+def _is_headline_anchor_word(raw: str, word: str) -> bool:
+    if not _is_headline_cohesion_word(raw, word):
+        return False
+    if word in _HEADLINE_COHESION_GENERIC_WORDS:
+        return False
+    if any(char.isdigit() for char in word):
+        return len(word) >= 2
+    if raw.isupper() and len(raw) >= 2:
+        return True
+    return raw[:1].isupper()
+
+
+def _headline_anchor_word_set(text: str) -> set[str]:
+    return {
+        word
+        for raw, word in _headline_token_pairs(text)
+        if _is_headline_anchor_word(raw, word)
+    }
+
+
+def _shared_words_are_only_generic(shared_words: set[str]) -> bool:
+    return bool(shared_words) and shared_words <= _HEADLINE_COHESION_GENERIC_WORDS
+
+
+def _headlines_have_cohesion_edge(left: str, right: str) -> bool:
+    left_words = _headline_word_set(left)
+    right_words = _headline_word_set(right)
+    shared_words = left_words & right_words
+    if len(shared_words) >= 3:
+        return not _shared_words_are_only_generic(shared_words)
+    if len(shared_words) < 2:
+        return False
+    if _shared_words_are_only_generic(shared_words):
+        return False
+
+    shared_anchors = (
+        _headline_anchor_word_set(left)
+        & _headline_anchor_word_set(right)
+        & shared_words
+    )
+    if len(shared_anchors) >= 2:
+        return True
+    return bool(shared_anchors) and any(
+        word not in _HEADLINE_COHESION_GENERIC_WORDS for word in shared_words - shared_anchors
+    )
+
 
 def _keywords_for_articles(articles: Sequence[ArticleForAggregation]) -> list[str]:
     counter: Counter[str] = Counter()
@@ -2551,6 +2692,31 @@ def deduplicate_active_events_llm(
     progress: Callable[[str], None] | None = None,
     run_id: str | None = None,
 ) -> None:
+    for pass_index in range(1, DEDUPLICATION_MAX_PASSES + 1):
+        merges_count = _deduplicate_active_events_llm_pass(
+            state=state,
+            client=client,
+            feeds_by_source=feeds_by_source,
+            progress=progress,
+            run_id=run_id,
+        )
+        if merges_count == 0:
+            break
+        if progress and pass_index < DEDUPLICATION_MAX_PASSES:
+            progress(
+                f"deduplicate: pass {pass_index} merged {merges_count} event(s); "
+                "checking for newly exposed duplicates"
+            )
+
+
+def _deduplicate_active_events_llm_pass(
+    *,
+    state: StateDB,
+    client: JsonGenerator,
+    feeds_by_source: dict[str, Any],
+    progress: Callable[[str], None] | None = None,
+    run_id: str | None = None,
+) -> int:
     since_dt = datetime.now(UTC) - timedelta(hours=48)
     since = since_dt.isoformat().replace("+00:00", "Z")
 
@@ -2566,7 +2732,7 @@ def deduplicate_active_events_llm(
 
     events = [dict(row) for row in rows]
     if len(events) < 2:
-        return
+        return 0
     for event in events:
         try:
             event["keywords"] = json.loads(event.get("keywords_json") or "[]") or []
@@ -2586,21 +2752,29 @@ def deduplicate_active_events_llm(
     candidate_pairs: set[frozenset[str]] = set()
     events_by_id = {event["event_id"]: event for event in events}
 
-    # Heuristic candidates: slug match, title overlap, or article-headline match
+    # Heuristic candidates: slug match, title overlap, title cohesion,
+    # or article-headline match. Title cohesion can cross category groups; the
+    # strict per-pair merge review remains the precision gate.
     for i in range(len(events)):
         for j in range(i + 1, len(events)):
             e1 = events[i]
             e2 = events[j]
             slug_match = _base_slug(e1["event_id"]) == _base_slug(e2["event_id"])
             title_match = _titles_similar(e1["title"], e2["title"])
+            title_cohesion_match = False
+            if not (slug_match or title_match):
+                title_cohesion_match = _headlines_have_cohesion_edge(e1["title"], e2["title"])
             headline_match = False
-            if not (slug_match or title_match) and _titles_share_at_least(e1["title"], e2["title"], 2):
+            if (
+                not (slug_match or title_match or title_cohesion_match)
+                and _titles_share_at_least(e1["title"], e2["title"], 2)
+            ):
                 headline_match = _events_have_similar_article_headline(
                     e1["event_id"],
                     e2["event_id"],
                     article_headlines_by_event,
                 )
-            if slug_match or title_match or headline_match:
+            if slug_match or title_match or title_cohesion_match or headline_match:
                 candidate_pairs.add(frozenset((e1["event_id"], e2["event_id"])))
     heuristic_count = len(candidate_pairs)
 
@@ -2646,7 +2820,7 @@ def deduplicate_active_events_llm(
                 prescreen_added += 1
 
     if not candidate_pairs:
-        return
+        return 0
 
     if progress:
         progress(
@@ -2758,3 +2932,4 @@ def deduplicate_active_events_llm(
 
     if progress and merges_count > 0:
         progress(f"deduplicate: completed merging {merges_count} event(s)")
+    return merges_count

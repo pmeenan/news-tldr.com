@@ -307,6 +307,160 @@ def test_group_articles_with_gemini_splits_weakly_connected_pairs() -> None:
     assert [group["article_indexes"] for group in result["groups"]] == [[0], [1]]
 
 
+def test_group_articles_with_gemini_splits_fact_focus_format_group() -> None:
+    articles = [
+        ArticleForAggregation(
+            article_id="ballots",
+            source_id="ap",
+            source_name="AP",
+            headline="FACT FOCUS: Trump falsely accuses Maryland of sending illegal mail-in ballots to voters",
+            summary=None,
+            published_at="2026-05-24T10:00:00Z",
+            article_path="ballots.json",
+        ),
+        ArticleForAggregation(
+            article_id="climate",
+            source_id="ap",
+            source_name="AP",
+            headline="FACT FOCUS: Trump distorts recent revisions of scientific projections of global warming",
+            summary=None,
+            published_at="2026-05-24T10:01:00Z",
+            article_path="climate.json",
+        ),
+        ArticleForAggregation(
+            article_id="snap",
+            source_id="ap",
+            source_name="AP",
+            headline="FACT FOCUS: Why nearly 4.3 million people are no longer receiving food stamps",
+            summary=None,
+            published_at="2026-05-24T10:02:00Z",
+            article_path="snap.json",
+        ),
+    ]
+    client = FakeJsonGenerator(
+        {
+            "articles": [
+                {"article_index": 0, "content_type": "news", "category": "us"},
+                {"article_index": 1, "content_type": "news", "category": "us"},
+                {"article_index": 2, "content_type": "news", "category": "us"},
+            ],
+            "groups": [{"article_indexes": [0, 1, 2]}],
+        }
+    )
+
+    result = group_articles_with_gemini(articles, mode="titles_summaries", client=client)
+
+    assert [group["article_indexes"] for group in result["groups"]] == [[0], [1], [2]]
+
+
+def test_group_articles_with_gemini_splits_generic_social_media_pair() -> None:
+    articles = [
+        ArticleForAggregation(
+            article_id="meta",
+            source_id="ap",
+            source_name="AP",
+            headline="Meta settles social media addiction case brought by rural Kentucky school district",
+            summary=None,
+            published_at="2026-05-24T10:00:00Z",
+            article_path="meta.json",
+        ),
+        ArticleForAggregation(
+            article_id="health-advice",
+            source_id="ap",
+            source_name="AP",
+            headline="Health advice is all over social media. Here's how to vet claims",
+            summary=None,
+            published_at="2026-05-24T10:01:00Z",
+            article_path="health-advice.json",
+        ),
+    ]
+    client = FakeJsonGenerator(
+        {
+            "articles": [
+                {"article_index": 0, "content_type": "news", "category": "health"},
+                {"article_index": 1, "content_type": "news", "category": "health"},
+            ],
+            "groups": [{"article_indexes": [0, 1]}],
+        }
+    )
+
+    result = group_articles_with_gemini(articles, mode="titles_summaries", client=client)
+
+    assert [group["article_indexes"] for group in result["groups"]] == [[0], [1]]
+
+
+def test_group_articles_with_gemini_splits_shared_holiday_context() -> None:
+    articles = [
+        ArticleForAggregation(
+            article_id="travel",
+            source_id="source-a",
+            source_name="Source A",
+            headline="Memorial Day: Higher fuel prices have some Americans scaling back travel plans",
+            summary=None,
+            published_at="2026-05-24T10:00:00Z",
+            article_path="travel.json",
+        ),
+        ArticleForAggregation(
+            article_id="ice",
+            source_id="source-b",
+            source_name="Source B",
+            headline="New Jersey governor spends Memorial Day protesting ICE facility",
+            summary=None,
+            published_at="2026-05-24T10:01:00Z",
+            article_path="ice.json",
+        ),
+    ]
+    client = FakeJsonGenerator(
+        {
+            "articles": [
+                {"article_index": 0, "content_type": "news", "category": "business"},
+                {"article_index": 1, "content_type": "news", "category": "politics"},
+            ],
+            "groups": [{"article_indexes": [0, 1]}],
+        }
+    )
+
+    result = group_articles_with_gemini(articles, mode="titles_summaries", client=client)
+
+    assert [group["article_indexes"] for group in result["groups"]] == [[0], [1]]
+
+
+def test_group_articles_with_gemini_keeps_two_named_anchor_pair() -> None:
+    articles = [
+        ArticleForAggregation(
+            article_id="ferrari-luce",
+            source_id="car-and-driver",
+            source_name="Car and Driver",
+            headline="2027 Ferrari Luce",
+            summary=None,
+            published_at="2026-05-24T10:00:00Z",
+            article_path="ferrari-luce.json",
+        ),
+        ArticleForAggregation(
+            article_id="ferrari-jony-ive",
+            source_id="source-b",
+            source_name="Source B",
+            headline="Ferrari Luce EV debuts with Jony Ive-designed cockpit",
+            summary=None,
+            published_at="2026-05-24T10:01:00Z",
+            article_path="ferrari-jony-ive.json",
+        ),
+    ]
+    client = FakeJsonGenerator(
+        {
+            "articles": [
+                {"article_index": 0, "content_type": "news", "category": "automotive"},
+                {"article_index": 1, "content_type": "news", "category": "automotive"},
+            ],
+            "groups": [{"article_indexes": [0, 1]}],
+        }
+    )
+
+    result = group_articles_with_gemini(articles, mode="titles_summaries", client=client)
+
+    assert [group["article_indexes"] for group in result["groups"]] == [[0, 1]]
+
+
 def test_group_articles_with_gemini_drops_existing_event_id_from_weak_split() -> None:
     articles = [
         ArticleForAggregation(
@@ -2065,6 +2219,79 @@ def test_deduplicate_active_events_llm_cross_category_title_match(tmp_path, monk
             for row in state.conn.execute("SELECT event_id FROM events")
         }
         assert remaining == {event1["event_id"]}
+        assert not (event_dir / f"{event2['event_id']}.json").exists()
+
+
+def test_deduplicate_active_events_llm_cross_group_title_cohesion(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+
+    event_dir = tmp_path / "events"
+    event_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("pipeline.aggregate.EVENT_DIR", event_dir)
+
+    event1 = {
+        "event_id": "2026-05-25-enhanced-games-launch",
+        "title": "Las Vegas Enhanced Games launch sparks controversy and ethical debate",
+        "category": "entertainment",
+        "created_at": "2026-05-25T10:00:00Z",
+        "updated_at": "2026-05-25T10:00:00Z",
+        "article_ids": ["art-entertainment"],
+        "article_count": 1,
+        "keywords": ["enhanced", "games", "vegas", "controversy"],
+    }
+    event2 = {
+        "event_id": "2026-05-25-swimmer-record-enhanced-games",
+        "title": "A Swimmer Broke a World Record at the Enhanced Games",
+        "category": "health",
+        "created_at": "2026-05-25T11:00:00Z",
+        "updated_at": "2026-05-25T11:00:00Z",
+        "article_ids": ["art-health"],
+        "article_count": 1,
+        "keywords": ["enhanced", "games", "swimmer", "record"],
+    }
+
+    with StateDB(db_path) as state:
+        for event in (event1, event2):
+            path = event_dir / f"{event['event_id']}.json"
+            path.write_text(json.dumps(event), encoding="utf-8")
+            state.upsert_event(event, path)
+
+        for article_id, event_id, headline, published_at in (
+            ("art-entertainment", event1["event_id"], event1["title"], event1["created_at"]),
+            ("art-health", event2["event_id"], event2["title"], event2["created_at"]),
+        ):
+            state.insert_article(
+                {
+                    "article_id": article_id,
+                    "source_id": "src",
+                    "source_name": "Src",
+                    "url": f"https://example.com/{article_id}",
+                    "headline": headline,
+                    "summary": "Summary",
+                    "published_at": published_at,
+                    "publish_date_estimated": False,
+                    "fetched_at": published_at,
+                    "content_type": "unknown",
+                    "language": "en",
+                    "collection": {},
+                    "fingerprints": {},
+                },
+                tmp_path / f"{article_id}.json",
+            )
+            state.conn.execute("UPDATE articles SET event_id = ? WHERE article_id = ?", (event_id, article_id))
+        state.conn.commit()
+
+        from pipeline.aggregate import deduplicate_active_events_llm
+
+        deduplicate_active_events_llm(
+            state=state,
+            client=FakeJsonGenerator({"should_merge": True, "confidence": 0.95, "rationale": "Same event"}),
+            feeds_by_source={},
+        )
+
+        remaining = sorted(row["event_id"] for row in state.conn.execute("SELECT event_id FROM events"))
+        assert remaining == [event1["event_id"]]
         assert not (event_dir / f"{event2['event_id']}.json").exists()
 
 
