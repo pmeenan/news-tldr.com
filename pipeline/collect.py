@@ -8,6 +8,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1122,7 +1123,16 @@ def cleanup_old_staging_data(days: int = 3, db_path: Path = DB_PATH) -> None:
         remove_empty_dirs(ARTICLE_DIR)
 
 
-async def collect_once(progress: ProgressCallback | None = None) -> dict[str, int]:
+@asynccontextmanager
+async def _noop_async_context():
+    yield
+
+
+async def collect_once(
+    progress: ProgressCallback | None = None,
+    *,
+    acquire_lock: bool = True,
+) -> dict[str, int]:
     pipeline_config = load_pipeline_config()
     feeds = load_feeds(enabled_only=True)
     collection = pipeline_config.collection
@@ -1131,9 +1141,14 @@ async def collect_once(progress: ProgressCallback | None = None) -> dict[str, in
     lock_timeout = pipeline_config.pipeline.get("watchdog_timeout_minutes", 30)
     if progress:
         progress(f"collect: starting {run_id} feeds={len(feeds)} retention_days={retention_days}")
-    async with PipelineLock(LOCK_PATH, _minutes_to_timedelta(lock_timeout), run_id=run_id):
+    lock_context = (
+        PipelineLock(LOCK_PATH, _minutes_to_timedelta(lock_timeout), run_id=run_id)
+        if acquire_lock
+        else _noop_async_context()
+    )
+    async with lock_context:
         if progress:
-            progress("collect: acquired pipeline lock")
+            progress("collect: acquired pipeline lock" if acquire_lock else "collect: using existing pipeline lock")
             progress("collect: migrating schema")
         migrate()
         if progress:

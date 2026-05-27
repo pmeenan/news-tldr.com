@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import os
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from pipeline.paths import PROJECT_ROOT
 
@@ -19,6 +19,9 @@ RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 DEFAULT_MAX_ATTEMPTS = 4
 DEFAULT_BACKOFF_BASE_SECONDS = 1.0
 DEFAULT_BACKOFF_MAX_SECONDS = 30.0
+DEFAULT_MAX_CONNECTIONS = 100
+DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20
+DEFAULT_HTTP2 = False
 
 
 class GeminiTruncatedError(RuntimeError):
@@ -92,6 +95,9 @@ class GeminiClient:
         backoff_base_seconds: float = DEFAULT_BACKOFF_BASE_SECONDS,
         backoff_max_seconds: float = DEFAULT_BACKOFF_MAX_SECONDS,
         sleep: Callable[[float], None] | None = None,
+        http_client: httpx.Client | None = None,
+        transport: httpx.BaseTransport | None = None,
+        http2: bool = DEFAULT_HTTP2,
     ) -> None:
         load_dotenv()
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
@@ -103,8 +109,28 @@ class GeminiClient:
         self.backoff_base_seconds = max(0.0, float(backoff_base_seconds))
         self.backoff_max_seconds = max(0.0, float(backoff_max_seconds))
         self._sleep = sleep or time.sleep
+        self._owns_http_client = http_client is None
+        self._http_client = http_client or httpx.Client(
+            http2=http2,
+            timeout=httpx.Timeout(timeout_seconds),
+            limits=httpx.Limits(
+                max_connections=DEFAULT_MAX_CONNECTIONS,
+                max_keepalive_connections=DEFAULT_MAX_KEEPALIVE_CONNECTIONS,
+            ),
+            transport=transport,
+        )
         if not self.api_key:
             raise RuntimeError("GEMINI_API_KEY is not configured")
+
+    def close(self) -> None:
+        if self._owns_http_client:
+            self._http_client.close()
+
+    def __enter__(self) -> GeminiClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
 
     def generate_json(
         self,
@@ -132,35 +158,41 @@ class GeminiClient:
 
         last_error: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
-            request = urllib.request.Request(
-                url,
-                data=body,
-                method="POST",
-                headers={
-                    "Content-Type": "application/json",
-                    "x-goog-api-key": self.api_key,
-                },
-            )
             started = time.monotonic()
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                    response_body = response.read()
-            except urllib.error.HTTPError as exc:
-                error_body = exc.read().decode("utf-8", errors="replace")
-                if exc.code in RETRYABLE_STATUS_CODES and attempt < self.max_attempts:
-                    last_error = GeminiRetryableError(f"HTTP {exc.code}: {error_body[:500]}", status_code=exc.code)
-                    self._sleep(self._backoff_delay(attempt))
-                    continue
-                raise RuntimeError(f"Gemini API request failed with HTTP {exc.code}: {error_body[:1000]}") from exc
-            except (urllib.error.URLError, TimeoutError) as exc:
+                response = self._http_client.post(
+                    url,
+                    content=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-goog-api-key": self.api_key,
+                    },
+                )
+            except httpx.TransportError as exc:
                 if attempt < self.max_attempts:
                     last_error = GeminiRetryableError(f"transport error: {exc}")
                     self._sleep(self._backoff_delay(attempt))
                     continue
                 raise RuntimeError(f"Gemini API transport error: {exc}") from exc
 
+            if response.status_code >= 400:
+                error_body = response.text
+                if response.status_code in RETRYABLE_STATUS_CODES and attempt < self.max_attempts:
+                    last_error = GeminiRetryableError(
+                        f"HTTP {response.status_code}: {error_body[:500]}",
+                        status_code=response.status_code,
+                    )
+                    self._sleep(self._backoff_delay(attempt))
+                    continue
+                raise RuntimeError(
+                    f"Gemini API request failed with HTTP {response.status_code}: {error_body[:1000]}"
+                )
+
             elapsed_ms = round((time.monotonic() - started) * 1000)
-            response_payload = json.loads(response_body.decode("utf-8"))
+            try:
+                response_payload = response.json()
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Gemini API response was not valid JSON: {response.text[:1000]}") from exc
             try:
                 text = _extract_text(response_payload)
             except GeminiTruncatedError:

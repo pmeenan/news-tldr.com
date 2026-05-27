@@ -5,6 +5,7 @@ import re
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Protocol
@@ -290,6 +291,7 @@ def digest_once(
     force: bool = False,
     client: JsonGenerator | None = None,
     progress: Callable[[str], None] | None = None,
+    acquire_lock: bool = True,
 ) -> dict[str, Any]:
     if (range_start is None) != (range_end is None):
         raise ValueError("range_start and range_end must be provided together or both omitted")
@@ -313,7 +315,8 @@ def digest_once(
     state = StateDB()
     stats: dict[str, Any] = {"run_id": run_id}
     try:
-        with PipelineLock(LOCK_PATH, lock_timeout, run_id=run_id):
+        lock_context = PipelineLock(LOCK_PATH, lock_timeout, run_id=run_id) if acquire_lock else nullcontext()
+        with lock_context:
             state.start_run(run_id, "article_digest")
             status = "success"
             try:

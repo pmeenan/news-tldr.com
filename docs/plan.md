@@ -4,7 +4,7 @@ This document tracks the phased buildout of the filesystem-backed RSS aggregator
 
 ## Current Direction
 
-- **Pipeline**: Python with `feedparser`, `httpx`/`h2`, `trafilatura`, `beautifulsoup4`, standard-library `sqlite3`, and LLM client libraries.
+- **Pipeline**: Python with `feedparser`, `httpx`/`h2` for collection, pooled `httpx` HTTP/1.1 for Gemini LLM calls, `trafilatura`, `beautifulsoup4`, standard-library `sqlite3`, and LLM client libraries.
 - **Presentation**: Astro (or similar frontend-focused SSG) for static site generation.
 - **State**: SQLite for pipeline state and incremental processing. JSON files for human-readable stage artifacts.
 - **No database server** or application runtime for the published site.
@@ -92,9 +92,11 @@ gantt
 > The default is a 3-hour aggregation chunk plus a 1-hour overlap lookahead
 > (4-hour LLM windows fixed to `00/03/06/09/12/15/18/21` UTC starts), tracked
 > in `aggregation_windows` so completed windows are not rerun on every
-> pipeline pass. Hourly cron runs keep revisiting those fixed UTC windows
-> rather than shifting based on the current hour. The newest completed window
-> may be rerun on the next pass to absorb late articles near the overlap.
+> pipeline pass. Normal aggregation uses sparse planning: after computing the
+> current/previous-day bounds, it selects only fixed UTC window starts that have
+> unassigned articles in their own publish-time bucket, plus the latest
+> completed window when it falls in range. Forced aggregation remains
+> continuous so reset coverage is explicit.
 > By default, if no range is specified, aggregation and digestion processing starts
 > from the start of the previous UTC day to avoid processing older retained staging data.
 
@@ -115,7 +117,7 @@ gantt
 - [x] Add deterministic media-page filtering before aggregation using URL/path and collection signals, so obvious video/carousel pages are excluded even when the digest model summarizes a transcript as high-impact news.
 - [x] Article-digest v6 hardening: deterministically filters stale estimated-date URL/live pages before LLM calls and code-gates `study_stage` persistence to covered biomedical/pharmaceutical/materials research contexts.
 - [x] Implement near-duplicate detection for exact reprints (content text and canonical URL hashes). Headline-hash and summary-hash signals are stored in `article_fingerprints` for future use, but are intentionally not used to short-circuit digest generation because generic shared headlines would silently propagate one story's digest onto unrelated stories.
-- [x] Implement Gemini Developer API client using stdlib HTTP, loading `GEMINI_API_KEY` and `GEMINI_MODEL` from `.env`/environment, with structured output, request timeouts, model/prompt metadata, and usage/timing capture.
+- [x] Implement Gemini Developer API client using pooled `httpx` HTTP/1.1 transport, loading `GEMINI_API_KEY` and `GEMINI_MODEL` from `.env`/environment, with structured output, request timeouts, model/prompt metadata, retry/backoff handling, and usage/timing capture.
 - [x] Design window-based LLM prompt for story clustering (headline + brief paragraph summary + source + date) to identify articles and angles covering the same developing news subject.
 - [x] Use compact order-preserving numeric enum output for the first pass; deterministic code maps rows back to input articles by position and rejects malformed or out-of-range values.
 - [ ] Keep free-text generation out of the first pass. Generate event titles, slugs, keywords, entities, and optional thread tags in a second smaller validated call.
@@ -133,6 +135,7 @@ gantt
 - [x] Add tests for grouping and registry updates.
 - [x] Partition window articles and active events by Category Group prior to story aggregation, including bounded sub-batches for oversized groups, to prevent LLM attention breakdown and "mega-event" grouping errors in large windows.
 - [x] Add deterministic post-validation grouping guardrails: split weakly connected headline groups, only preserve `existing_event_id` on matching components, treat null-like existing-event values as absent, and evaluate duplicate event candidates using article-headline similarity.
+- [x] Parallelize aggregation LLM work safely: category batches within a window run concurrently, dedupe prescreen chunks and disjoint candidate-pair reviews run concurrently, and SQLite/event-file mutations remain serialized in deterministic order. Oversized dedupe prescreen batches repeat high-article-count anchor events across chunks, and `news_business` adds a parent-level cross-category prescreen so business/market reaction stories can still merge with the underlying world/U.S. event.
 
 ### [ ] Milestone 3: Editorial
 
@@ -163,7 +166,7 @@ gantt
 ### [ ] Milestone 5: Operations & Quality
 
 - [x] Document that long-running pipeline commands must support `--verbose` progress/status logging to stderr.
-- [ ] Add a single command (`make run`, `python -m pipeline`, or similar) to run the full pipeline locally.
+- [x] Add a single command (`./.venv/bin/python -m pipeline.cli run`) to run the completed pipeline stages locally.
 - [ ] Verify pipeline lock, watchdog timeout, and stale lock recovery work end-to-end.
 - [ ] Add prompt/version metadata to all LLM-generated artifacts.
 - [ ] Add JSON schema validation command for all artifact types.

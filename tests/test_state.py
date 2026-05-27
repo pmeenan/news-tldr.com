@@ -171,12 +171,23 @@ def test_unassigned_window_count_ignores_filtered_articles(tmp_path: Path) -> No
             "2026-05-24T16:30:00Z",
             "2026-05-24T16:30:00Z",
         )
+        assert state.unassigned_article_published_times(
+            "2026-05-24T00:00:00Z",
+            "2026-05-25T00:00:00Z",
+        ) == ["2026-05-24T16:30:00Z"]
         state.update_article_aggregation_status("pending", status="filtered_low_impact")
 
         pending_row = state.conn.execute("SELECT is_filtered FROM articles WHERE article_id = 'pending'").fetchone()
         assert pending_row["is_filtered"] == 1
 
         assert state.article_time_bounds(unassigned_only=True) is None
+        assert (
+            state.unassigned_article_published_times(
+                "2026-05-24T00:00:00Z",
+                "2026-05-25T00:00:00Z",
+            )
+            == []
+        )
 
 
 def test_state_upserts_event_and_assigns_articles(tmp_path: Path) -> None:

@@ -14,6 +14,8 @@
     "window_overlap_hours": 1,
     "window_step_hours": 3,
     "stale_threshold_hours": 48,
+    "category_batch_concurrency": 8,
+    "deduplication_concurrency": 16,
     "min_category_impact": 0.25
   },
   "digest": {

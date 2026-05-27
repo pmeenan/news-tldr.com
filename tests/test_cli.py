@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pipeline.cli import clean_data, main
+from pipeline.cli import clean_data, main, run_completed_pipeline
 
 
 def test_clean_data_requires_confirmation(tmp_path):
@@ -172,6 +172,131 @@ def test_collect_without_verbose_keeps_stderr_quiet(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.err == ""
     assert json.loads(captured.out) == {"feeds_seen": 1}
+
+
+def test_run_completed_pipeline_runs_collect_digest_and_aggregate(monkeypatch):
+    calls = []
+    lock_events = []
+    progress_messages = []
+
+    class FakePipelineLock:
+        def __init__(self, path, timeout, run_id=None):
+            lock_events.append(("init", path.name, run_id.startswith("pipeline-run-")))
+
+        def __enter__(self):
+            lock_events.append("enter")
+            return self
+
+        def __exit__(self, *args):
+            lock_events.append("exit")
+
+    async def fake_collect_once(*, progress=None, acquire_lock=True):
+        calls.append(("collect", progress is not None, acquire_lock))
+        progress("collect: fake progress")
+        return {"feeds_seen": 1}
+
+    def fake_digest_once(*, force=False, progress=None, acquire_lock=True, **kwargs):
+        assert kwargs == {}
+        calls.append(("digest", force, progress is not None, acquire_lock))
+        progress("article digest: fake progress")
+        return {"completed": 2}
+
+    def fake_aggregate_once(*, force=False, progress=None, acquire_lock=True, **kwargs):
+        assert kwargs == {}
+        calls.append(("aggregate", force, progress is not None, acquire_lock))
+        progress("aggregate: fake progress")
+        return {"windows_processed": 3}
+
+    monkeypatch.setattr("pipeline.cli.PipelineLock", FakePipelineLock)
+    monkeypatch.setattr("pipeline.cli.collect_once", fake_collect_once)
+    monkeypatch.setattr("pipeline.cli.digest_once", fake_digest_once)
+    monkeypatch.setattr("pipeline.cli.aggregate_once", fake_aggregate_once)
+    monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
+
+    result = run_completed_pipeline(force=True, progress=progress_messages.append)
+
+    assert calls == [
+        ("collect", True, False),
+        ("digest", True, True, False),
+        ("aggregate", True, True, False),
+    ]
+    assert lock_events == [("init", "pipeline.lock", True), "enter", "exit"]
+    assert progress_messages == [
+        "run: acquired pipeline lock",
+        "run: starting collect",
+        "collect: fake progress",
+        "run: starting digest",
+        "article digest: fake progress",
+        "run: starting aggregate",
+        "aggregate: fake progress",
+    ]
+    assert result == {
+        "force": True,
+        "stages": {
+            "collect": {"feeds_seen": 1},
+            "digest": {"completed": 2},
+            "aggregate": {"windows_processed": 3},
+        },
+    }
+
+
+def test_run_command_writes_progress_and_combined_stats(monkeypatch, capsys):
+    class FakePipelineLock:
+        def __init__(self, path, timeout, run_id=None):
+            assert path.name == "pipeline.lock"
+            assert run_id.startswith("pipeline-run-")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    async def fake_collect_once(*, progress=None, acquire_lock=True):
+        assert progress is not None
+        assert acquire_lock is False
+        progress("collect: fake progress")
+        return {"feeds_seen": 1}
+
+    def fake_digest_once(*, force=False, progress=None, acquire_lock=True, **kwargs):
+        assert kwargs == {}
+        assert force is True
+        assert progress is not None
+        assert acquire_lock is False
+        progress("article digest: fake progress")
+        return {"completed": 2}
+
+    def fake_aggregate_once(*, force=False, progress=None, acquire_lock=True, **kwargs):
+        assert kwargs == {}
+        assert force is True
+        assert progress is not None
+        assert acquire_lock is False
+        progress("aggregate: fake progress")
+        return {"windows_processed": 3}
+
+    monkeypatch.setattr("pipeline.cli.PipelineLock", FakePipelineLock)
+    monkeypatch.setattr("pipeline.cli.collect_once", fake_collect_once)
+    monkeypatch.setattr("pipeline.cli.digest_once", fake_digest_once)
+    monkeypatch.setattr("pipeline.cli.aggregate_once", fake_aggregate_once)
+    monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
+    monkeypatch.setattr("sys.argv", ["news-tldr-pipeline", "run", "--verbose", "--force"])
+
+    main()
+
+    captured = capsys.readouterr()
+    assert "run: acquired pipeline lock" in captured.err
+    assert "run: starting collect" in captured.err
+    assert "collect: fake progress" in captured.err
+    assert "article digest: fake progress" in captured.err
+    assert "aggregate: fake progress" in captured.err
+    assert json.loads(captured.out) == {
+        "force": True,
+        "stages": {
+            "collect": {"feeds_seen": 1},
+            "digest": {"completed": 2},
+            "aggregate": {"windows_processed": 3},
+        },
+    }
 
 
 def test_aggregate_verbose_writes_progress_to_stderr(monkeypatch, capsys):

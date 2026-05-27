@@ -408,6 +408,21 @@ class StateDB:
             return None
         return row["min_published_at"], row["max_published_at"]
 
+    def unassigned_article_published_times(self, range_start: str, range_end: str) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT published_at
+            FROM articles
+            WHERE event_id IS NULL
+              AND is_filtered = 0
+              AND published_at >= ?
+              AND published_at < ?
+            ORDER BY published_at
+            """,
+            (range_start, range_end),
+        ).fetchall()
+        return [row["published_at"] for row in rows if row["published_at"]]
+
     def event_exists(self, event_id: str) -> bool:
         return (
             self.conn.execute(

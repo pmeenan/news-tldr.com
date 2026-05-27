@@ -5,6 +5,8 @@ import re
 import uuid
 from collections import Counter
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,7 +30,18 @@ DEDUPLICATION_KEYWORDS_PER_EVENT = 6
 DEDUPLICATION_HEADLINES_PER_EVENT = 3
 DEDUPLICATION_HOT_STOPWORD_THRESHOLD = 0.2
 DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH = 40
+DEDUPLICATION_PRESCREEN_ANCHOR_EVENTS = 6
 DEDUPLICATION_MAX_PASSES = 3
+DEFAULT_AGGREGATION_CATEGORY_BATCH_CONCURRENCY = 8
+DEFAULT_DEDUPLICATION_CONCURRENCY = 16
+FORCE_RESET_AGGREGATION_STATUSES = (
+    "assigned",
+    "filtered_low_impact",
+    "filtered_low_signal_content",
+    "filtered_non_news",
+    "filtered_standalone_opinion",
+    "filtered_video_or_carousel",
+)
 MAX_CATEGORY_GROUP_ARTICLES = 50
 NULL_EXISTING_EVENT_ID_VALUES = {"null", "none", "nil", "n/a", "na", "unknown"}
 CATEGORY_GROUPS = [
@@ -128,9 +141,10 @@ AGGREGATION_EXCLUDED_RATIONALE_CODES = {
     "gambling_advice",
     "gambling_content",
     "gallery_page",
-    "impact_capped",
     "index_page",
+    "live_blog",
     "media_transcript",
+    "newsletter_roundup",
     "no_substantive_content",
     "product_advice",
     "product_deal",
@@ -189,6 +203,64 @@ class ArticleForAggregation:
 class AggregationWindow:
     window_start: str
     window_end: str
+
+
+@dataclass(frozen=True)
+class LlmUsageRecord:
+    stage: str
+    prompt_version: str
+    input_tokens: int | None
+    output_tokens: int | None
+
+
+@dataclass(frozen=True)
+class ActiveEventsFilterResult:
+    active_events: list[dict[str, Any]]
+    usage: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CategoryBatchProcessingResult:
+    batch: dict[str, Any]
+    grouping_result: dict[str, Any]
+    scores_by_group_index: dict[int, dict[str, Any]]
+    usage_records: tuple[LlmUsageRecord, ...]
+    group_count: int
+    singleton_count: int
+    multi_article_group_count: int
+    validation_attempts: int
+    elapsed_ms: int | None
+    prompt_tokens: int
+    candidates_tokens: int
+    news_scored: int
+    news_fallback_count: int
+    news_elapsed_ms: int | None
+    news_prompt_tokens: int
+    news_candidates_tokens: int
+
+
+@dataclass(frozen=True)
+class PrescreenChunkResult:
+    chunk_label: str
+    event_count: int
+    pairs: tuple[tuple[str, str], ...]
+    usage: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PrescreenChunkSpec:
+    chunk_label: str
+    chunk: tuple[dict[str, Any], ...]
+    valid_ids: frozenset[str]
+    dynamic_stopwords: frozenset[str]
+
+
+@dataclass(frozen=True)
+class DeduplicationPairDecision:
+    should_merge: bool
+    confidence: float
+    rationale: str
+    usage: dict[str, Any]
 
 
 def load_unprocessed_articles(
@@ -324,6 +396,182 @@ def load_window_articles(
             state.close()
 
 
+def _positive_int_config(value: object, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, parsed)
+
+
+def _usage_record(stage: str, prompt_version: str, usage: dict[str, Any]) -> LlmUsageRecord | None:
+    if not usage:
+        return None
+    return LlmUsageRecord(
+        stage=stage,
+        prompt_version=prompt_version,
+        input_tokens=usage.get("promptTokenCount"),
+        output_tokens=usage.get("candidatesTokenCount"),
+    )
+
+
+def _record_llm_usage_records(
+    state: StateDB,
+    *,
+    run_id: str,
+    model: str,
+    usage_records: Sequence[LlmUsageRecord],
+) -> None:
+    for record in usage_records:
+        state.record_llm_usage(
+            run_id=run_id,
+            stage=record.stage,
+            model=model,
+            prompt_version=record.prompt_version,
+            input_tokens=record.input_tokens,
+            output_tokens=record.output_tokens,
+        )
+
+
+def _completed_digest_article_time_bounds(
+    state: StateDB,
+    *,
+    published_at_or_after: str,
+) -> tuple[str, str] | None:
+    row = state.conn.execute(
+        """
+        SELECT MIN(published_at) AS min_published_at, MAX(published_at) AS max_published_at
+        FROM articles
+        WHERE published_at IS NOT NULL
+          AND published_at >= ?
+          AND digest_status = 'completed'
+        """,
+        (published_at_or_after,),
+    ).fetchone()
+    if not row or not row["min_published_at"] or not row["max_published_at"]:
+        return None
+    return row["min_published_at"], row["max_published_at"]
+
+
+def _event_path_from_state_row(event_id: str, event_path: str | None) -> Path:
+    if event_path:
+        path = Path(event_path)
+        if path.is_absolute():
+            return path
+        return PROJECT_ROOT / path
+    return EVENT_DIR / f"{event_id}.json"
+
+
+def _force_reset_aggregation_range(
+    state: StateDB,
+    *,
+    range_start: str,
+    range_end: str,
+) -> dict[str, int]:
+    _validate_iso_timestamp(range_start)
+    _validate_iso_timestamp(range_end)
+    if _parse_iso_timestamp(range_end) <= _parse_iso_timestamp(range_start):
+        raise ValueError("range_end must be after range_start")
+
+    affected_event_rows = state.conn.execute(
+        """
+        SELECT DISTINCT a.event_id AS event_id, e.event_path AS event_path
+        FROM articles a
+        LEFT JOIN events e ON e.event_id = a.event_id
+        WHERE a.event_id IS NOT NULL
+          AND a.published_at >= ?
+          AND a.published_at < ?
+        ORDER BY a.event_id
+        """,
+        (range_start, range_end),
+    ).fetchall()
+
+    event_updates: list[tuple[str, Path, list[str]]] = []
+    event_deletes: list[tuple[str, Path]] = []
+    for row in affected_event_rows:
+        event_id = row["event_id"]
+        path = _event_path_from_state_row(event_id, row["event_path"])
+        remaining_rows = state.conn.execute(
+            """
+            SELECT article_id
+            FROM articles
+            WHERE event_id = ?
+              AND (published_at IS NULL OR published_at < ? OR published_at >= ?)
+            ORDER BY published_at, article_id
+            """,
+            (event_id, range_start, range_end),
+        ).fetchall()
+        remaining_article_ids = [remaining_row["article_id"] for remaining_row in remaining_rows]
+        if remaining_article_ids:
+            event_updates.append((event_id, path, remaining_article_ids))
+        else:
+            event_deletes.append((event_id, path))
+
+    status_placeholders = ",".join("?" for _ in FORCE_RESET_AGGREGATION_STATUSES)
+    reset_params: list[Any] = [
+        range_start,
+        range_end,
+        *FORCE_RESET_AGGREGATION_STATUSES,
+    ]
+
+    with state.conn:
+        for event_id, _path, remaining_article_ids in event_updates:
+            state.conn.execute(
+                """
+                UPDATE events
+                SET article_count = ?
+                WHERE event_id = ?
+                """,
+                (len(remaining_article_ids), event_id),
+            )
+        for event_id, _path in event_deletes:
+            state.conn.execute("DELETE FROM events WHERE event_id = ?", (event_id,))
+
+        cursor = state.conn.execute(
+            f"""
+            UPDATE articles
+            SET event_id = NULL,
+                aggregation_status = 'pending',
+                aggregation_reason = NULL,
+                is_filtered = 0
+            WHERE published_at >= ?
+              AND published_at < ?
+              AND (
+                event_id IS NOT NULL
+                OR (
+                  digest_status = 'completed'
+                  AND aggregation_status IN ({status_placeholders})
+                )
+              )
+            """,
+            reset_params,
+        )
+        articles_reset = cursor.rowcount or 0
+
+    for _event_id, path, remaining_article_ids in event_updates:
+        try:
+            event_payload = _read_event(path)
+            if not event_payload:
+                continue
+            event_payload["article_ids"] = sorted(remaining_article_ids)
+            event_payload["article_count"] = len(remaining_article_ids)
+            atomic_write_json(path, event_payload)
+        except Exception:
+            pass
+
+    for _event_id, path in event_deletes:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    return {
+        "articles_reset": articles_reset,
+        "events_deleted": len(event_deletes),
+        "events_trimmed": len(event_updates),
+    }
+
+
 def run_grouping_experiment(
     *,
     limit: int | None = 40,
@@ -389,6 +637,7 @@ def plan_sliding_windows(
     db: StateDB | None = None,
     rerun_latest_completed: bool = True,
     force: bool = False,
+    sparse: bool = False,
 ) -> list[AggregationWindow]:
     if window_hours <= 0:
         raise ValueError("window_hours must be positive")
@@ -407,6 +656,21 @@ def plan_sliding_windows(
     state = db or StateDB()
     try:
         latest_completed = state.latest_completed_aggregation_window() if rerun_latest_completed else None
+        sparse_window_starts: set[str] | None = None
+        if sparse and not force:
+            sparse_window_starts = {
+                _format_iso_timestamp(_floor_utc_interval(_parse_iso_timestamp(published_at), step_hours))
+                for published_at in state.unassigned_article_published_times(range_start, range_end)
+            }
+            sparse_window_starts = {
+                window_start
+                for window_start in sparse_window_starts
+                if start_dt <= _parse_iso_timestamp(window_start) < end_dt
+            }
+            if latest_completed is not None:
+                latest_start_dt = _parse_iso_timestamp(latest_completed[0])
+                if start_dt <= latest_start_dt < end_dt:
+                    sparse_window_starts.add(latest_completed[0])
 
         def should_skip_window(window: AggregationWindow) -> bool:
             if force:
@@ -429,6 +693,8 @@ def plan_sliding_windows(
                 window_end=_format_iso_timestamp(window_end_dt),
             )
             current += step_delta
+            if sparse_window_starts is not None and window.window_start not in sparse_window_starts:
+                continue
             if not should_skip_window(window):
                 windows.append(window)
 
@@ -436,6 +702,159 @@ def plan_sliding_windows(
     finally:
         if close_db:
             state.close()
+
+
+def _process_category_batch_llm(
+    *,
+    batch: dict[str, Any],
+    active_rows_by_category: dict[str, list[dict[str, Any]]],
+    client: JsonGenerator,
+    feeds_by_source: dict[str, Any],
+) -> CategoryBatchProcessingResult:
+    group_articles = batch["articles"]
+    usage_records: list[LlmUsageRecord] = []
+
+    # Tightened candidate filter: active events need a real headline
+    # cohesion edge with at least one article, not just a broad shared beat.
+    candidates: list[dict[str, Any]] = []
+    for cat in _candidate_categories_for_group(batch["categories"]):
+        for ev in active_rows_by_category.get(cat, []):
+            if any(_headlines_have_cohesion_edge(ev["title"], art.headline) for art in group_articles):
+                candidates.append(ev)
+
+    active_filter = _filter_active_events_with_llm_result(
+        articles=group_articles,
+        active_events=candidates,
+        client=client,
+    )
+    if record := _usage_record(
+        "active_events_filter",
+        "active-events-filter-v1",
+        active_filter.usage,
+    ):
+        usage_records.append(record)
+
+    result = group_articles_with_gemini(
+        group_articles,
+        mode="titles_summaries",
+        client=client,
+        active_events=active_filter.active_events,
+    )
+    if record := _usage_record("aggregation", AGGREGATION_PROMPT_VERSION, result.get("usage") or {}):
+        usage_records.append(record)
+
+    prompt_tokens = int((result.get("usage") or {}).get("promptTokenCount") or 0)
+    candidates_tokens = int((result.get("usage") or {}).get("candidatesTokenCount") or 0)
+
+    groups_to_score = []
+    scores_by_group_index: dict[int, dict[str, Any]] = {}
+    for group in result["groups"]:
+        grp_arts = [group_articles[idx] for idx in group["article_indexes"]]
+        event_id = _event_id_for_group(grp_arts)
+        reused_score = None
+        if event_id:
+            event_path = EVENT_DIR / f"{event_id}.json"
+            existing = _read_event(event_path)
+            if existing and existing.get("newsworthiness"):
+                existing_ids = set(existing.get("article_ids", []))
+                current_ids = {art.article_id for art in grp_arts}
+                if existing_ids == current_ids:
+                    reused_score = existing["newsworthiness"]
+        if reused_score:
+            scores_by_group_index[int(group["group_index"])] = reused_score
+        else:
+            groups_to_score.append(group)
+
+    if groups_to_score:
+        scores_result = score_groups_newsworthiness(
+            articles=group_articles,
+            groups=groups_to_score,
+            client=client,
+            feeds_by_source=feeds_by_source,
+        )
+        if record := _usage_record(
+            "newsworthiness",
+            NEWSWORTHINESS_PROMPT_VERSION,
+            scores_result.get("usage") or {},
+        ):
+            usage_records.append(record)
+        api_scores = scores_result["scores_by_group_index"]
+        fallback_count = scores_result["fallback_count"]
+        news_elapsed_ms = scores_result.get("elapsed_ms")
+        news_prompt_tokens = int((scores_result.get("usage") or {}).get("promptTokenCount") or 0)
+        news_candidates_tokens = int((scores_result.get("usage") or {}).get("candidatesTokenCount") or 0)
+    else:
+        api_scores = {}
+        fallback_count = 0
+        news_elapsed_ms = 0
+        news_prompt_tokens = 0
+        news_candidates_tokens = 0
+
+    merged_scores = {**scores_by_group_index, **api_scores}
+    return CategoryBatchProcessingResult(
+        batch=batch,
+        grouping_result=result,
+        scores_by_group_index=merged_scores,
+        usage_records=tuple(usage_records),
+        group_count=result["group_count"],
+        singleton_count=result["singleton_count"],
+        multi_article_group_count=result["multi_article_group_count"],
+        validation_attempts=result["validation_attempts"],
+        elapsed_ms=result.get("elapsed_ms"),
+        prompt_tokens=prompt_tokens,
+        candidates_tokens=candidates_tokens,
+        news_scored=len(merged_scores),
+        news_fallback_count=fallback_count,
+        news_elapsed_ms=news_elapsed_ms,
+        news_prompt_tokens=news_prompt_tokens,
+        news_candidates_tokens=news_candidates_tokens,
+    )
+
+
+def _process_category_batches_llm(
+    *,
+    category_batches: Sequence[dict[str, Any]],
+    active_rows_by_category: dict[str, list[dict[str, Any]]],
+    client: JsonGenerator,
+    feeds_by_source: dict[str, Any],
+    concurrency: int,
+) -> tuple[list[CategoryBatchProcessingResult | None], list[BaseException | None]]:
+    results: list[CategoryBatchProcessingResult | None] = [None] * len(category_batches)
+    errors: list[BaseException | None] = [None] * len(category_batches)
+    if not category_batches:
+        return results, errors
+    worker_count = min(max(1, concurrency), len(category_batches))
+    if worker_count == 1:
+        for index, batch in enumerate(category_batches):
+            try:
+                results[index] = _process_category_batch_llm(
+                    batch=batch,
+                    active_rows_by_category=active_rows_by_category,
+                    client=client,
+                    feeds_by_source=feeds_by_source,
+                )
+            except BaseException as exc:
+                errors[index] = exc
+        return results, errors
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(
+                _process_category_batch_llm,
+                batch=batch,
+                active_rows_by_category=active_rows_by_category,
+                client=client,
+                feeds_by_source=feeds_by_source,
+            ): index
+            for index, batch in enumerate(category_batches)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            try:
+                results[index] = future.result()
+            except BaseException as exc:
+                errors[index] = exc
+    return results, errors
 
 
 def aggregate_once(
@@ -447,6 +866,7 @@ def aggregate_once(
     client: JsonGenerator | None = None,
     progress: Callable[[str], None] | None = None,
     force: bool = False,
+    acquire_lock: bool = True,
 ) -> dict[str, Any]:
     if (range_start is None) != (range_end is None):
         raise ValueError("range_start and range_end must be provided together or both omitted")
@@ -455,6 +875,14 @@ def aggregate_once(
     step_hours = int(config.aggregation.get("window_step_hours", window_hours))
     overlap_hours = int(config.aggregation.get("window_overlap_hours", 1))
     min_category_impact = float(config.aggregation.get("min_category_impact", 0.25))
+    category_batch_concurrency = _positive_int_config(
+        config.aggregation.get("category_batch_concurrency"),
+        DEFAULT_AGGREGATION_CATEGORY_BATCH_CONCURRENCY,
+    )
+    deduplication_concurrency = _positive_int_config(
+        config.aggregation.get("deduplication_concurrency"),
+        DEFAULT_DEDUPLICATION_CONCURRENCY,
+    )
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"aggregation-{uuid.uuid4().hex}"
     state = StateDB()
@@ -475,11 +903,17 @@ def aggregate_once(
         "window_hours": window_hours,
         "window_overlap_hours": overlap_hours,
         "window_step_hours": step_hours,
+        "category_batch_concurrency": category_batch_concurrency,
+        "deduplication_concurrency": deduplication_concurrency,
         "dry_run": dry_run,
         "force": force,
+        "force_articles_reset": 0,
+        "force_events_deleted": 0,
+        "force_events_trimmed": 0,
     }
     try:
-        with PipelineLock(LOCK_PATH, lock_timeout, run_id=run_id):
+        lock_context = PipelineLock(LOCK_PATH, lock_timeout, run_id=run_id) if acquire_lock else nullcontext()
+        with lock_context:
             recovered = 0 if dry_run else state.fail_stale_running_aggregation_windows()
             if recovered and progress:
                 progress(f"aggregate: marked {recovered} stale running window(s) as failed")
@@ -492,9 +926,6 @@ def aggregate_once(
             status = "success"
             try:
                 if range_start is None:
-                    bounds = state.article_time_bounds(unassigned_only=True)
-                    if not bounds:
-                        return stats
                     from datetime import time
 
                     from pipeline.util import utc_now
@@ -502,11 +933,24 @@ def aggregate_once(
                     ref = utc_now()
                     today_start = datetime.combine(ref.date(), time.min, tzinfo=UTC)
                     limit_dt = today_start - timedelta(days=1)
+                    if force:
+                        bounds = _completed_digest_article_time_bounds(
+                            state,
+                            published_at_or_after=_format_iso_timestamp(limit_dt),
+                        )
+                        if not bounds:
+                            if progress:
+                                progress("aggregate: no completed digest articles in the current and previous day")
+                            return stats
+                    else:
+                        bounds = state.article_time_bounds(unassigned_only=True)
+                        if not bounds:
+                            return stats
 
                     bounds_start = _parse_iso_timestamp(bounds[0])
                     bounds_end = _parse_iso_timestamp(bounds[1])
 
-                    if bounds_end < limit_dt:
+                    if not force and bounds_end < limit_dt:
                         if progress:
                             progress("aggregate: no unassigned articles in the current and previous day")
                         return stats
@@ -527,12 +971,32 @@ def aggregate_once(
                     overlap_hours=overlap_hours,
                     db=state,
                     force=force,
+                    sparse=not force,
                 )
                 if limit_windows is not None:
                     windows = windows[:limit_windows]
                 stats["windows_planned"] = len(windows)
                 if progress:
                     progress(f"aggregate: planned {len(windows)} windows")
+
+                if force and windows and not dry_run:
+                    reset_start = windows[0].window_start
+                    reset_end = max(windows, key=lambda w: _parse_iso_timestamp(w.window_end)).window_end
+                    reset_stats = _force_reset_aggregation_range(
+                        state,
+                        range_start=reset_start,
+                        range_end=reset_end,
+                    )
+                    stats["force_articles_reset"] = reset_stats["articles_reset"]
+                    stats["force_events_deleted"] = reset_stats["events_deleted"]
+                    stats["force_events_trimmed"] = reset_stats["events_trimmed"]
+                    if progress:
+                        progress(
+                            "aggregate: force reset "
+                            f"{reset_stats['articles_reset']} article assignment/filter state(s), "
+                            f"deleted {reset_stats['events_deleted']} event(s), "
+                            f"trimmed {reset_stats['events_trimmed']} event(s)"
+                        )
 
                 for window in windows:
                     if progress:
@@ -607,129 +1071,20 @@ def aggregate_once(
                         non_empty_group_count = len(category_batches)
                         processed_articles_count = 0
 
-                        for batch in category_batches:
+                        batch_results, batch_errors = _process_category_batches_llm(
+                            category_batches=category_batches,
+                            active_rows_by_category=active_rows_by_category,
+                            client=generator,
+                            feeds_by_source=feeds_by_source,
+                            concurrency=category_batch_concurrency,
+                        )
+
+                        for batch, batch_result, batch_error in zip(
+                            category_batches, batch_results, batch_errors, strict=True
+                        ):
                             group_articles = batch["articles"]
-
-                            try:
-                                # Tightened candidate filter: active events need a real headline
-                                # cohesion edge with at least one article, not just a broad shared beat.
-                                candidates: list[dict[str, Any]] = []
-                                for cat in _candidate_categories_for_group(batch["categories"]):
-                                    for ev in active_rows_by_category.get(cat, []):
-                                        if any(
-                                            _headlines_have_cohesion_edge(ev["title"], art.headline)
-                                            for art in group_articles
-                                        ):
-                                            candidates.append(ev)
-
-                                active_events = filter_active_events_with_llm(
-                                    articles=group_articles,
-                                    active_events=candidates,
-                                    client=generator,
-                                    run_id=run_id,
-                                    state=state if not dry_run else None,
-                                )
-
-                                result = group_articles_with_gemini(
-                                    group_articles,
-                                    mode="titles_summaries",
-                                    client=generator,
-                                    active_events=active_events,
-                                )
-                                if not dry_run and result.get("usage"):
-                                    state.record_llm_usage(
-                                        run_id=run_id,
-                                        stage="aggregation",
-                                        model=generator.model,
-                                        prompt_version=AGGREGATION_PROMPT_VERSION,
-                                        input_tokens=result["usage"].get("promptTokenCount"),
-                                        output_tokens=result["usage"].get("candidatesTokenCount"),
-                                    )
-                                    if result["usage"].get("promptTokenCount"):
-                                        window_prompt_tokens += result["usage"]["promptTokenCount"]
-                                    if result["usage"].get("candidatesTokenCount"):
-                                        window_candidates_tokens += result["usage"]["candidatesTokenCount"]
-
-                                window_group_count += result["group_count"]
-                                window_singleton_count += result["singleton_count"]
-                                window_multi_article_group_count += result["multi_article_group_count"]
-                                window_validation_attempts += result["validation_attempts"]
-                                val_elapsed = result.get("elapsed_ms")
-                                if val_elapsed is not None:
-                                    window_elapsed_ms += val_elapsed
-
-                                groups_to_score = []
-                                scores_by_group_index: dict[int, dict[str, Any]] = {}
-                                for group in result["groups"]:
-                                    grp_arts = [group_articles[idx] for idx in group["article_indexes"]]
-                                    event_id = _event_id_for_group(grp_arts)
-                                    reused_score = None
-                                    if event_id:
-                                        event_path = EVENT_DIR / f"{event_id}.json"
-                                        existing = _read_event(event_path)
-                                        if existing and existing.get("newsworthiness"):
-                                            existing_ids = set(existing.get("article_ids", []))
-                                            current_ids = set(art.article_id for art in grp_arts)
-                                            if existing_ids == current_ids:
-                                                reused_score = existing["newsworthiness"]
-                                    if reused_score:
-                                        scores_by_group_index[int(group["group_index"])] = reused_score
-                                    else:
-                                        groups_to_score.append(group)
-
-                                if groups_to_score:
-                                    scores_result = score_groups_newsworthiness(
-                                        articles=group_articles,
-                                        groups=groups_to_score,
-                                        client=generator,
-                                        feeds_by_source=feeds_by_source,
-                                    )
-                                    if not dry_run and scores_result.get("usage"):
-                                        state.record_llm_usage(
-                                            run_id=run_id,
-                                            stage="newsworthiness",
-                                            model=generator.model,
-                                            prompt_version=NEWSWORTHINESS_PROMPT_VERSION,
-                                            input_tokens=scores_result["usage"].get("promptTokenCount"),
-                                            output_tokens=scores_result["usage"].get("candidatesTokenCount"),
-                                        )
-                                        p_tokens = scores_result["usage"].get("promptTokenCount")
-                                        if p_tokens:
-                                            window_news_prompt_tokens += p_tokens
-                                        c_tokens = scores_result["usage"].get("candidatesTokenCount")
-                                        if c_tokens:
-                                            window_news_candidates_tokens += c_tokens
-                                    api_scores = scores_result["scores_by_group_index"]
-                                    fallback_count = scores_result["fallback_count"]
-                                    elapsed_ms = scores_result.get("elapsed_ms")
-                                else:
-                                    api_scores = {}
-                                    fallback_count = 0
-                                    elapsed_ms = 0
-
-                                merged_scores = {**scores_by_group_index, **api_scores}
-                                window_news_scored += len(merged_scores)
-                                window_news_fallback_count += fallback_count
-                                if elapsed_ms is not None:
-                                    window_news_elapsed_ms += elapsed_ms
-
-                                if not dry_run:
-                                    applied = apply_grouping_result(
-                                        articles=group_articles,
-                                        groups=result["groups"],
-                                        state=state,
-                                        scores_by_group_index=merged_scores,
-                                        article_classifications=result.get("article_classifications"),
-                                        feeds_by_source=feeds_by_source,
-                                        run_id=run_id,
-                                        progress=progress,
-                                    )
-                                    window_events_created += applied["events_created"]
-                                    window_events_updated += applied["events_updated"]
-                                    window_article_assignments += applied["article_assignments"]
-
-                                processed_articles_count += len(group_articles)
-                            except Exception as group_exc:
+                            if batch_error is not None:
+                                group_exc = batch_error
                                 group_errors.append({
                                     "category_group": batch["name"],
                                     "article_count": len(group_articles),
@@ -752,6 +1107,49 @@ def aggregate_once(
                                         )
                                     except Exception:
                                         pass
+                                continue
+
+                            assert batch_result is not None
+                            result = batch_result.grouping_result
+                            if not dry_run:
+                                _record_llm_usage_records(
+                                    state,
+                                    run_id=run_id,
+                                    model=generator.model,
+                                    usage_records=batch_result.usage_records,
+                                )
+
+                            window_group_count += batch_result.group_count
+                            window_singleton_count += batch_result.singleton_count
+                            window_multi_article_group_count += batch_result.multi_article_group_count
+                            window_validation_attempts += batch_result.validation_attempts
+                            if batch_result.elapsed_ms is not None:
+                                window_elapsed_ms += batch_result.elapsed_ms
+                            window_prompt_tokens += batch_result.prompt_tokens
+                            window_candidates_tokens += batch_result.candidates_tokens
+                            window_news_scored += batch_result.news_scored
+                            window_news_fallback_count += batch_result.news_fallback_count
+                            if batch_result.news_elapsed_ms is not None:
+                                window_news_elapsed_ms += batch_result.news_elapsed_ms
+                            window_news_prompt_tokens += batch_result.news_prompt_tokens
+                            window_news_candidates_tokens += batch_result.news_candidates_tokens
+
+                            if not dry_run:
+                                applied = apply_grouping_result(
+                                    articles=group_articles,
+                                    groups=result["groups"],
+                                    state=state,
+                                    scores_by_group_index=batch_result.scores_by_group_index,
+                                    article_classifications=result.get("article_classifications"),
+                                    feeds_by_source=feeds_by_source,
+                                    run_id=run_id,
+                                    progress=progress,
+                                )
+                                window_events_created += applied["events_created"]
+                                window_events_updated += applied["events_updated"]
+                                window_article_assignments += applied["article_assignments"]
+
+                            processed_articles_count += len(group_articles)
 
                         stats["articles_seen"] += processed_articles_count
                         stats["groups_seen"] += window_group_count
@@ -869,6 +1267,7 @@ def aggregate_once(
                             feeds_by_source=feeds_by_source,
                             progress=progress,
                             run_id=run_id,
+                            concurrency=deduplication_concurrency,
                         )
                     except Exception as exc:
                         if progress:
@@ -1264,9 +1663,8 @@ def validate_grouping_response(
         existing_event_id = _normalize_existing_event_id(raw_group.get("existing_event_id"))
         group_data = {"article_indexes": sorted(cleaned)}
         if existing_event_id:
-            if valid_existing_event_ids is not None and existing_event_id not in valid_existing_event_ids:
-                raise ValueError(f"existing_event_id was not offered in active events: {existing_event_id}")
-            group_data["existing_event_id"] = existing_event_id
+            if valid_existing_event_ids is None or existing_event_id in valid_existing_event_ids:
+                group_data["existing_event_id"] = existing_event_id
         groups.append(group_data)
 
     missing = sorted(set(range(article_count)) - seen)
@@ -1466,8 +1864,31 @@ def filter_active_events_with_llm(
     run_id: str | None = None,
     state: StateDB | None = None,
 ) -> list[dict[str, Any]]:
+    result = _filter_active_events_with_llm_result(
+        articles=articles,
+        active_events=active_events,
+        client=client,
+    )
+    if state and run_id and result.usage:
+        state.record_llm_usage(
+            run_id=run_id,
+            stage="active_events_filter",
+            model=client.model,
+            prompt_version="active-events-filter-v1",
+            input_tokens=result.usage.get("promptTokenCount"),
+            output_tokens=result.usage.get("candidatesTokenCount"),
+        )
+    return result.active_events
+
+
+def _filter_active_events_with_llm_result(
+    *,
+    articles: Sequence[ArticleForAggregation],
+    active_events: Sequence[dict[str, Any]],
+    client: JsonGenerator,
+) -> ActiveEventsFilterResult:
     if not articles or not active_events:
-        return []
+        return ActiveEventsFilterResult(active_events=[], usage={})
 
     prompt = _build_active_events_filter_prompt(articles, active_events)
     schema = _active_events_filter_response_schema()
@@ -1482,22 +1903,16 @@ def filter_active_events_with_llm(
             response_schema=schema,
             temperature=0,
         )
-        if state and run_id and result.usage:
-            state.record_llm_usage(
-                run_id=run_id,
-                stage="active_events_filter",
-                model=client.model,
-                prompt_version="active-events-filter-v1",
-                input_tokens=result.usage.get("promptTokenCount"),
-                output_tokens=result.usage.get("candidatesTokenCount"),
-            )
         matched_ids = set(result.payload.get("matched_event_ids", []))
-        return [ev for ev in active_events if ev["event_id"] in matched_ids]
+        return ActiveEventsFilterResult(
+            active_events=[ev for ev in active_events if ev["event_id"] in matched_ids],
+            usage=result.usage,
+        )
     except Exception:
         # On LLM error, skip proactive matching for this group rather than flooding the
         # grouping prompt with the full unfiltered candidate list. Post-aggregation
         # deduplication will still catch any cross-window duplicates.
-        return []
+        return ActiveEventsFilterResult(active_events=[], usage={})
 
 
 def _build_active_events_filter_prompt(
@@ -2180,6 +2595,7 @@ _HEADLINE_COHESION_GENERIC_WORDS = {
     "story",
     "warning",
     "warnings",
+    "war",
     "weekend",
 }
 _HEADLINE_FORMAT_PREFIX_RE = re.compile(
@@ -2401,19 +2817,40 @@ def merge_events(
 
 
 def _load_event_articles_summary(event_id: str, state: StateDB) -> list[dict[str, str]]:
+    return _load_events_articles_summary({event_id}, state).get(event_id, [])
+
+
+def _load_events_articles_summary(
+    event_ids: set[str],
+    state: StateDB,
+) -> dict[str, list[dict[str, str]]]:
+    if not event_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in event_ids)
     rows = state.conn.execute(
-        "SELECT headline, summary, article_path FROM articles WHERE event_id = ? AND is_filtered = 0",
-        (event_id,),
+        f"""
+        SELECT event_id, headline, summary, article_path
+        FROM articles
+        WHERE event_id IN ({placeholders})
+          AND is_filtered = 0
+        ORDER BY event_id, published_at, article_id
+        """,
+        tuple(sorted(event_ids)),
     ).fetchall()
-    summaries = []
+    summaries_by_event: dict[str, list[dict[str, str]]] = {}
+    digest_cache: dict[str, dict[str, Any]] = {}
     for row in rows:
-        digest = _load_digest_fields(row["article_path"])
+        digest = digest_cache.get(row["article_path"])
+        if digest is None:
+            digest = _load_digest_fields(row["article_path"])
+            digest_cache[row["article_path"]] = digest
         summary = digest.get("digest_summary") or row["summary"] or ""
-        summaries.append({
+        summaries_by_event.setdefault(row["event_id"], []).append({
             "headline": row["headline"],
             "summary": summary[:300] + "..." if len(summary) > 300 else summary
         })
-    return summaries
+    return summaries_by_event
 
 
 def _build_event_merge_prompt(event1: dict[str, Any], event2: dict[str, Any]) -> str:
@@ -2452,6 +2889,196 @@ def _event_merge_response_schema() -> dict[str, Any]:
         },
         "required": ["should_merge", "confidence", "rationale"],
     }
+
+
+def _evaluate_deduplication_pair(
+    *,
+    client: JsonGenerator,
+    payload1: dict[str, Any],
+    payload2: dict[str, Any],
+) -> DeduplicationPairDecision:
+    result = client.generate_json(
+        system_instruction=(
+            "You are an expert news editor. Determine if two event clusters represent "
+            "the same news event and should be merged."
+        ),
+        prompt=_build_event_merge_prompt(payload1, payload2),
+        response_schema=_event_merge_response_schema(),
+        temperature=0,
+    )
+    should_merge = result.payload.get("should_merge") is True
+    raw_confidence = result.payload.get("confidence")
+    confidence = (
+        float(raw_confidence)
+        if isinstance(raw_confidence, int | float) and not isinstance(raw_confidence, bool)
+        else 0.0
+    )
+    rationale = result.payload.get("rationale", "")
+    return DeduplicationPairDecision(
+        should_merge=should_merge,
+        confidence=confidence,
+        rationale=str(rationale),
+        usage=result.usage,
+    )
+
+
+def _evaluate_and_apply_deduplication_candidates(
+    *,
+    candidates: Sequence[tuple[dict[str, Any], dict[str, Any]]],
+    state: StateDB,
+    client: JsonGenerator,
+    feeds_by_source: dict[str, Any],
+    progress: Callable[[str], None] | None = None,
+    run_id: str | None = None,
+    concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
+) -> int:
+    pending = list(candidates)
+    merges_count = 0
+    worker_count = max(1, concurrency)
+    event_articles_by_id = _load_events_articles_summary(
+        {
+            event["event_id"]
+            for candidate in candidates
+            for event in candidate
+        },
+        state,
+    )
+
+    while pending:
+        round_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        deferred: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        event_ids_in_round: set[str] = set()
+        for e1, e2 in pending:
+            pair_ids = {e1["event_id"], e2["event_id"]}
+            if event_ids_in_round & pair_ids:
+                deferred.append((e1, e2))
+                continue
+            round_candidates.append((e1, e2))
+            event_ids_in_round.update(pair_ids)
+
+        payloads: list[tuple[dict[str, Any], dict[str, Any]] | None] = [None] * len(round_candidates)
+        for index, (e1, e2) in enumerate(round_candidates):
+            if not state.event_exists(e1["event_id"]) or not state.event_exists(e2["event_id"]):
+                continue
+
+            articles1 = event_articles_by_id.get(e1["event_id"], [])
+            articles2 = event_articles_by_id.get(e2["event_id"], [])
+
+            if not articles1 or not articles2:
+                continue
+
+            payloads[index] = (
+                {"event_id": e1["event_id"], "title": e1["title"], "articles": articles1},
+                {"event_id": e2["event_id"], "title": e2["title"], "articles": articles2},
+            )
+
+        decisions: list[DeduplicationPairDecision | None] = [None] * len(round_candidates)
+        errors: list[BaseException | None] = [None] * len(round_candidates)
+        submittable = [(index, payload) for index, payload in enumerate(payloads) if payload is not None]
+        current_workers = min(worker_count, len(submittable))
+        if current_workers <= 1:
+            for index, (payload1, payload2) in submittable:
+                try:
+                    decisions[index] = _evaluate_deduplication_pair(
+                        client=client,
+                        payload1=payload1,
+                        payload2=payload2,
+                    )
+                except BaseException as exc:
+                    errors[index] = exc
+        elif submittable:
+            with ThreadPoolExecutor(max_workers=current_workers) as executor:
+                futures = {
+                    executor.submit(
+                        _evaluate_deduplication_pair,
+                        client=client,
+                        payload1=payload[0],
+                        payload2=payload[1],
+                    ): index
+                    for index, payload in submittable
+                }
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        decisions[index] = future.result()
+                    except BaseException as exc:
+                        errors[index] = exc
+
+        for index, (e1, e2) in enumerate(round_candidates):
+            error = errors[index]
+            if error is not None:
+                if progress:
+                    progress(
+                        f"deduplicate: failed to evaluate pair {e1['event_id']} and {e2['event_id']}: {error}"
+                    )
+                if run_id:
+                    try:
+                        state.record_error(
+                            run_id,
+                            "deduplication",
+                            "event_pair",
+                            f"{e1['event_id']}_{e2['event_id']}",
+                            None,
+                            error if isinstance(error, Exception) else RuntimeError(str(error)),
+                        )
+                    except Exception:
+                        pass
+                continue
+
+            decision = decisions[index]
+            if decision is None:
+                continue
+
+            if run_id and decision.usage:
+                try:
+                    state.record_llm_usage(
+                        run_id=run_id,
+                        stage="deduplication",
+                        model=client.model,
+                        prompt_version="deduplication-v1",
+                        input_tokens=decision.usage.get("promptTokenCount"),
+                        output_tokens=decision.usage.get("candidatesTokenCount"),
+                    )
+                except Exception:
+                    pass
+
+            if decision.should_merge and decision.confidence >= DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD:
+                if not state.event_exists(e1["event_id"]) or not state.event_exists(e2["event_id"]):
+                    continue
+
+                winner = e1
+                loser = e2
+                if e2.get("article_count", 0) > e1.get("article_count", 0):
+                    winner, loser = e2, e1
+                elif e2.get("article_count", 0) == e1.get("article_count", 0):
+                    if e2.get("created_at", "") < e1.get("created_at", ""):
+                        winner, loser = e2, e1
+                    elif e2.get("created_at", "") == e1.get("created_at", ""):
+                        if len(e2["event_id"]) < len(e1["event_id"]):
+                            winner, loser = e2, e1
+
+                winner_id = winner["event_id"]
+                loser_id = loser["event_id"]
+
+                if progress:
+                    progress(
+                        f"deduplicate: merging {loser_id} into {winner_id} "
+                        f"(confidence: {decision.confidence:.2f}; rationale: {decision.rationale})"
+                    )
+
+                merge_events(winner_id, loser_id, state, feeds_by_source)
+                event_articles_by_id[winner_id] = _load_event_articles_summary(winner_id, state)
+                event_articles_by_id.pop(loser_id, None)
+                merges_count += 1
+            elif decision.should_merge and progress:
+                progress(
+                    f"deduplicate: skipped low-confidence merge for {e1['event_id']} and {e2['event_id']} "
+                    f"(confidence: {decision.confidence:.2f})"
+                )
+
+        pending = deferred
+
+    return merges_count
 
 
 def _dynamic_keyword_stopwords(
@@ -2585,6 +3212,211 @@ def _prescreen_response_schema() -> dict[str, Any]:
     }
 
 
+def _run_prescreen_chunk(
+    *,
+    chunk_label: str,
+    chunk: Sequence[dict[str, Any]],
+    valid_ids: set[str],
+    article_headlines_by_event: dict[str, list[str]],
+    dynamic_stopwords: set[str],
+    client: JsonGenerator,
+) -> PrescreenChunkResult:
+    payload = [
+        {
+            "id": event["event_id"],
+            "title": event["title"],
+            "keywords": _filtered_event_keywords(event.get("keywords") or [], dynamic_stopwords),
+            "headlines": list(article_headlines_by_event.get(event["event_id"], []))[
+                :DEDUPLICATION_HEADLINES_PER_EVENT
+            ],
+        }
+        for event in chunk
+    ]
+
+    result = client.generate_json(
+        system_instruction=(
+            "You are an expert news editor screening event clusters for possible "
+            "duplicates. Recall matters more than precision at this stage."
+        ),
+        prompt=_build_prescreen_prompt(payload),
+        response_schema=_prescreen_response_schema(),
+        temperature=0,
+    )
+
+    pairs: list[tuple[str, str]] = []
+    raw_pairs = result.payload.get("candidate_pairs") or []
+    for entry in raw_pairs:
+        if not isinstance(entry, dict):
+            continue
+        a = entry.get("event_a")
+        b = entry.get("event_b")
+        if not isinstance(a, str) or not isinstance(b, str):
+            continue
+        if a == b or a not in valid_ids or b not in valid_ids:
+            continue
+        pairs.append((a, b))
+    return PrescreenChunkResult(
+        chunk_label=chunk_label,
+        event_count=len(chunk),
+        pairs=tuple(pairs),
+        usage=result.usage,
+    )
+
+
+def _prescreen_chunk_specs_for_events(
+    events: Sequence[dict[str, Any]],
+    dynamic_stopwords: set[str],
+    *,
+    batch_label: str,
+    anchor_count: int = DEDUPLICATION_PRESCREEN_ANCHOR_EVENTS,
+) -> list[PrescreenChunkSpec]:
+    if len(events) < 2:
+        return []
+
+    valid_ids = frozenset(event["event_id"] for event in events)
+    chunk_size = DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH
+    if len(events) <= chunk_size:
+        chunks = [tuple(events)]
+    else:
+        anchors = _prescreen_anchor_events(events, anchor_count=anchor_count)
+        anchor_ids = {event["event_id"] for event in anchors}
+        non_anchor_events = [event for event in events if event["event_id"] not in anchor_ids]
+        non_anchor_chunk_size = max(1, chunk_size - len(anchors))
+        chunks = []
+        for start in range(0, len(non_anchor_events), non_anchor_chunk_size):
+            chunk = tuple([*anchors, *non_anchor_events[start : start + non_anchor_chunk_size]])
+            chunks.append(chunk)
+
+    return [
+        PrescreenChunkSpec(
+            chunk_label=batch_label if len(chunks) == 1 else f"{batch_label}-{chunk_index}",
+            chunk=chunk,
+            valid_ids=valid_ids,
+            dynamic_stopwords=frozenset(dynamic_stopwords),
+        )
+        for chunk_index, chunk in enumerate(chunks, start=1)
+    ]
+
+
+def _prescreen_anchor_events(
+    events: Sequence[dict[str, Any]],
+    *,
+    anchor_count: int = DEDUPLICATION_PRESCREEN_ANCHOR_EVENTS,
+) -> list[dict[str, Any]]:
+    if anchor_count <= 0:
+        return []
+    return sorted(
+        events,
+        key=lambda event: (
+            -(int(event.get("article_count") or 0)),
+            event.get("created_at") or "",
+            event["event_id"],
+        ),
+    )[: min(anchor_count, len(events) - 1)]
+
+
+def _run_prescreen_chunk_spec(
+    *,
+    spec: PrescreenChunkSpec,
+    article_headlines_by_event: dict[str, list[str]],
+    client: JsonGenerator,
+) -> PrescreenChunkResult:
+    return _run_prescreen_chunk(
+        chunk_label=spec.chunk_label,
+        chunk=spec.chunk,
+        valid_ids=set(spec.valid_ids),
+        article_headlines_by_event=article_headlines_by_event,
+        dynamic_stopwords=set(spec.dynamic_stopwords),
+        client=client,
+    )
+
+
+def _execute_prescreen_chunk_specs(
+    specs: Sequence[PrescreenChunkSpec],
+    article_headlines_by_event: dict[str, list[str]],
+    *,
+    client: JsonGenerator,
+    progress: Callable[[str], None] | None = None,
+    state: StateDB | None = None,
+    run_id: str | None = None,
+    concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
+) -> list[tuple[str, str]]:
+    if not specs:
+        return []
+
+    collected: list[tuple[str, str]] = []
+
+    def record_success(result: PrescreenChunkResult) -> None:
+        if state is not None and run_id and result.usage:
+            try:
+                state.record_llm_usage(
+                    run_id=run_id,
+                    stage="deduplication_prescreen",
+                    model=client.model,
+                    prompt_version=DEDUPLICATION_PRESCREEN_PROMPT_VERSION,
+                    input_tokens=result.usage.get("promptTokenCount"),
+                    output_tokens=result.usage.get("candidatesTokenCount"),
+                )
+            except Exception:
+                pass
+        collected.extend(result.pairs)
+        if progress:
+            progress(
+                f"deduplicate: prescreen[{result.chunk_label}] over {result.event_count} events returned "
+                f"{len(result.pairs)} candidate pair(s)"
+            )
+
+    def record_error(spec: PrescreenChunkSpec, exc: BaseException) -> None:
+        if progress:
+            progress(f"deduplicate: prescreen[{spec.chunk_label}] failed: {exc}")
+        if state is not None and run_id:
+            try:
+                state.record_error(
+                    run_id,
+                    "deduplication_prescreen",
+                    "batch",
+                    spec.chunk_label,
+                    None,
+                    exc if isinstance(exc, Exception) else RuntimeError(str(exc)),
+                )
+            except Exception:
+                pass
+
+    worker_count = min(max(1, concurrency), len(specs))
+    if worker_count == 1:
+        for spec in specs:
+            try:
+                record_success(
+                    _run_prescreen_chunk_spec(
+                        spec=spec,
+                        article_headlines_by_event=article_headlines_by_event,
+                        client=client,
+                    )
+                )
+            except BaseException as exc:
+                record_error(spec, exc)
+        return collected
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(
+                _run_prescreen_chunk_spec,
+                spec=spec,
+                article_headlines_by_event=article_headlines_by_event,
+                client=client,
+            ): spec
+            for spec in specs
+        }
+        for future in as_completed(futures):
+            spec = futures[future]
+            try:
+                record_success(future.result())
+            except BaseException as exc:
+                record_error(spec, exc)
+
+    return collected
+
+
 def _llm_prescreen_candidates(
     events: Sequence[dict[str, Any]],
     article_headlines_by_event: dict[str, list[str]],
@@ -2595,93 +3427,21 @@ def _llm_prescreen_candidates(
     progress: Callable[[str], None] | None = None,
     state: StateDB | None = None,
     run_id: str | None = None,
+    concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
 ) -> list[tuple[str, str]]:
     """Run a loose LLM pre-screen over a single category-group batch of events.
     Returns event_id pairs the LLM thinks MIGHT be duplicates. The per-pair merge LLM
     is the strict filter that prevents over-merging."""
-    if len(events) < 2:
-        return []
-
-    valid_ids = {event["event_id"] for event in events}
-    chunks: list[list[dict[str, Any]]] = []
-    for start in range(0, len(events), DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH):
-        chunks.append(list(events[start : start + DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH]))
-
-    collected: list[tuple[str, str]] = []
-    for chunk_index, chunk in enumerate(chunks, start=1):
-        chunk_label = batch_label if len(chunks) == 1 else f"{batch_label}-{chunk_index}"
-        payload = [
-            {
-                "id": event["event_id"],
-                "title": event["title"],
-                "keywords": _filtered_event_keywords(
-                    event.get("keywords") or [], dynamic_stopwords
-                ),
-                "headlines": list(
-                    article_headlines_by_event.get(event["event_id"], [])
-                )[:DEDUPLICATION_HEADLINES_PER_EVENT],
-            }
-            for event in chunk
-        ]
-
-        try:
-            result = client.generate_json(
-                system_instruction=(
-                    "You are an expert news editor screening event clusters for possible "
-                    "duplicates. Recall matters more than precision at this stage."
-                ),
-                prompt=_build_prescreen_prompt(payload),
-                response_schema=_prescreen_response_schema(),
-                temperature=0,
-            )
-            if state is not None and run_id:
-                try:
-                    state.record_llm_usage(
-                        run_id=run_id,
-                        stage="deduplication_prescreen",
-                        model=client.model,
-                        prompt_version=DEDUPLICATION_PRESCREEN_PROMPT_VERSION,
-                        input_tokens=result.usage.get("promptTokenCount"),
-                        output_tokens=result.usage.get("candidatesTokenCount"),
-                    )
-                except Exception:
-                    pass
-
-            raw_pairs = result.payload.get("candidate_pairs") or []
-            kept = 0
-            for entry in raw_pairs:
-                if not isinstance(entry, dict):
-                    continue
-                a = entry.get("event_a")
-                b = entry.get("event_b")
-                if not isinstance(a, str) or not isinstance(b, str):
-                    continue
-                if a == b or a not in valid_ids or b not in valid_ids:
-                    continue
-                collected.append((a, b))
-                kept += 1
-            if progress:
-                progress(
-                    f"deduplicate: prescreen[{chunk_label}] over {len(chunk)} events returned "
-                    f"{kept} candidate pair(s)"
-                )
-        except Exception as exc:
-            if progress:
-                progress(f"deduplicate: prescreen[{chunk_label}] failed: {exc}")
-            if state is not None and run_id:
-                try:
-                    state.record_error(
-                        run_id,
-                        "deduplication_prescreen",
-                        "batch",
-                        chunk_label,
-                        None,
-                        exc,
-                    )
-                except Exception:
-                    pass
-
-    return collected
+    specs = _prescreen_chunk_specs_for_events(events, dynamic_stopwords, batch_label=batch_label)
+    return _execute_prescreen_chunk_specs(
+        specs,
+        article_headlines_by_event,
+        client=client,
+        progress=progress,
+        state=state,
+        run_id=run_id,
+        concurrency=concurrency,
+    )
 
 
 def deduplicate_active_events_llm(
@@ -2691,6 +3451,7 @@ def deduplicate_active_events_llm(
     feeds_by_source: dict[str, Any],
     progress: Callable[[str], None] | None = None,
     run_id: str | None = None,
+    concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
 ) -> None:
     for pass_index in range(1, DEDUPLICATION_MAX_PASSES + 1):
         merges_count = _deduplicate_active_events_llm_pass(
@@ -2699,6 +3460,7 @@ def deduplicate_active_events_llm(
             feeds_by_source=feeds_by_source,
             progress=progress,
             run_id=run_id,
+            concurrency=concurrency,
         )
         if merges_count == 0:
             break
@@ -2716,6 +3478,7 @@ def _deduplicate_active_events_llm_pass(
     feeds_by_source: dict[str, Any],
     progress: Callable[[str], None] | None = None,
     run_id: str | None = None,
+    concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
 ) -> int:
     since_dt = datetime.now(UTC) - timedelta(hours=48)
     since = since_dt.isoformat().replace("+00:00", "Z")
@@ -2778,13 +3541,15 @@ def _deduplicate_active_events_llm_pass(
                 candidate_pairs.add(frozenset((e1["event_id"], e2["event_id"])))
     heuristic_count = len(candidate_pairs)
 
-    # Keyword-overlap candidates + LLM pre-screen, both restricted to one
-    # category-group batch at a time. news_business splits further into
-    # world/us/business to keep batches focused.
+    # Keyword-overlap candidates + LLM pre-screen are scoped to category-group
+    # batches. The pre-screen chunks are collected here and executed below in
+    # one shared worker pool.
     events_by_group: dict[str, list[dict[str, Any]]] = {}
+    parent_events_by_group: dict[str, list[dict[str, Any]]] = {}
     for event in events:
         cat = event.get("category") or ""
         group = _category_group_for_category(cat)
+        parent_events_by_group.setdefault(group["name"], []).append(event)
         if group["name"] == "news_business" and cat in group["categories"]:
             batch_key = f"news_business_{cat}"
         else:
@@ -2793,6 +3558,7 @@ def _deduplicate_active_events_llm_pass(
 
     keyword_added = 0
     prescreen_added = 0
+    prescreen_specs: list[PrescreenChunkSpec] = []
     for batch_key, batch_events in events_by_group.items():
         if len(batch_events) < 2:
             continue
@@ -2803,21 +3569,48 @@ def _deduplicate_active_events_llm_pass(
             if pair not in candidate_pairs:
                 candidate_pairs.add(pair)
                 keyword_added += 1
-        prescreen_pairs = _llm_prescreen_candidates(
-            batch_events,
-            article_headlines_by_event,
-            dynamic_stopwords,
-            client=client,
-            batch_label=batch_key,
-            progress=progress,
-            state=state,
-            run_id=run_id,
+        prescreen_specs.extend(
+            _prescreen_chunk_specs_for_events(
+                batch_events,
+                dynamic_stopwords,
+                batch_label=batch_key,
+            )
         )
-        for eid1, eid2 in prescreen_pairs:
-            pair = frozenset((eid1, eid2))
-            if pair not in candidate_pairs:
-                candidate_pairs.add(pair)
-                prescreen_added += 1
+
+    # news_business is intentionally split by category for regular grouping to avoid
+    # giant prompts, but duplicate events can straddle world/business/us framing
+    # (for example, a market-reaction story and the underlying geopolitical event).
+    # Add a high-recall parent prescreen pass; the strict per-pair merge LLM still
+    # decides whether any surfaced pair is actually safe to merge.
+    news_business_events = parent_events_by_group.get("news_business", [])
+    news_business_categories = {event.get("category") for event in news_business_events}
+    if len(news_business_categories) > 1:
+        kw_events = [
+            (event["event_id"], event.get("keywords") or []) for event in news_business_events
+        ]
+        dynamic_stopwords = _dynamic_keyword_stopwords(kw_events)
+        prescreen_specs.extend(
+            _prescreen_chunk_specs_for_events(
+                news_business_events,
+                dynamic_stopwords,
+                batch_label="news_business_cross_category",
+            )
+        )
+
+    prescreen_pairs = _execute_prescreen_chunk_specs(
+        prescreen_specs,
+        article_headlines_by_event,
+        client=client,
+        progress=progress,
+        state=state,
+        run_id=run_id,
+        concurrency=concurrency,
+    )
+    for eid1, eid2 in prescreen_pairs:
+        pair = frozenset((eid1, eid2))
+        if pair not in candidate_pairs:
+            candidate_pairs.add(pair)
+            prescreen_added += 1
 
     if not candidate_pairs:
         return 0
@@ -2830,7 +3623,7 @@ def _deduplicate_active_events_llm_pass(
         )
 
     candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for pair in candidate_pairs:
+    for pair in sorted(candidate_pairs, key=lambda pair: tuple(sorted(pair))):
         ids = sorted(pair)
         if len(ids) != 2:
             continue
@@ -2840,95 +3633,15 @@ def _deduplicate_active_events_llm_pass(
             continue
         candidates.append((e1, e2))
 
-    merges_count = 0
-    for e1, e2 in candidates:
-        if not state.event_exists(e1["event_id"]) or not state.event_exists(e2["event_id"]):
-            continue
-
-        articles1 = _load_event_articles_summary(e1["event_id"], state)
-        articles2 = _load_event_articles_summary(e2["event_id"], state)
-
-        if not articles1 or not articles2:
-            continue
-
-        payload1 = {"event_id": e1["event_id"], "title": e1["title"], "articles": articles1}
-        payload2 = {"event_id": e2["event_id"], "title": e2["title"], "articles": articles2}
-
-        try:
-            result = client.generate_json(
-                system_instruction=(
-                    "You are an expert news editor. Determine if two event clusters represent "
-                    "the same news event and should be merged."
-                ),
-                prompt=_build_event_merge_prompt(payload1, payload2),
-                response_schema=_event_merge_response_schema(),
-                temperature=0,
-            )
-            if run_id:
-                try:
-                    state.record_llm_usage(
-                        run_id=run_id,
-                        stage="deduplication",
-                        model=client.model,
-                        prompt_version="deduplication-v1",
-                        input_tokens=result.usage.get("promptTokenCount"),
-                        output_tokens=result.usage.get("candidatesTokenCount"),
-                    )
-                except Exception:
-                    pass
-
-            should_merge = result.payload.get("should_merge") is True
-            raw_confidence = result.payload.get("confidence")
-            confidence = (
-                float(raw_confidence)
-                if isinstance(raw_confidence, int | float) and not isinstance(raw_confidence, bool)
-                else 0.0
-            )
-            rationale = result.payload.get("rationale", "")
-
-            if should_merge and confidence >= DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD:
-                winner = e1
-                loser = e2
-                if e2.get("article_count", 0) > e1.get("article_count", 0):
-                    winner, loser = e2, e1
-                elif e2.get("article_count", 0) == e1.get("article_count", 0):
-                    if e2.get("created_at", "") < e1.get("created_at", ""):
-                        winner, loser = e2, e1
-                    elif e2.get("created_at", "") == e1.get("created_at", ""):
-                        if len(e2["event_id"]) < len(e1["event_id"]):
-                            winner, loser = e2, e1
-
-                winner_id = winner["event_id"]
-                loser_id = loser["event_id"]
-
-                if progress:
-                    progress(
-                        f"deduplicate: merging {loser_id} into {winner_id} "
-                        f"(confidence: {confidence:.2f}; rationale: {rationale})"
-                    )
-
-                merge_events(winner_id, loser_id, state, feeds_by_source)
-                merges_count += 1
-            elif should_merge and progress:
-                progress(
-                    f"deduplicate: skipped low-confidence merge for {e1['event_id']} and {e2['event_id']} "
-                    f"(confidence: {confidence:.2f})"
-                )
-        except Exception as exc:
-            if progress:
-                progress(f"deduplicate: failed to evaluate pair {e1['event_id']} and {e2['event_id']}: {exc}")
-            if run_id:
-                try:
-                    state.record_error(
-                        run_id,
-                        "deduplication",
-                        "event_pair",
-                        f"{e1['event_id']}_{e2['event_id']}",
-                        None,
-                        exc,
-                    )
-                except Exception:
-                    pass
+    merges_count = _evaluate_and_apply_deduplication_candidates(
+        candidates=candidates,
+        state=state,
+        client=client,
+        feeds_by_source=feeds_by_source,
+        progress=progress,
+        run_id=run_id,
+        concurrency=concurrency,
+    )
 
     if progress and merges_count > 0:
         progress(f"deduplicate: completed merging {merges_count} event(s)")

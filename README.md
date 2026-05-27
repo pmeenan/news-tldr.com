@@ -68,6 +68,20 @@ Run stage 1 data collection:
 ./.venv/bin/python -m pipeline.cli collect
 ```
 
+Run the completed pipeline stages in order (`collect`, `digest`, then
+`aggregate`). This holds the shared pipeline lock for the full duration of the
+run, so scheduled invocations do not interleave with each other or with
+individual stage commands:
+```bash
+./.venv/bin/python -m pipeline.cli run --verbose
+```
+
+Force stages that support forced recomputation (`digest` and `aggregate`) while
+running the completed pipeline:
+```bash
+./.venv/bin/python -m pipeline.cli run --verbose --force
+```
+
 Print incremental collection progress to stderr while keeping final stats on stdout:
 ```bash
 ./.venv/bin/python -m pipeline.cli collect --verbose
@@ -90,6 +104,13 @@ articles according to `config/pipeline.json`, then groups eligible articles
 into events:
 ```bash
 ./.venv/bin/python -m pipeline.cli aggregate --verbose
+```
+
+Force aggregation to re-plan from recently completed digests, clear prior
+event assignments/filter decisions in the planned window coverage, and rerun
+those windows even if they were already marked completed:
+```bash
+./.venv/bin/python -m pipeline.cli aggregate --verbose --force
 ```
 
 Remove the local generated SQLite state, staged articles, event files, published files, and fetch logs:

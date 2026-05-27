@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time as time_module
 from datetime import UTC, datetime, time, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -11,6 +14,7 @@ from pipeline.aggregate import (
     ArticleForAggregation,
     _category_batches_for_articles,
     _floor_utc_interval,
+    _force_reset_aggregation_range,
     _format_iso_timestamp,
     aggregate_once,
     apply_grouping_result,
@@ -100,6 +104,28 @@ def test_validate_grouping_response_accepts_complete_groups() -> None:
     assert groups == [{"article_indexes": [0, 1]}, {"article_indexes": [2]}]
     assert classifications[0]["content_type"] == "news"
     assert classifications[2]["content_type"] == "opinion"
+
+
+def test_validate_grouping_response_ignores_unoffered_existing_event_id() -> None:
+    groups, _classifications = validate_grouping_response(
+        {
+            "articles": [
+                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 1, "content_type": "news", "category": "world"},
+            ],
+            "groups": [
+                {
+                    "article_indexes": [0, 1],
+                    "existing_event_id": "2025-05-25-russia-threatens-fresh-kyiv-strikes",
+                }
+            ],
+        },
+        article_count=2,
+        valid_categories=["world"],
+        valid_existing_event_ids={"2026-05-25-russia-threatens-fresh-kyiv-strikes"},
+    )
+
+    assert groups == [{"article_indexes": [0, 1]}]
 
 
 @pytest.mark.parametrize(
@@ -791,8 +817,36 @@ def test_load_window_articles_filters_non_news_and_spammy_content(tmp_path) -> N
     with StateDB(db_path) as state:
         cases = (
             ("eligible", "Real news headline", "ok", ["public_safety"], "pending"),
+            (
+                "impact-capped",
+                "Important capped news",
+                "ok",
+                ["impact_capped", "public_safety"],
+                "pending",
+            ),
+            (
+                "vendor-capped",
+                "Company launches major new product",
+                "ok",
+                ["impact_capped", "vendor_announcement"],
+                "pending",
+            ),
             ("non-news", "Product roundup", "non_news", ["product_recommendation"], "filtered_non_news"),
             ("promo", "Sports betting picks", "ok", ["gambling_advice"], "filtered_low_signal_content"),
+            (
+                "live-blog",
+                "Major policy live updates",
+                "ok",
+                ["impact_capped", "live_blog"],
+                "filtered_low_signal_content",
+            ),
+            (
+                "newsletter",
+                "Morning roundup",
+                "ok",
+                ["impact_capped", "newsletter_roundup"],
+                "filtered_low_signal_content",
+            ),
             ("video", "(untitled)", "ok", ["video_page"], "filtered_video_or_carousel"),
             ("gallery", "Campaign photos", "ok", ["gallery_page"], "filtered_video_or_carousel"),
             (
@@ -846,13 +900,17 @@ def test_load_window_articles_filters_non_news_and_spammy_content(tmp_path) -> N
             )
         }
 
-    assert [article.article_id for article in articles] == ["eligible"]
+    assert {article.article_id for article in articles} == {"eligible", "impact-capped", "vendor-capped"}
     assert statuses == {
         "background": ("filtered_low_signal_content", 1),
         "eligible": ("pending", 0),
         "gallery": ("filtered_video_or_carousel", 1),
+        "impact-capped": ("pending", 0),
+        "live-blog": ("filtered_low_signal_content", 1),
+        "newsletter": ("filtered_low_signal_content", 1),
         "non-news": ("filtered_non_news", 1),
         "promo": ("filtered_low_signal_content", 1),
+        "vendor-capped": ("pending", 0),
         "video": ("filtered_video_or_carousel", 1),
     }
 
@@ -1014,6 +1072,83 @@ def test_plan_sliding_windows_reruns_completed_windows_with_unassigned_articles(
     assert ("2026-05-24T12:00:00Z", "2026-05-24T19:00:00Z") in pairs
 
 
+def test_plan_sliding_windows_sparse_skips_intervening_windows(tmp_path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        for article_id, published_at in (
+            ("early", "2026-05-24T00:30:00Z"),
+            ("late", "2026-05-24T12:30:00Z"),
+        ):
+            state.insert_article(
+                {
+                    "article_id": article_id,
+                    "source_id": "source",
+                    "source_name": "Source",
+                    "url": f"https://example.com/{article_id}",
+                    "headline": f"Headline {article_id}",
+                    "summary": "Summary",
+                    "published_at": published_at,
+                    "publish_date_estimated": False,
+                    "fetched_at": "2026-05-24T18:00:00Z",
+                    "content_type": "unknown",
+                    "language": "en",
+                    "collection": {},
+                    "fingerprints": {},
+                },
+                tmp_path / f"{article_id}.json",
+            )
+
+        windows = plan_sliding_windows(
+            range_start="2026-05-24T00:00:00Z",
+            range_end="2026-05-24T18:00:00Z",
+            window_hours=3,
+            step_hours=3,
+            overlap_hours=1,
+            db=state,
+            sparse=True,
+        )
+
+    assert [(window.window_start, window.window_end) for window in windows] == [
+        ("2026-05-24T00:00:00Z", "2026-05-24T04:00:00Z"),
+        ("2026-05-24T12:00:00Z", "2026-05-24T16:00:00Z"),
+    ]
+
+
+def test_plan_sliding_windows_sparse_keeps_latest_completed_window(tmp_path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        state.start_aggregation_window(
+            window_start="2026-05-24T06:00:00Z",
+            window_end="2026-05-24T10:00:00Z",
+            run_id="run-latest",
+            prompt_version="aggregation-v6",
+            model="gemini-3.1-flash-lite",
+        )
+        state.finish_aggregation_window(
+            window_start="2026-05-24T06:00:00Z",
+            window_end="2026-05-24T10:00:00Z",
+            status="completed",
+            article_count=10,
+            stats={},
+        )
+
+        windows = plan_sliding_windows(
+            range_start="2026-05-24T00:00:00Z",
+            range_end="2026-05-24T12:00:00Z",
+            window_hours=3,
+            step_hours=3,
+            overlap_hours=1,
+            db=state,
+            sparse=True,
+        )
+
+    assert [(window.window_start, window.window_end) for window in windows] == [
+        ("2026-05-24T06:00:00Z", "2026-05-24T10:00:00Z"),
+    ]
+
+
 def test_plan_sliding_windows_with_force(tmp_path) -> None:
     db_path = tmp_path / "pipeline.db"
     migrate(db_path)
@@ -1062,6 +1197,156 @@ def test_plan_sliding_windows_with_force(tmp_path) -> None:
         assert ("2026-05-24T00:00:00Z", "2026-05-24T07:00:00Z") in [
             (w.window_start, w.window_end) for w in windows_force
         ]
+
+
+def test_force_reset_aggregation_range_clears_prior_groupings(tmp_path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    event_dir = tmp_path / "events"
+    event_dir.mkdir()
+    migrate(db_path)
+
+    def event_payload(event_id: str, article_ids: list[str]) -> dict[str, Any]:
+        return {
+            "event_id": event_id,
+            "title": f"Event {event_id}",
+            "category": "world",
+            "status": "active",
+            "created_at": "2026-05-24T22:00:00Z",
+            "updated_at": "2026-05-25T02:00:00Z",
+            "article_ids": article_ids,
+            "article_count": len(article_ids),
+            "keywords": [],
+            "entities": [],
+        }
+
+    def insert_article(
+        state: StateDB,
+        article_id: str,
+        published_at: str,
+        *,
+        event_id: str | None = None,
+        aggregation_status: str = "pending",
+        digest_status: str = "completed",
+        is_filtered: int = 0,
+    ) -> None:
+        article_path = tmp_path / f"{article_id}.json"
+        article_path.write_text(json.dumps({"article_id": article_id}), encoding="utf-8")
+        state.insert_article(
+            {
+                "article_id": article_id,
+                "source_id": "src",
+                "source_name": "Src",
+                "url": f"https://example.com/{article_id}",
+                "headline": f"Headline {article_id}",
+                "summary": "Summary",
+                "published_at": published_at,
+                "publish_date_estimated": False,
+                "fetched_at": published_at,
+                "content_type": "unknown",
+                "language": "en",
+                "collection": {},
+                "fingerprints": {},
+            },
+            article_path,
+        )
+        with state.conn:
+            state.conn.execute(
+                """
+                UPDATE articles
+                SET event_id = ?,
+                    aggregation_status = ?,
+                    digest_status = ?,
+                    is_filtered = ?
+                WHERE article_id = ?
+                """,
+                (event_id, aggregation_status, digest_status, is_filtered, article_id),
+            )
+
+    with StateDB(db_path) as state:
+        delete_event = event_payload("delete-event", ["assigned"])
+        delete_path = event_dir / "delete-event.json"
+        delete_path.write_text(json.dumps(delete_event), encoding="utf-8")
+        state.upsert_event(delete_event, delete_path)
+
+        spanning_event = event_payload("spanning-event", ["outside", "inside"])
+        spanning_path = event_dir / "spanning-event.json"
+        spanning_path.write_text(json.dumps(spanning_event), encoding="utf-8")
+        state.upsert_event(spanning_event, spanning_path)
+
+        insert_article(
+            state,
+            "assigned",
+            "2026-05-25T01:00:00Z",
+            event_id="delete-event",
+            aggregation_status="assigned",
+        )
+        insert_article(
+            state,
+            "inside",
+            "2026-05-25T02:00:00Z",
+            event_id="spanning-event",
+            aggregation_status="assigned",
+        )
+        insert_article(
+            state,
+            "outside",
+            "2026-05-24T23:30:00Z",
+            event_id="spanning-event",
+            aggregation_status="assigned",
+        )
+        insert_article(
+            state,
+            "filtered-low",
+            "2026-05-25T03:00:00Z",
+            aggregation_status="filtered_low_impact",
+            is_filtered=1,
+        )
+        insert_article(
+            state,
+            "filtered-sports-cleanup",
+            "2026-05-25T03:30:00Z",
+            aggregation_status="filtered_sports_category",
+            is_filtered=1,
+        )
+        insert_article(
+            state,
+            "digest-skipped-video",
+            "2026-05-25T04:00:00Z",
+            aggregation_status="filtered_video_or_carousel",
+            digest_status="skipped",
+            is_filtered=1,
+        )
+
+        stats = _force_reset_aggregation_range(
+            state,
+            range_start="2026-05-25T00:00:00Z",
+            range_end="2026-05-25T05:00:00Z",
+        )
+
+        article_rows = {
+            row["article_id"]: (row["event_id"], row["aggregation_status"], row["is_filtered"])
+            for row in state.conn.execute(
+                """
+                SELECT article_id, event_id, aggregation_status, is_filtered
+                FROM articles
+                ORDER BY article_id
+                """
+            )
+        }
+        remaining_spanning = state.conn.execute(
+            "SELECT article_count FROM events WHERE event_id = 'spanning-event'"
+        ).fetchone()
+
+    assert stats == {"articles_reset": 3, "events_deleted": 1, "events_trimmed": 1}
+    assert article_rows["assigned"] == (None, "pending", 0)
+    assert article_rows["inside"] == (None, "pending", 0)
+    assert article_rows["outside"] == ("spanning-event", "assigned", 0)
+    assert article_rows["filtered-low"] == (None, "pending", 0)
+    assert article_rows["filtered-sports-cleanup"] == (None, "filtered_sports_category", 1)
+    assert article_rows["digest-skipped-video"] == (None, "filtered_video_or_carousel", 1)
+    assert not delete_path.exists()
+    assert remaining_spanning["article_count"] == 1
+    assert json.loads(spanning_path.read_text(encoding="utf-8"))["article_ids"] == ["outside"]
 
 
 def test_apply_grouping_result_creates_event_and_assigns_articles(tmp_path, monkeypatch) -> None:
@@ -1615,6 +1900,86 @@ def test_aggregate_once_default_range(tmp_path, monkeypatch) -> None:
     assert planned_windows[0][0] == expected_start
 
 
+def test_aggregate_once_force_default_range_uses_completed_digests(tmp_path, monkeypatch) -> None:
+    from pipeline.util import utc_now
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    state = StateDB(db_path)
+
+    ref = utc_now()
+    today_start = datetime.combine(ref.date(), time.min, tzinfo=UTC)
+    limit_dt = today_start - timedelta(days=1)
+    published_at = limit_dt + timedelta(hours=12)
+    published_at_str = published_at.isoformat().replace("+00:00", "Z")
+
+    state.insert_article(
+        {
+            "article_id": "assigned-completed",
+            "source_id": "src",
+            "source_name": "Src",
+            "url": "https://example.com/assigned-completed",
+            "headline": "Assigned completed article",
+            "summary": "Summary",
+            "published_at": published_at_str,
+            "publish_date_estimated": False,
+            "fetched_at": published_at_str,
+            "content_type": "unknown",
+            "language": "en",
+            "collection": {},
+            "fingerprints": {},
+            "llm_digest": {
+                "summary": "Digest",
+                "key_facts": ["fact"],
+                "impact": {"global": 0.5, "category": 0.5},
+            },
+        },
+        tmp_path / "assigned-completed.json",
+    )
+    with state.conn:
+        state.conn.execute(
+            """
+            UPDATE articles
+            SET event_id = 'old-event',
+                aggregation_status = 'assigned',
+                digest_status = 'completed'
+            WHERE article_id = 'assigned-completed'
+            """
+        )
+
+    from pipeline.config import PipelineConfig
+
+    monkeypatch.setattr("pipeline.aggregate.StateDB", lambda: StateDB(db_path))
+    monkeypatch.setattr("pipeline.aggregate.LOCK_PATH", tmp_path / "pipeline.lock")
+    monkeypatch.setattr(
+        "pipeline.aggregate.load_pipeline_config",
+        lambda: PipelineConfig(
+            collection={},
+            aggregation={"window_hours": 6, "window_overlap_hours": 1, "window_step_hours": 6},
+            retention={},
+            pipeline={},
+            digest={},
+        ),
+    )
+
+    planned_windows = []
+
+    def fake_plan_sliding_windows(*args, **kwargs):
+        planned_windows.append(
+            (kwargs.get("range_start"), kwargs.get("range_end"), kwargs.get("force"))
+        )
+        return []
+
+    monkeypatch.setattr("pipeline.aggregate.plan_sliding_windows", fake_plan_sliding_windows)
+
+    aggregate_once(client=FakeJsonGenerator({}), force=True)
+
+    assert len(planned_windows) == 1
+    expected_start = _format_iso_timestamp(_floor_utc_interval(published_at, 6))
+    expected_end = _format_iso_timestamp(_floor_utc_interval(published_at, 6) + timedelta(hours=6))
+    assert planned_windows[0] == (expected_start, expected_end, True)
+
+
 def test_aggregate_once_default_range_snaps_to_fixed_utc_boundaries(tmp_path, monkeypatch) -> None:
     from pipeline.util import utc_now
 
@@ -1708,7 +2073,7 @@ def test_group_articles_with_gemini_with_active_events() -> None:
     assert "event-123" in client.prompts[0]
 
 
-def test_group_articles_with_gemini_rejects_existing_event_id_not_in_active_events() -> None:
+def test_group_articles_with_gemini_ignores_existing_event_id_not_in_active_events() -> None:
     client = FakeJsonGenerator(
         {
             "articles": [
@@ -1718,15 +2083,15 @@ def test_group_articles_with_gemini_rejects_existing_event_id_not_in_active_even
         }
     )
 
-    with pytest.raises(ValueError, match="not offered in active events"):
-        group_articles_with_gemini(
-            _articles()[:1],
-            mode="titles_summaries",
-            client=client,
-            active_events=[{"event_id": "event-allowed", "title": "Allowed event", "category": "world"}],
-        )
+    result = group_articles_with_gemini(
+        _articles()[:1],
+        mode="titles_summaries",
+        client=client,
+        active_events=[{"event_id": "event-allowed", "title": "Allowed event", "category": "world"}],
+    )
 
-    assert len(client.prompts) == 2
+    assert "existing_event_id" not in result["groups"][0]
+    assert len(client.prompts) == 1
 
 
 @pytest.mark.parametrize("value", [None, "", " ", "null", "NULL", "none", "n/a"])
@@ -1782,6 +2147,66 @@ def test_filter_active_events_with_llm() -> None:
     assert len(result) == 1
     assert result[0]["event_id"] == "cuba-event"
     assert "matched_event_ids" in client.prompts[0]
+
+
+def test_process_category_batches_llm_runs_batches_concurrently() -> None:
+    from pipeline.aggregate import _process_category_batches_llm
+
+    class ConcurrentGroupingClient:
+        model = "fake-model"
+
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self._in_flight = 0
+            self.max_in_flight = 0
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            with self._lock:
+                self._in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self._in_flight)
+            try:
+                time_module.sleep(0.03)
+                return GeminiResult(
+                    payload={
+                        "articles": [
+                            {"article_index": 0, "content_type": "news", "category": "world"},
+                        ],
+                        "groups": [{"article_indexes": [0]}],
+                    },
+                    model=self.model,
+                    elapsed_ms=30,
+                    usage={"promptTokenCount": 10, "candidatesTokenCount": 4},
+                )
+            finally:
+                with self._lock:
+                    self._in_flight -= 1
+
+    batches = []
+    for index in range(4):
+        article = ArticleForAggregation(
+            article_id=f"art-{index}",
+            source_id="source",
+            source_name="Source",
+            headline=f"World headline {index}",
+            summary="Summary",
+            published_at="2026-05-24T10:00:00Z",
+            article_path=f"art-{index}.json",
+            digest_impact={"global": 0.5, "category": 0.5},
+        )
+        batches.append({"name": f"batch-{index}", "categories": ["world"], "articles": [article]})
+
+    client = ConcurrentGroupingClient()
+    results, errors = _process_category_batches_llm(
+        category_batches=batches,
+        active_rows_by_category={},
+        client=client,
+        feeds_by_source={"source": SimpleNamespace(default_category="world")},
+        concurrency=4,
+    )
+
+    assert errors == [None, None, None, None]
+    assert all(result is not None for result in results)
+    assert client.max_in_flight > 1
 
 
 def test_category_compatibility_bridges_politics_with_us_and_world() -> None:
@@ -1961,6 +2386,87 @@ def test_deduplicate_active_events_llm(tmp_path, monkeypatch) -> None:
 
         reassigned_rows = state.conn.execute("SELECT article_id, event_id FROM articles").fetchall()
         assert all(row["event_id"] == "2026-05-25-sudans-war-economy" for row in reassigned_rows)
+
+
+def test_deduplication_pair_reviews_run_concurrently_for_disjoint_pairs(tmp_path) -> None:
+    from pipeline.aggregate import _evaluate_and_apply_deduplication_candidates
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+
+    class ConcurrentMergeClient:
+        model = "fake-model"
+
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self._in_flight = 0
+            self.max_in_flight = 0
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            with self._lock:
+                self._in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self._in_flight)
+            try:
+                time_module.sleep(0.03)
+                return GeminiResult(
+                    payload={"should_merge": False, "confidence": 0.0, "rationale": "Different events"},
+                    model=self.model,
+                    elapsed_ms=30,
+                    usage={"promptTokenCount": 10, "candidatesTokenCount": 4},
+                )
+            finally:
+                with self._lock:
+                    self._in_flight -= 1
+
+    with StateDB(db_path) as state:
+        events = []
+        for index in range(4):
+            event_id = f"event-{index}"
+            event = {
+                "event_id": event_id,
+                "title": f"Event {index}",
+                "category": "world",
+                "created_at": "2026-05-25T10:00:00Z",
+                "updated_at": "2026-05-25T10:00:00Z",
+                "article_ids": [f"art-{index}"],
+                "article_count": 1,
+            }
+            event_path = tmp_path / f"{event_id}.json"
+            event_path.write_text(json.dumps(event), encoding="utf-8")
+            state.upsert_event(event, event_path)
+            state.insert_article(
+                {
+                    "article_id": f"art-{index}",
+                    "source_id": "src",
+                    "source_name": "Src",
+                    "url": f"https://example.com/{index}",
+                    "headline": f"Event {index}",
+                    "summary": "Summary",
+                    "published_at": "2026-05-25T10:00:00Z",
+                    "publish_date_estimated": False,
+                    "fetched_at": "2026-05-25T10:00:00Z",
+                    "content_type": "unknown",
+                    "language": "en",
+                    "collection": {},
+                    "fingerprints": {},
+                },
+                tmp_path / f"art-{index}.json",
+            )
+            state.conn.execute("UPDATE articles SET event_id = ? WHERE article_id = ?", (event_id, f"art-{index}"))
+            events.append(event)
+        state.conn.commit()
+
+        client = ConcurrentMergeClient()
+        merges = _evaluate_and_apply_deduplication_candidates(
+            candidates=[(events[0], events[1]), (events[2], events[3])],
+            state=state,
+            client=client,
+            feeds_by_source={},
+            concurrency=2,
+        )
+
+    assert merges == 0
+    assert client.max_in_flight > 1
 
 
 def test_deduplicate_active_events_llm_requires_high_confidence(tmp_path, monkeypatch) -> None:
@@ -2941,6 +3447,364 @@ def test_llm_prescreen_candidates_handles_llm_failure_gracefully() -> None:
     )
     assert pairs == []
     assert any("prescreen[leisure] failed" in m for m in progress_msgs)
+
+
+def test_headline_cohesion_does_not_group_country_plus_generic_war_word() -> None:
+    from pipeline.aggregate import _headlines_have_cohesion_edge
+
+    assert not _headlines_have_cohesion_edge(
+        "In Sudan's war economy, gold keeps flowing as miners risk mercury and collapse",
+        "UAE accused of training Colombian mercenaries for Sudan's war",
+    )
+
+
+def test_split_weakly_connected_groups_splits_sudan_war_topic_overgroup() -> None:
+    from pipeline.aggregate import _split_weakly_connected_groups
+
+    articles = [
+        ArticleForAggregation(
+            article_id="gold",
+            source_id="src",
+            source_name="Src",
+            headline="In Sudan's war economy, gold keeps flowing as miners risk mercury and collapse",
+            summary="Summary",
+            published_at="2026-05-26T00:00:00Z",
+            article_path="gold.json",
+        ),
+        ArticleForAggregation(
+            article_id="mercenaries",
+            source_id="src",
+            source_name="Src",
+            headline="UAE accused of training Colombian mercenaries for Sudan's war",
+            summary="Summary",
+            published_at="2026-05-26T01:00:00Z",
+            article_path="mercenaries.json",
+        ),
+    ]
+
+    groups = _split_weakly_connected_groups([{"article_indexes": [0, 1]}], articles)
+
+    assert groups == [{"article_indexes": [0]}, {"article_indexes": [1]}]
+
+
+def test_prescreen_chunks_run_concurrently_across_category_batches() -> None:
+    from pipeline.aggregate import (
+        _execute_prescreen_chunk_specs,
+        _prescreen_chunk_specs_for_events,
+    )
+
+    class SlowPrescreenClient:
+        model = "fake-model"
+
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self._in_flight = 0
+            self.max_in_flight = 0
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            with self._lock:
+                self._in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self._in_flight)
+            try:
+                time_module.sleep(0.03)
+                return GeminiResult(
+                    payload={"candidate_pairs": []},
+                    model=self.model,
+                    elapsed_ms=30,
+                    usage={"promptTokenCount": 10, "candidatesTokenCount": 4},
+                )
+            finally:
+                with self._lock:
+                    self._in_flight -= 1
+
+    batch1 = [
+        {"event_id": "tech-1", "title": "Tech one", "keywords": []},
+        {"event_id": "tech-2", "title": "Tech two", "keywords": []},
+    ]
+    batch2 = [
+        {"event_id": "world-1", "title": "World one", "keywords": []},
+        {"event_id": "world-2", "title": "World two", "keywords": []},
+    ]
+    specs = [
+        *_prescreen_chunk_specs_for_events(batch1, set(), batch_label="sci_tech"),
+        *_prescreen_chunk_specs_for_events(batch2, set(), batch_label="news_business_world"),
+    ]
+
+    client = SlowPrescreenClient()
+    pairs = _execute_prescreen_chunk_specs(
+        specs,
+        {},
+        client=client,
+        concurrency=2,
+    )
+
+    assert pairs == []
+    assert client.max_in_flight > 1
+
+
+def test_prescreen_chunk_specs_repeat_anchor_events_across_large_batches() -> None:
+    from pipeline.aggregate import (
+        DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH,
+        _prescreen_chunk_specs_for_events,
+    )
+
+    events = [
+        {
+            "event_id": f"filler-{index:02d}",
+            "title": f"Filler {index}",
+            "article_count": 1,
+            "created_at": f"2026-05-25T{index % 24:02d}:00:00Z",
+            "keywords": [],
+        }
+        for index in range(45)
+    ]
+    anchor = {
+        "event_id": "anchor-event",
+        "title": "Large ongoing Iran negotiations event",
+        "article_count": 25,
+        "created_at": "2026-05-24T00:00:00Z",
+        "keywords": ["iran", "negotiations"],
+    }
+    # Put the anchor at the end to verify chunking is not relying on input order.
+    specs = _prescreen_chunk_specs_for_events([*events, anchor], set(), batch_label="world")
+
+    assert len(specs) > 1
+    assert all(len(spec.chunk) <= DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH for spec in specs)
+    assert all(any(event["event_id"] == "anchor-event" for event in spec.chunk) for spec in specs)
+
+
+def test_deduplicate_active_events_llm_prescreen_anchor_catches_large_event_across_chunks(
+    tmp_path, monkeypatch
+) -> None:
+    """A large existing event can be the right merge target for a small update even when
+    title/keyword heuristics do not pair them. Anchor events must be repeated across
+    prescreen chunks so the loose LLM prescreen can surface that pair."""
+    from pipeline.aggregate import deduplicate_active_events_llm
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    state = StateDB(db_path)
+
+    event_dir = tmp_path / "events"
+    event_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("pipeline.aggregate.EVENT_DIR", event_dir)
+    recent = datetime.now(UTC).replace(microsecond=0)
+    recent_iso = recent.isoformat().replace("+00:00", "Z")
+
+    main_event = {
+        "event_id": "2026-05-25-middle-east-deep-mistrust-clouds-iran-negotiations",
+        "title": "Middle East: Deep mistrust clouds US-Iran negotiations",
+        "category": "world",
+        "created_at": recent_iso,
+        "updated_at": recent_iso,
+        "article_ids": ["main-art"],
+        "article_count": 30,
+        "keywords": ["iran", "negotiations", "diplomacy"],
+    }
+    update_event = {
+        "event_id": "2026-05-26-prospects-fade-imminent-end-iran-war-attacks-restart",
+        "title": "Prospects fade for imminent end to Iran war as attacks restart",
+        "category": "world",
+        "created_at": recent_iso,
+        "updated_at": recent_iso,
+        "article_ids": ["update-art"],
+        "article_count": 1,
+        "keywords": ["iran", "attacks", "ceasefire"],
+    }
+    events = [update_event]
+    for index in range(40):
+        events.append({
+            "event_id": f"2026-05-26-filler-{index:02d}",
+            "title": f"Unrelated world story {index}",
+            "category": "world",
+            "created_at": recent_iso,
+            "updated_at": recent_iso,
+            "article_ids": [],
+            "article_count": 1,
+            "keywords": [f"filler{index}"],
+        })
+    events.append(main_event)
+    for event in events:
+        path = event_dir / f"{event['event_id']}.json"
+        path.write_text(json.dumps(event), encoding="utf-8")
+        state.upsert_event(event, path)
+
+    for article_id, event, headline in [
+        ("main-art", main_event, "Iran talks continue as US pushes for peace deal"),
+        ("update-art", update_event, "Prospects fade for imminent end to Iran war as attacks restart"),
+    ]:
+        state.insert_article({
+            "article_id": article_id,
+            "source_id": "src",
+            "source_name": "Src",
+            "url": f"https://example.com/{article_id}",
+            "headline": headline,
+            "summary": "Summary",
+            "published_at": event["created_at"],
+            "publish_date_estimated": False,
+            "fetched_at": event["created_at"],
+            "content_type": "unknown",
+            "language": "en",
+            "collection": {},
+            "fingerprints": {},
+        }, tmp_path / f"{article_id}.json")
+        state.conn.execute("UPDATE articles SET event_id = ? WHERE article_id = ?", (event["event_id"], article_id))
+    state.conn.commit()
+
+    prescreen_prompts_with_pair = 0
+    merge_calls = 0
+
+    class Client:
+        model = "fake-model"
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            nonlocal prescreen_prompts_with_pair, merge_calls
+            prompt = kwargs["prompt"]
+            if "candidate_pairs" in prompt:
+                has_pair = main_event["event_id"] in prompt and update_event["event_id"] in prompt
+                prescreen_prompts_with_pair += int(has_pair)
+                return GeminiResult(
+                    payload={
+                        "candidate_pairs": [
+                            {
+                                "event_a": main_event["event_id"],
+                                "event_b": update_event["event_id"],
+                                "reason": "Same Iran negotiations story with renewed attacks.",
+                            }
+                        ]
+                        if has_pair
+                        else []
+                    },
+                    model=self.model,
+                    elapsed_ms=5,
+                    usage={"promptTokenCount": 20, "candidatesTokenCount": 5},
+                )
+            merge_calls += 1
+            return GeminiResult(
+                payload={"should_merge": True, "confidence": 0.95, "rationale": "Same story."},
+                model=self.model,
+                elapsed_ms=10,
+                usage={"promptTokenCount": 40, "candidatesTokenCount": 10},
+            )
+
+    deduplicate_active_events_llm(state=state, client=Client(), feeds_by_source={})
+
+    assert prescreen_prompts_with_pair >= 1
+    assert merge_calls == 1
+    assert state.event_exists(main_event["event_id"])
+    assert not state.event_exists(update_event["event_id"])
+    row = state.conn.execute(
+        "SELECT COUNT(*) FROM articles WHERE event_id = ?",
+        (main_event["event_id"],),
+    ).fetchone()
+    assert row[0] == 2
+
+
+def test_deduplicate_active_events_llm_prescreens_news_business_cross_category(
+    tmp_path, monkeypatch
+) -> None:
+    """Market-reaction coverage can live in business while the underlying event lives
+    in world. The high-recall parent prescreen should surface the pair before the
+    strict merge call decides whether to merge it."""
+    from pipeline.aggregate import deduplicate_active_events_llm
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    state = StateDB(db_path)
+
+    event_dir = tmp_path / "events"
+    event_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("pipeline.aggregate.EVENT_DIR", event_dir)
+
+    world_event = {
+        "event_id": "2026-05-25-middle-east-deep-mistrust-clouds-iran-negotiations",
+        "title": "Middle East: Deep mistrust clouds US-Iran negotiations",
+        "category": "world",
+        "created_at": "2026-05-25T10:00:00Z",
+        "updated_at": "2026-05-25T10:00:00Z",
+        "article_ids": ["world-art"],
+        "article_count": 12,
+        "keywords": ["iran", "negotiations", "hormuz"],
+    }
+    business_event = {
+        "event_id": "2026-05-25-european-stocks-highest-since-march-2-iran-talks",
+        "title": "European stocks highest since March 2 as U.S.-Iran talks continue",
+        "category": "business",
+        "created_at": "2026-05-25T11:00:00Z",
+        "updated_at": "2026-05-25T11:00:00Z",
+        "article_ids": ["business-art"],
+        "article_count": 1,
+        "keywords": ["stocks", "oil", "hormuz"],
+    }
+    for event in (world_event, business_event):
+        path = event_dir / f"{event['event_id']}.json"
+        path.write_text(json.dumps(event), encoding="utf-8")
+        state.upsert_event(event, path)
+
+    for article_id, event, headline in [
+        ("world-art", world_event, "Middle East: Deep mistrust clouds US-Iran negotiations"),
+        ("business-art", business_event, "Oil prices slide on hopes of US-Iran peace deal"),
+    ]:
+        state.insert_article({
+            "article_id": article_id,
+            "source_id": "src",
+            "source_name": "Src",
+            "url": f"https://example.com/{article_id}",
+            "headline": headline,
+            "summary": "Summary",
+            "published_at": event["created_at"],
+            "publish_date_estimated": False,
+            "fetched_at": event["created_at"],
+            "content_type": "unknown",
+            "language": "en",
+            "collection": {},
+            "fingerprints": {},
+        }, tmp_path / f"{article_id}.json")
+        state.conn.execute("UPDATE articles SET event_id = ? WHERE article_id = ?", (event["event_id"], article_id))
+    state.conn.commit()
+
+    cross_category_prescreen_calls = 0
+    merge_calls = 0
+
+    class Client:
+        model = "fake-model"
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            nonlocal cross_category_prescreen_calls, merge_calls
+            prompt = kwargs["prompt"]
+            if "candidate_pairs" in prompt:
+                has_pair = world_event["event_id"] in prompt and business_event["event_id"] in prompt
+                cross_category_prescreen_calls += int(has_pair)
+                return GeminiResult(
+                    payload={
+                        "candidate_pairs": [
+                            {
+                                "event_a": world_event["event_id"],
+                                "event_b": business_event["event_id"],
+                                "reason": "Market reaction to the same Iran talks.",
+                            }
+                        ]
+                        if has_pair
+                        else []
+                    },
+                    model=self.model,
+                    elapsed_ms=5,
+                    usage={"promptTokenCount": 20, "candidatesTokenCount": 5},
+                )
+            merge_calls += 1
+            return GeminiResult(
+                payload={"should_merge": True, "confidence": 0.95, "rationale": "Same story."},
+                model=self.model,
+                elapsed_ms=10,
+                usage={"promptTokenCount": 40, "candidatesTokenCount": 10},
+            )
+
+    deduplicate_active_events_llm(state=state, client=Client(), feeds_by_source={})
+
+    assert cross_category_prescreen_calls == 1
+    assert merge_calls == 1
+    remaining = sorted(p.stem for p in event_dir.glob("*.json"))
+    assert remaining == [world_event["event_id"]]
 
 
 def test_deduplicate_active_events_llm_uses_keyword_overlap_gate(tmp_path, monkeypatch) -> None:

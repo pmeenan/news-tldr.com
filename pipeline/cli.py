@@ -5,7 +5,8 @@ import asyncio
 import json
 import shutil
 import sys
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pipeline.aggregate import (
@@ -15,8 +16,9 @@ from pipeline.aggregate import (
     write_experiment_result,
 )
 from pipeline.collect import collect_once
-from pipeline.config import load_feeds
+from pipeline.config import load_feeds, load_pipeline_config
 from pipeline.digest import digest_once
+from pipeline.lock import PipelineLock
 from pipeline.paths import ARTICLE_DIR, DATA_DIR, DB_PATH, FETCH_LOG_DIR, LOCK_PATH
 from pipeline.state import StateDB, migrate
 
@@ -89,10 +91,48 @@ def _stderr_progress(message: str) -> None:
     print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
 
 
+def run_completed_pipeline(*, force: bool = False, progress=None) -> dict[str, object]:
+    config = load_pipeline_config()
+    lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
+    run_id = f"pipeline-run-{uuid.uuid4().hex}"
+
+    with PipelineLock(LOCK_PATH, lock_timeout, run_id=run_id):
+        if progress:
+            progress("run: acquired pipeline lock")
+            progress("run: starting collect")
+        collect_stats = asyncio.run(collect_once(progress=progress, acquire_lock=False))
+
+        if progress:
+            progress("run: starting digest")
+        migrate()
+        digest_stats = digest_once(force=force, progress=progress, acquire_lock=False)
+
+        if progress:
+            progress("run: starting aggregate")
+        migrate()
+        aggregate_stats = aggregate_once(force=force, progress=progress, acquire_lock=False)
+
+    return {
+        "force": force,
+        "stages": {
+            "collect": collect_stats,
+            "digest": digest_stats,
+            "aggregate": aggregate_stats,
+        },
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="news-tldr-pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db", help="Initialize or migrate the SQLite state database.")
+    run_parser = sub.add_parser("run", help="Run completed pipeline stages: collect, digest, aggregate.")
+    run_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Pass force mode through to stages that support it.",
+    )
+    run_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     collect_parser = sub.add_parser("collect", help="Run stage 1 data collection.")
     collect_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     aggregate_parser = sub.add_parser("aggregate", help="Run stage 2 story aggregation.")
@@ -159,6 +199,10 @@ def main() -> None:
         with StateDB() as state:
             state.sync_feeds(feeds)
         print("initialized data/state/pipeline.db")
+    elif args.command == "run":
+        progress = _stderr_progress if args.verbose else None
+        stats = run_completed_pipeline(force=args.force, progress=progress)
+        print(json.dumps(stats, indent=2, sort_keys=True))
     elif args.command == "collect":
         progress = _stderr_progress if args.verbose else None
         stats = asyncio.run(collect_once(progress=progress))

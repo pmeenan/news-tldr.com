@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import io
 import json
-import urllib.error
 from typing import Any
 
+import httpx
 import pytest
 
 from pipeline.llm import (
@@ -48,116 +47,107 @@ def _make_client(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> GeminiCli
     )
 
 
-def test_generate_json_retries_on_429(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _make_client(monkeypatch, max_attempts=3, backoff_base_seconds=0)
+def _gemini_response(payload: dict[str, Any] | None = None) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": json.dumps(payload or {"ok": True})}]},
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 1},
+        },
+    )
 
+
+def test_generate_json_retries_on_429(monkeypatch: pytest.MonkeyPatch) -> None:
     attempts: list[int] = []
 
-    class FakeResponse:
-        def __init__(self, body: bytes) -> None:
-            self._body = body
-
-        def __enter__(self) -> FakeResponse:
-            return self
-
-        def __exit__(self, *args: Any) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return self._body
-
-    def fake_urlopen(request: Any, timeout: float) -> Any:
+    def handler(request: httpx.Request) -> httpx.Response:
         attempts.append(1)
         if len(attempts) < 3:
-            raise urllib.error.HTTPError(request.full_url, 429, "rate limited", {}, io.BytesIO(b"slow down"))
-        body = json.dumps(
-            {
-                "candidates": [
-                    {
-                        "finishReason": "STOP",
-                        "content": {"parts": [{"text": json.dumps({"ok": True})}]},
-                    }
-                ],
-                "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 1},
-            }
-        ).encode("utf-8")
-        return FakeResponse(body)
+            return httpx.Response(429, text="slow down")
+        return _gemini_response()
 
-    monkeypatch.setattr("pipeline.llm.urllib.request.urlopen", fake_urlopen)
-
-    result = client.generate_json(
-        system_instruction="sys",
-        prompt="p",
-        response_schema={"type": "OBJECT"},
-    )
+    with _make_client(
+        monkeypatch,
+        max_attempts=3,
+        backoff_base_seconds=0,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        result = client.generate_json(
+            system_instruction="sys",
+            prompt="p",
+            response_schema={"type": "OBJECT"},
+        )
     assert len(attempts) == 3
     assert result.payload == {"ok": True}
 
 
 def test_generate_json_raises_on_max_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _make_client(monkeypatch)
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "finishReason": "MAX_TOKENS",
+                        "content": {"parts": [{"text": '{"partial":'}]},
+                    }
+                ]
+            },
+        )
 
-    class FakeResponse:
-        def __enter__(self) -> FakeResponse:
-            return self
+    with _make_client(monkeypatch, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GeminiTruncatedError):
+            client.generate_json(
+                system_instruction="sys",
+                prompt="p",
+                response_schema={"type": "OBJECT"},
+            )
 
-        def __exit__(self, *args: Any) -> None:
-            return None
 
-        def read(self) -> bytes:
-            return json.dumps(
-                {
-                    "candidates": [
-                        {
-                            "finishReason": "MAX_TOKENS",
-                            "content": {"parts": [{"text": '{"partial":'}]},
-                        }
-                    ]
-                }
-            ).encode("utf-8")
+def test_generate_json_includes_max_output_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
 
-    monkeypatch.setattr("pipeline.llm.urllib.request.urlopen", lambda *a, **kw: FakeResponse())
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return _gemini_response()
 
-    with pytest.raises(GeminiTruncatedError):
+    with _make_client(
+        monkeypatch,
+        max_output_tokens=12345,
+        transport=httpx.MockTransport(handler),
+    ) as client:
         client.generate_json(
             system_instruction="sys",
             prompt="p",
             response_schema={"type": "OBJECT"},
         )
 
-
-def test_generate_json_includes_max_output_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _make_client(monkeypatch, max_output_tokens=12345)
-    captured: dict[str, Any] = {}
-
-    class FakeResponse:
-        def __enter__(self) -> FakeResponse:
-            return self
-
-        def __exit__(self, *args: Any) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return json.dumps(
-                {
-                    "candidates": [
-                        {
-                            "finishReason": "STOP",
-                            "content": {"parts": [{"text": json.dumps({"ok": True})}]},
-                        }
-                    ]
-                }
-            ).encode("utf-8")
-
-    def fake_urlopen(request: Any, timeout: float) -> Any:
-        captured["body"] = json.loads(request.data.decode("utf-8"))
-        return FakeResponse()
-
-    monkeypatch.setattr("pipeline.llm.urllib.request.urlopen", fake_urlopen)
-
-    client.generate_json(
-        system_instruction="sys",
-        prompt="p",
-        response_schema={"type": "OBJECT"},
-    )
     assert captured["body"]["generationConfig"]["maxOutputTokens"] == 12345
+
+
+def test_generate_json_reuses_injected_httpx_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return _gemini_response()
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler), http2=True)
+    try:
+        client = _make_client(monkeypatch, http_client=http_client)
+        client.generate_json(system_instruction="sys", prompt="one", response_schema={"type": "OBJECT"})
+        client.generate_json(system_instruction="sys", prompt="two", response_schema={"type": "OBJECT"})
+    finally:
+        http_client.close()
+
+    assert len(calls) == 2
+
+
+def test_gemini_client_defaults_to_http11(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _make_client(monkeypatch) as client:
+        assert client._http_client._transport._pool._http2 is False
