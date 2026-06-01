@@ -22,6 +22,7 @@ news-tldr.com is a filesystem-backed RSS aggregator that collects source article
 
 ```mermaid
 graph TD
+    Maintenance[0. Maintenance & Retention] --> Collect[1. Data Collection]
     Feeds[config/feeds.json] --> Collect[1. Data Collection]
     Collect --> Articles[data/staging/articles/]
     Articles --> Digest[2a. Article Digest]
@@ -33,6 +34,7 @@ graph TD
     Present --> Site[dist/ — Static HTML/CSS/JSON]
 
     State[(data/state/pipeline.db)] -.-> Collect
+    State -.-> Maintenance
     State -.-> Digest
     State -.-> Aggregate
     State -.-> Editorial
@@ -86,6 +88,23 @@ Event IDs should survive title changes, daily reruns, and duplicate articles. Th
 
 Events can carry an optional `thread` tag (e.g., `iran-conflict-2026`) for linking related events over time. Threads are free-form metadata strings, not a separate registry. The presentation layer can use thread tags to build "related coverage" links.
 
+## Stage 0: Maintenance & Retention
+
+The completed local pipeline starts with an idempotent maintenance stage before collection. It is exposed as:
+
+```bash
+./.venv/bin/python -m pipeline.cli maintenance --verbose
+```
+
+Responsibilities:
+
+- Advance event lifecycle state from `active` to `stale` after `aggregation.stale_threshold_hours` without updates, and from `stale` to `archived` after `retention.archived_event_days`. Archived events are excluded from active-event aggregation context.
+- Expire old unassigned, unfiltered articles outside the default current/previous-day aggregation horizon by setting `aggregation_status = filtered_expired` and `is_filtered = 1`. The article rows remain in SQLite for auditability and dedup/source history.
+- Reconcile active/stale event artifacts against SQLite by rebuilding `article_ids`, `article_count`, status, event path, keywords, and newsworthiness from current unfiltered article assignments. Empty active/stale events are deleted from SQLite and `data/events/`.
+- Compact old article JSON only when the article is already filtered or belongs to an archived event: remove `content_text`, keep a compact `content_excerpt`, preserve digest/source metadata, and record `content_text_compacted_at`.
+
+The stage records its own `pipeline_runs` entry, supports `--dry-run`, and uses `--verbose` progress output to stderr. The top-level `run` command executes maintenance under the shared pipeline lock before `collect`, `digest`, and `aggregate`.
+
 ## Stage 1: Data Collection
 
 Inputs:
@@ -112,7 +131,7 @@ Responsibilities:
 
 The collection implementation lives in the `pipeline` Python package:
 
-- `pipeline/cli.py`: command-line entrypoint. `./.venv/bin/python -m pipeline.cli init-db` initializes the state database, `./.venv/bin/python -m pipeline.cli run --verbose` runs the completed pipeline stages in order (`collect`, `digest`, `aggregate`) under one full-duration pipeline lock, `./.venv/bin/python -m pipeline.cli collect` runs collection, `./.venv/bin/python -m pipeline.cli collect --verbose` streams incremental progress to stderr while preserving final JSON stats on stdout, and `./.venv/bin/python -m pipeline.cli clean-data --yes` removes local generated pipeline state for a fresh run.
+- `pipeline/cli.py`: command-line entrypoint. `./.venv/bin/python -m pipeline.cli init-db` initializes the state database, `./.venv/bin/python -m pipeline.cli run --verbose` runs the completed pipeline stages in order (`maintenance`, `collect`, `digest`, `aggregate`) under one full-duration pipeline lock, `./.venv/bin/python -m pipeline.cli maintenance --verbose` runs retention cleanup/artifact reconciliation, `./.venv/bin/python -m pipeline.cli collect --verbose` streams incremental collection progress to stderr while preserving final JSON stats on stdout, and `./.venv/bin/python -m pipeline.cli clean-data --yes` removes local generated pipeline state for a fresh run.
 - `pipeline/state.py`: SQLite schema and migration entrypoint. The schema includes feeds, feed conditional request state, articles, article fingerprints, events, pipeline runs, item errors, and LLM usage.
 - `pipeline/lock.py`: atomic lock file acquisition/release with PID and Linux process start-time verification, plus stale-lock recovery based on the configured watchdog timeout.
 - `pipeline/http_client.py`: async HTTP client with browser-like desktop Chrome request headers, per-domain rate limiting, robots.txt and crawl-delay enforcement, retry/backoff handling, and manual redirect validation.
@@ -121,6 +140,8 @@ The collection implementation lives in the `pipeline` Python package:
 - `pipeline/scrapers/`: modular engine for custom site scrapers (e.g., AP News, MotorTrend) that generate synthetic feed entries using `beautifulsoup4` when standard RSS feeds are unavailable.
 
 Collection writes article JSON under `data/staging/articles/YYYY/MM/DD/` and appends run logs to `data/staging/fetch-log/YYYY-MM-DD.jsonl`. The SQLite database stores only state/index fields plus JSON metadata needed by later stages; full extracted article text remains in the staging JSON.
+
+Collection also records durable per-source run accounting in `source_run_stats`, one row per `run_id` and `source_id`. These rows track feed status, feed HTTP status, entries seen, articles written, synced existing articles, old/duplicate skips, article failures, image fetch outcomes, and collection error counts. Articles store `collection_run_id`, allowing source-health analysis to join collection behavior to later digest and aggregation outcomes (`is_filtered`, `aggregation_status`, `event_id`) without parsing fetch-log JSONL.
 
 The HTTP client sends a desktop Windows Chrome user-agent plus common browser navigation headers (`Accept`, `Accept-Language`, `Sec-Fetch-*`, cache headers, and `Upgrade-Insecure-Requests`) while retaining RSS/Atom/XML-compatible accept values. It does not use a headless browser, login cookies, or paywall bypass behavior.
 
@@ -142,7 +163,7 @@ The HTTP client sends a desktop Windows Chrome user-agent plus common browser na
 
 Entries in `config/feeds.json` include: `source_id`, `source_name`, `feed_url`, optional `site_url`, default category, content/paywall hints, and fetch behavior overrides. Sources can be staged with `"enabled": false`.
 
-The current source catalog contains 83 enabled sources, including the AP News and MotorTrend custom scrapers. `config/source-policy.json` is kept aligned with `config/feeds.json` by `source_id` so editorial stages can resolve source metadata without guessing.
+The current source catalog contains 69 enabled sources, including the AP News and MotorTrend custom scrapers. `config/source-policy.json` is kept aligned with `config/feeds.json` by `source_id` so editorial stages can resolve source metadata without guessing.
 
 Custom scraper entries use `"feed_type": "scraper"` and a `fetch.scraper_module` value such as `pipeline.scrapers.ap` or `pipeline.scrapers.motortrend`. Scraper module names are restricted to the `pipeline.scrapers.*` namespace at load time. Scrapers must verify that resolved entry URLs stay on the configured `site_url` host and match an anchored article-path pattern so off-site links and unrelated paths are not enqueued. Each candidate anchor must also look like a headline link — either nested inside an `<article>` / `h1`–`h6` ancestor or itself wrapping a heading element — so subscribe/sign-in/site-chrome anchors that happen to share the article path prefix are filtered out. Scrapers return feed-like entries and may include an `image_url` discovered from listing-card markup, but they do not download image bytes themselves. Image downloads are centralized in the collector so RSS feeds and scrapers share the same safety checks, content-type validation, size limits, and sidecar write behavior.
 
@@ -198,6 +219,7 @@ Custom scraper entries use `"feed_type": "scraper"` and a `fetch.scraper_module`
   },
   "collection": {
     "feed_url": "https://example.com/rss",
+    "run_id": "collection-20260601T120000Z-abc12345",
     "http_status": 200,
     "extractor": "feed | readability",
     "article_id_source": "canonical_url | guid"
@@ -631,10 +653,12 @@ Configurable retention windows (defaults in `config/pipeline.json`):
 
 - **Staging articles**: Full extracted article JSON can be compacted after 3 days, but cleanup must retain durable article metadata, source links, canonical URL hashes, fingerprints, event assignments, and citation references in SQLite. Do not delete article rows that are needed for deduplication, archives, or published story source attribution.
 - **Full article text**: Extracted `content_text` may be removed or replaced with a compact excerpt after the staging retention window if the article is no longer needed for active editorial regeneration.
-- **Stale events**: Events transition to `archived` status after the retention window. Archived events are excluded from aggregation context and active story generation.
+- **Expired pending work**: Unassigned articles older than the default aggregation horizon are marked `filtered_expired` so retained historical rows do not keep future runs planning old windows.
+- **Stale events**: Events transition from `active` to `stale` after the configured stale threshold, then to `archived` after the retention window. Archived events are excluded from aggregation context and active story generation.
+- **Event artifacts**: Maintenance reconciles active/stale event JSON against SQLite article assignments and deletes empty active/stale events.
 - **Published stories**: Stories for archived events are removed from `active-stories.json` but story JSON files are retained indefinitely for archive pages.
 
-Cleanup is idempotent and safe to skip (the pipeline grows slowly between runs). Retention values are tunable in `config/pipeline.json`.
+Cleanup is idempotent and safe to skip (the pipeline grows slowly between runs), but the top-level pipeline runs it first so active aggregation context stays bounded. Retention values are tunable in `config/pipeline.json`.
 
 ## LLM Integration
 

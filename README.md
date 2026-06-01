@@ -68,9 +68,9 @@ Run stage 1 data collection:
 ./.venv/bin/python -m pipeline.cli collect
 ```
 
-Run the completed pipeline stages in order (`collect`, `digest`, then
-`aggregate`). This holds the shared pipeline lock for the full duration of the
-run, so scheduled invocations do not interleave with each other or with
+Run the completed pipeline stages in order (`maintenance`, `collect`, `digest`,
+then `aggregate`). This holds the shared pipeline lock for the full duration of
+the run, so scheduled invocations do not interleave with each other or with
 individual stage commands:
 ```bash
 ./.venv/bin/python -m pipeline.cli run --verbose
@@ -80,6 +80,19 @@ Force stages that support forced recomputation (`digest` and `aggregate`) while
 running the completed pipeline:
 ```bash
 ./.venv/bin/python -m pipeline.cli run --verbose --force
+```
+
+Run the maintenance/retention stage on its own. It advances old events through
+the active/stale/archived lifecycle, expires old unassigned articles outside
+the default aggregation horizon, reconciles active/stale event JSON with SQLite
+assignments, and compacts old filtered or archived article JSON:
+```bash
+./.venv/bin/python -m pipeline.cli maintenance --verbose
+```
+
+Preview maintenance work without mutating SQLite state or JSON artifacts:
+```bash
+./.venv/bin/python -m pipeline.cli maintenance --verbose --dry-run
 ```
 
 Print incremental collection progress to stderr while keeping final stats on stdout:

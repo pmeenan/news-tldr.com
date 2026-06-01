@@ -116,45 +116,6 @@
       "notes": "International news from The Washington Post."
     },
     {
-      "source_id": "cnn",
-      "source_name": "CNN",
-      "feed_url": "http://rss.cnn.com/rss/cnn_topstories.rss",
-      "site_url": "https://www.cnn.com",
-      "enabled": true,
-      "default_category": "world",
-      "category_hints": [
-        "world",
-        "us"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Top stories from CNN."
-    },
-    {
-      "source_id": "cnn-world",
-      "source_name": "CNN - World News",
-      "feed_url": "http://rss.cnn.com/rss/cnn_world.rss",
-      "site_url": "https://www.cnn.com",
-      "enabled": true,
-      "default_category": "world",
-      "category_hints": [
-        "world"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "International news from CNN."
-    },
-    {
       "source_id": "cnn-us",
       "source_name": "CNN - US News",
       "feed_url": "http://rss.cnn.com/rss/cnn_us.rss",
@@ -172,44 +133,6 @@
         "timeout_seconds": 30
       },
       "notes": "US domestic news from CNN."
-    },
-    {
-      "source_id": "cnn-politics",
-      "source_name": "CNN - Politics",
-      "feed_url": "http://rss.cnn.com/rss/cnn_allpolitics.rss",
-      "site_url": "https://www.cnn.com",
-      "enabled": true,
-      "default_category": "politics",
-      "category_hints": [
-        "politics"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "US political news and analysis from CNN."
-    },
-    {
-      "source_id": "cnn-tech",
-      "source_name": "CNN - Technology",
-      "feed_url": "http://rss.cnn.com/rss/cnn_tech.rss",
-      "site_url": "https://www.cnn.com",
-      "enabled": true,
-      "default_category": "technology",
-      "category_hints": [
-        "technology"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Technology news from CNN."
     },
     {
       "source_id": "abc-news-top",
@@ -325,25 +248,6 @@
         "timeout_seconds": 30
       },
       "notes": "Automotive news, reviews, and features."
-    },
-    {
-      "source_id": "cloudflare-blog",
-      "source_name": "Cloudflare Blog",
-      "feed_url": "https://blog.cloudflare.com/rss/",
-      "site_url": "https://blog.cloudflare.com",
-      "enabled": true,
-      "default_category": "technology",
-      "category_hints": [
-        "technology"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Technical articles on web performance, security, and networking."
     },
     {
       "source_id": "the-verge",
@@ -851,26 +755,6 @@
       "notes": "Health headlines from CBS News."
     },
     {
-      "source_id": "cbs-news-science",
-      "source_name": "CBS News - Science",
-      "feed_url": "https://www.cbsnews.com/latest/rss/science",
-      "site_url": "https://www.cbsnews.com/science/",
-      "enabled": true,
-      "default_category": "science",
-      "category_hints": [
-        "science",
-        "environment"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Science headlines from CBS News."
-    },
-    {
       "source_id": "cbs-news-entertainment",
       "source_name": "CBS News - Entertainment",
       "feed_url": "https://www.cbsnews.com/latest/rss/entertainment",
@@ -888,26 +772,6 @@
         "timeout_seconds": 30
       },
       "notes": "Entertainment headlines from CBS News."
-    },
-    {
-      "source_id": "pbs-newshour",
-      "source_name": "PBS NewsHour - Latest",
-      "feed_url": "https://www.pbs.org/newshour/feeds/rss/headlines",
-      "site_url": "https://www.pbs.org/newshour/",
-      "enabled": true,
-      "default_category": "us",
-      "category_hints": [
-        "us",
-        "world"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Latest headlines from PBS NewsHour."
     },
     {
       "source_id": "pbs-newshour-politics",
@@ -1220,25 +1084,6 @@
       "notes": "Business and financial news from CNBC."
     },
     {
-      "source_id": "marketwatch",
-      "source_name": "MarketWatch",
-      "feed_url": "http://feeds.marketwatch.com/marketwatch/topstories/",
-      "site_url": "https://www.marketwatch.com",
-      "enabled": true,
-      "default_category": "business",
-      "category_hints": [
-        "business"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Markets, investing, and financial news from MarketWatch."
-    },
-    {
       "source_id": "scientific-american",
       "source_name": "Scientific American",
       "feed_url": "http://rss.sciam.com/ScientificAmerican-Global",
@@ -1276,25 +1121,6 @@
         "timeout_seconds": 30
       },
       "notes": "Emerging technology coverage from MIT Technology Review."
-    },
-    {
-      "source_id": "phys-org",
-      "source_name": "Phys.org",
-      "feed_url": "https://phys.org/rss-feed/",
-      "site_url": "https://phys.org",
-      "enabled": true,
-      "default_category": "science",
-      "category_hints": [
-        "science"
-      ],
-      "content_hints": {
-        "default_content_type": "news",
-        "paywall": "none"
-      },
-      "fetch": {
-        "timeout_seconds": 30
-      },
-      "notes": "Science research news aggregated from journals and institutions."
     },
     {
       "source_id": "nasa",

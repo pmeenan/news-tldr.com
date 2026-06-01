@@ -19,6 +19,7 @@ from pipeline.collect import collect_once
 from pipeline.config import load_feeds, load_pipeline_config
 from pipeline.digest import digest_once
 from pipeline.lock import PipelineLock
+from pipeline.maintenance import maintenance_once
 from pipeline.paths import ARTICLE_DIR, DATA_DIR, DB_PATH, FETCH_LOG_DIR, LOCK_PATH
 from pipeline.state import StateDB, migrate
 
@@ -99,6 +100,11 @@ def run_completed_pipeline(*, force: bool = False, progress=None) -> dict[str, o
     with PipelineLock(LOCK_PATH, lock_timeout, run_id=run_id):
         if progress:
             progress("run: acquired pipeline lock")
+            progress("run: starting maintenance")
+        migrate()
+        maintenance_stats = maintenance_once(progress=progress, acquire_lock=False)
+
+        if progress:
             progress("run: starting collect")
         collect_stats = asyncio.run(collect_once(progress=progress, acquire_lock=False))
 
@@ -115,6 +121,7 @@ def run_completed_pipeline(*, force: bool = False, progress=None) -> dict[str, o
     return {
         "force": force,
         "stages": {
+            "maintenance": maintenance_stats,
             "collect": collect_stats,
             "digest": digest_stats,
             "aggregate": aggregate_stats,
@@ -126,7 +133,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="news-tldr-pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db", help="Initialize or migrate the SQLite state database.")
-    run_parser = sub.add_parser("run", help="Run completed pipeline stages: collect, digest, aggregate.")
+    run_parser = sub.add_parser("run", help="Run completed pipeline stages: maintenance, collect, digest, aggregate.")
     run_parser.add_argument(
         "--force",
         action="store_true",
@@ -161,6 +168,16 @@ def main() -> None:
         help="Regenerate digests even when an article already has the current digest prompt version.",
     )
     digest_stage_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
+    maintenance_parser = sub.add_parser(
+        "maintenance",
+        help="Run retention cleanup, event lifecycle updates, and artifact reconciliation.",
+    )
+    maintenance_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report maintenance work without mutating SQLite state or JSON artifacts.",
+    )
+    maintenance_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     experiment_parser = sub.add_parser(
         "aggregation-experiment",
         help="Compare Gemini event grouping with titles only versus titles plus summaries.",
@@ -240,6 +257,11 @@ def main() -> None:
             force=args.force,
             progress=progress,
         )
+        print(json.dumps(stats, indent=2, sort_keys=True))
+    elif args.command == "maintenance":
+        progress = _stderr_progress if args.verbose else None
+        migrate()
+        stats = maintenance_once(dry_run=args.dry_run, progress=progress)
         print(json.dumps(stats, indent=2, sort_keys=True))
     elif args.command == "aggregation-experiment":
         progress = _stderr_progress if args.verbose else None

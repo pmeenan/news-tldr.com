@@ -40,15 +40,28 @@ def test_fresh_migrate_creates_full_schema(tmp_path: Path) -> None:
             "aggregation_status",
             "aggregation_reason",
             "is_filtered",
+            "collection_run_id",
         } <= _columns(conn, "articles")
         assert {"window_start", "window_end", "status", "stats_json"} <= _columns(conn, "aggregation_windows")
+        assert {
+            "run_id",
+            "source_id",
+            "feed_status",
+            "entries_seen",
+            "articles_written",
+            "articles_skipped_duplicate",
+            "error_count",
+            "stats_json",
+        } <= _columns(conn, "source_run_stats")
         assert _indexes(conn, "articles") >= {"idx_articles_canonical_url", "idx_articles_unassigned"}
         assert "idx_articles_digest_status_published" in _indexes(conn, "articles")
         assert "idx_articles_aggregation_status_published" in _indexes(conn, "articles")
         assert "idx_articles_is_filtered_published" in _indexes(conn, "articles")
+        assert "idx_articles_collection_run" in _indexes(conn, "articles")
         assert "idx_events_status_updated" in _indexes(conn, "events")
         assert "idx_events_newsworthiness_global" in _indexes(conn, "events")
         assert "idx_aggregation_windows_status_end" in _indexes(conn, "aggregation_windows")
+        assert "idx_source_run_stats_source_finished" in _indexes(conn, "source_run_stats")
         version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
         assert version == SCHEMA_VERSION
     finally:
@@ -86,7 +99,11 @@ def test_migrate_upgrades_existing_v1_database(tmp_path: Path) -> None:
         assert "digest_status" in _columns(conn, "articles")
         assert "aggregation_status" in _columns(conn, "articles")
         assert "is_filtered" in _columns(conn, "articles")
-        assert versions == [1, 2, 3, 4, 5, 6, 7]
+        assert "collection_run_id" in _columns(conn, "articles")
+        assert "source_run_stats" in {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
     finally:
         conn.close()
 
@@ -101,6 +118,49 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
     finally:
         conn.close()
     assert versions == [v for v, _ in MIGRATIONS]
+
+
+def test_state_records_source_run_stats(tmp_path: Path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+
+    with StateDB(db_path) as state:
+        state.upsert_source_run_stats(
+            [
+                {
+                    "run_id": "collection-run",
+                    "source_id": "fixture",
+                    "source_name": "Fixture",
+                    "started_at": "2026-06-01T00:00:00Z",
+                    "finished_at": "2026-06-01T00:01:00Z",
+                    "feed_status": "fetched",
+                    "feed_http_status": 200,
+                    "entries_seen": 3,
+                    "articles_written": 2,
+                    "articles_synced_existing": 1,
+                    "articles_skipped": 1,
+                    "articles_skipped_old": 0,
+                    "articles_skipped_duplicate": 1,
+                    "articles_failed": 0,
+                    "images_fetched": 1,
+                    "images_skipped": 1,
+                    "images_failed": 0,
+                    "error_count": 0,
+                    "stats_json": {"feed_url": "https://example.test/feed.xml"},
+                }
+            ]
+        )
+        row = state.conn.execute(
+            "SELECT * FROM source_run_stats WHERE run_id = ? AND source_id = ?",
+            ("collection-run", "fixture"),
+        ).fetchone()
+
+    assert row["feed_status"] == "fetched"
+    assert row["entries_seen"] == 3
+    assert row["articles_written"] == 2
+    assert row["articles_skipped_duplicate"] == 1
+    assert row["images_fetched"] == 1
+    assert row["stats_json"] == '{"feed_url": "https://example.test/feed.xml"}'
 
 
 def test_state_tracks_aggregation_window_status(tmp_path: Path) -> None:

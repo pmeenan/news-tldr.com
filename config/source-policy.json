@@ -44,39 +44,11 @@
       "notes": "International news from The Washington Post."
     },
     {
-      "source_id": "cnn",
-      "bias_label": "left",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "Top stories from CNN."
-    },
-    {
-      "source_id": "cnn-world",
-      "bias_label": "left",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "International news from CNN."
-    },
-    {
       "source_id": "cnn-us",
       "bias_label": "left",
       "reliability": "high",
       "paywall": "none",
       "notes": "US domestic news from CNN."
-    },
-    {
-      "source_id": "cnn-politics",
-      "bias_label": "left",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "US political news and analysis from CNN."
-    },
-    {
-      "source_id": "cnn-tech",
-      "bias_label": "left",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "Technology news from CNN."
     },
     {
       "source_id": "abc-news-top",
@@ -119,13 +91,6 @@
       "reliability": "high",
       "paywall": "none",
       "notes": "Automotive news, reviews, and features."
-    },
-    {
-      "source_id": "cloudflare-blog",
-      "bias_label": "center",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "Technical articles on web performance, security, and networking."
     },
     {
       "source_id": "the-verge",
@@ -310,25 +275,11 @@
       "notes": "Health headlines from CBS News."
     },
     {
-      "source_id": "cbs-news-science",
-      "bias_label": "center",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "Science headlines from CBS News."
-    },
-    {
       "source_id": "cbs-news-entertainment",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
       "notes": "Entertainment headlines from CBS News."
-    },
-    {
-      "source_id": "pbs-newshour",
-      "bias_label": "center",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "Latest headlines from PBS NewsHour."
     },
     {
       "source_id": "pbs-newshour-politics",
@@ -443,13 +394,6 @@
       "notes": "Business and financial news from CNBC."
     },
     {
-      "source_id": "marketwatch",
-      "bias_label": "center",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "Markets, investing, and financial news from MarketWatch."
-    },
-    {
       "source_id": "scientific-american",
       "bias_label": "center-left",
       "reliability": "high",
@@ -462,13 +406,6 @@
       "reliability": "high",
       "paywall": "metered",
       "notes": "Emerging technology coverage from MIT Technology Review."
-    },
-    {
-      "source_id": "phys-org",
-      "bias_label": "center",
-      "reliability": "high",
-      "paywall": "none",
-      "notes": "Science research news aggregated from journals and institutions."
     },
     {
       "source_id": "nasa",

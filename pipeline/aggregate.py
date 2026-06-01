@@ -41,6 +41,7 @@ FORCE_RESET_AGGREGATION_STATUSES = (
     "filtered_non_news",
     "filtered_standalone_opinion",
     "filtered_video_or_carousel",
+    "filtered_expired",
 )
 MAX_CATEGORY_GROUP_ARTICLES = 50
 NULL_EXISTING_EVENT_ID_VALUES = {"null", "none", "nil", "n/a", "na", "unknown"}

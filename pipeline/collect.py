@@ -558,6 +558,7 @@ class Collector:
         self.article_id_lock = asyncio.Lock()
         self.seen_article_ids: set[str] = set()
         self.log_rows: list[dict[str, Any]] = []
+        self.source_stats = {feed.source_id: self._new_source_stats(feed) for feed in feeds}
         self.stats = {
             "feeds_seen": len(feeds),
             "feeds_fetched": 0,
@@ -589,10 +590,100 @@ class Collector:
                 await watchdog_task
             except asyncio.CancelledError:
                 pass
+            self._finish_all_source_stats()
+            self.state.upsert_source_run_stats(self._source_run_rows())
         log_path = FETCH_LOG_DIR / f"{utc_now():%Y-%m-%d}.jsonl"
         atomic_append_jsonl(log_path, self.log_rows)
         self._progress(f"collector: wrote fetch log {log_path}")
         return self.stats
+
+    def _new_source_stats(self, feed: FeedConfig) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "source_id": feed.source_id,
+            "source_name": feed.source_name,
+            "feed_url": feed.feed_url,
+            "feed_type": feed.feed_type,
+            "started_at": isoformat_z(),
+            "finished_at": None,
+            "feed_status": "pending",
+            "feed_http_status": None,
+            "entries_seen": 0,
+            "articles_written": 0,
+            "articles_synced_existing": 0,
+            "articles_skipped": 0,
+            "articles_skipped_old": 0,
+            "articles_skipped_duplicate": 0,
+            "articles_failed": 0,
+            "images_fetched": 0,
+            "images_skipped": 0,
+            "images_failed": 0,
+            "error_count": 0,
+        }
+
+    def _set_source_feed_status(
+        self,
+        source_id: str,
+        status: str,
+        *,
+        http_status: int | None = None,
+    ) -> None:
+        source_stats = self.source_stats[source_id]
+        source_stats["feed_status"] = status
+        source_stats["feed_http_status"] = http_status
+
+    def _inc_source_stat(self, source_id: str, key: str, amount: int = 1) -> None:
+        if source_id not in self.source_stats:
+            return
+        self.source_stats[source_id][key] += amount
+
+    def _finish_source_stats(self, source_id: str) -> None:
+        source_stats = self.source_stats[source_id]
+        if source_stats["finished_at"] is None:
+            source_stats["finished_at"] = isoformat_z()
+
+    def _finish_all_source_stats(self) -> None:
+        for source_id in self.source_stats:
+            if self.source_stats[source_id]["feed_status"] == "pending":
+                self.source_stats[source_id]["feed_status"] = "not_started"
+            self._finish_source_stats(source_id)
+
+    def _source_run_rows(self) -> list[dict[str, Any]]:
+        rows = []
+        for source_stats in self.source_stats.values():
+            row = dict(source_stats)
+            row["stats_json"] = {
+                key: value
+                for key, value in source_stats.items()
+                if key
+                not in {
+                    "run_id",
+                    "source_id",
+                    "source_name",
+                    "started_at",
+                    "finished_at",
+                    "feed_status",
+                    "feed_http_status",
+                }
+            }
+            rows.append(row)
+        return rows
+
+    def _record_error(
+        self,
+        item_type: str,
+        item_id: str | None,
+        source_id: str,
+        error: Exception | str,
+    ) -> None:
+        self.state.record_error(self.run_id, "collection", item_type, item_id, source_id, error)
+        self._inc_source_stat(source_id, "error_count")
+
+    def _tag_article_collection_run(self, article: dict[str, Any]) -> None:
+        article["collection_run_id"] = self.run_id
+        collection = dict(article.get("collection", {}))
+        collection.setdefault("run_id", self.run_id)
+        article["collection"] = collection
 
     def _register_task(self, description: str) -> str:
         self.task_counter += 1
@@ -630,6 +721,7 @@ class Collector:
         task_id = self._register_task(f"feed:{feed.source_id}")
         try:
             async with self.feed_sem:
+                self.source_stats[feed.source_id]["started_at"] = isoformat_z()
                 headers = self.state.feed_headers(feed.source_id)
                 try:
                     if getattr(feed, "feed_type", "rss") == "scraper":
@@ -638,9 +730,11 @@ class Collector:
                         self._progress(f"feed {feed.source_id}: scraping {feed.feed_url}")
                         entries = await run_scraper(self.client, feed)
                         self.stats["feeds_fetched"] += 1
+                        self._set_source_feed_status(feed.source_id, "fetched", http_status=200)
                         self.state.update_feed_state(feed.source_id, status=200)
                         self._log(feed.source_id, "feed", feed.feed_url, 200, "fetched")
                         self.stats["entries_seen"] += len(entries)
+                        self._inc_source_stat(feed.source_id, "entries_seen", len(entries))
                         self._progress(f"feed {feed.source_id}: fetched {len(entries)} scraper entries")
                         await self._gather_entries(feed, entries)
                         self._progress(f"feed {feed.source_id}: complete")
@@ -650,12 +744,14 @@ class Collector:
                     response = await self.client.get(feed.feed_url, headers=headers, check_robots=False)
                     if response.status_code == 304:
                         self.stats["feeds_not_modified"] += 1
+                        self._set_source_feed_status(feed.source_id, "not_modified", http_status=304)
                         self.state.update_feed_state(feed.source_id, status=304)
                         self._log(feed.source_id, "feed", feed.feed_url, 304, "not_modified")
                         self._progress(f"feed {feed.source_id}: not modified")
                         return
                     response.raise_for_status()
                     self.stats["feeds_fetched"] += 1
+                    self._set_source_feed_status(feed.source_id, "fetched", http_status=response.status_code)
                     self.state.update_feed_state(
                         feed.source_id,
                         status=response.status_code,
@@ -665,16 +761,19 @@ class Collector:
                     parsed = _parse_feed_bytes(response.content)
                     entries = list(parsed.entries or [])
                     self.stats["entries_seen"] += len(entries)
+                    self._inc_source_stat(feed.source_id, "entries_seen", len(entries))
                     self._progress(f"feed {feed.source_id}: fetched {len(entries)} entries")
                     await self._gather_entries(feed, entries)
                     self._progress(f"feed {feed.source_id}: complete")
                 except Exception as exc:
                     self.stats["feeds_failed"] += 1
+                    self._set_source_feed_status(feed.source_id, "failed")
                     self.state.update_feed_state(feed.source_id, status=None, failed=True)
-                    self.state.record_error(self.run_id, "collection", "feed", feed.feed_url, feed.source_id, exc)
+                    self._record_error("feed", feed.feed_url, feed.source_id, exc)
                     self._log(feed.source_id, "feed", feed.feed_url, None, "failed", str(exc))
                     self._progress(f"feed {feed.source_id}: failed {type(exc).__name__}: {exc}")
         finally:
+            self._finish_source_stats(feed.source_id)
             self._deregister_task(task_id)
 
     async def _collect_entry(self, feed: FeedConfig, entry: Any) -> None:
@@ -687,6 +786,8 @@ class Collector:
                     if published is not None:
                         if published < utc_now() - timedelta(days=self.max_article_age_days):
                             self.stats["articles_skipped"] += 1
+                            self._inc_source_stat(feed.source_id, "articles_skipped")
+                            self._inc_source_stat(feed.source_id, "articles_skipped_old")
                             self._progress(f"article {feed.source_id}: skipped old {entry_label}")
                             return
                     entry_url, canonical_url, guid = _entry_url_and_identity(feed, entry)
@@ -711,6 +812,8 @@ class Collector:
                                 if matched_id not in self.seen_article_ids:
                                     self.seen_article_ids.add(matched_id)
                             self.stats["articles_skipped"] += 1
+                            self._inc_source_stat(feed.source_id, "articles_skipped")
+                            self._inc_source_stat(feed.source_id, "articles_skipped_duplicate")
                             self._progress(
                                 f"article {feed.source_id}: skipped duplicate "
                                 f"(already on disk via DB identity) {entry_label}"
@@ -730,8 +833,11 @@ class Collector:
                                         try:
                                             with article_path.open("r", encoding="utf-8") as f:
                                                 article_data = json.load(f)
+                                            self._tag_article_collection_run(article_data)
                                             self.state.insert_article(article_data, article_path)
                                             self.stats["articles_written"] += 1
+                                            self._inc_source_stat(feed.source_id, "articles_written")
+                                            self._inc_source_stat(feed.source_id, "articles_synced_existing")
                                             self._progress(
                                                 f"article {feed.source_id}: synced existing file "
                                                 f"{preflight_article_id} to DB"
@@ -742,6 +848,8 @@ class Collector:
                                                 f"to DB: {db_exc}"
                                             )
                             self.stats["articles_skipped"] += 1
+                            self._inc_source_stat(feed.source_id, "articles_skipped")
+                            self._inc_source_stat(feed.source_id, "articles_skipped_duplicate")
                             self._progress(
                                 f"article {feed.source_id}: skipped duplicate (already on disk) {entry_label}"
                             )
@@ -752,6 +860,8 @@ class Collector:
                                 preflight_article_id
                             ):
                                 self.stats["articles_skipped"] += 1
+                                self._inc_source_stat(feed.source_id, "articles_skipped")
+                                self._inc_source_stat(feed.source_id, "articles_skipped_duplicate")
                                 self._progress(f"article {feed.source_id}: skipped duplicate {entry_label}")
                                 return
                             self.seen_article_ids.add(preflight_article_id)
@@ -766,8 +876,11 @@ class Collector:
                                     try:
                                         with article_path.open("r", encoding="utf-8") as f:
                                             article_data = json.load(f)
+                                        self._tag_article_collection_run(article_data)
                                         self.state.insert_article(article_data, article_path)
                                         self.stats["articles_written"] += 1
+                                        self._inc_source_stat(feed.source_id, "articles_written")
+                                        self._inc_source_stat(feed.source_id, "articles_synced_existing")
                                         self._progress(
                                             f"article {feed.source_id}: synced existing file "
                                             f"{article['article_id']} to DB"
@@ -777,6 +890,8 @@ class Collector:
                                             f"article {feed.source_id}: failed to sync existing file to DB: {db_exc}"
                                         )
                         self.stats["articles_skipped"] += 1
+                        self._inc_source_stat(feed.source_id, "articles_skipped")
+                        self._inc_source_stat(feed.source_id, "articles_skipped_duplicate")
                         self._progress(
                             f"article {feed.source_id}: skipped duplicate (already on disk after fetch) {entry_label}"
                         )
@@ -788,6 +903,8 @@ class Collector:
                                 article["article_id"]
                             ):
                                 self.stats["articles_skipped"] += 1
+                                self._inc_source_stat(feed.source_id, "articles_skipped")
+                                self._inc_source_stat(feed.source_id, "articles_skipped_duplicate")
                                 self._progress(f"article {feed.source_id}: skipped duplicate {entry_label}")
                                 return
                             self.seen_article_ids.add(article["article_id"])
@@ -821,6 +938,7 @@ class Collector:
                                 pass
                         raise
                     self.stats["articles_written"] += 1
+                    self._inc_source_stat(feed.source_id, "articles_written")
                     self._progress(f"article {feed.source_id}: written {article['article_id']} {entry_label}")
                     self._log(
                         feed.source_id,
@@ -832,8 +950,9 @@ class Collector:
                     )
                 except Exception as exc:
                     self.stats["articles_failed"] += 1
+                    self._inc_source_stat(feed.source_id, "articles_failed")
                     item_id = entry.get("id") or entry.get("guid") or entry.get("link")
-                    self.state.record_error(self.run_id, "collection", "article", item_id, feed.source_id, exc)
+                    self._record_error("article", item_id, feed.source_id, exc)
                     self._log(feed.source_id, "article", str(item_id), None, "failed", str(exc))
                     self._progress(f"article {feed.source_id}: failed {type(exc).__name__}: {exc}")
         finally:
@@ -876,9 +995,7 @@ class Collector:
                         extractor = "readability"
                         extractor_detail = extraction_mode
                     else:
-                        self.state.record_error(
-                            self.run_id,
-                            "collection",
+                        self._record_error(
                             "article_extraction_empty",
                             canonical_url,
                             feed.source_id,
@@ -886,9 +1003,7 @@ class Collector:
                         )
                     language = language or page.headers.get("content-language")
                 else:
-                    self.state.record_error(
-                        self.run_id,
-                        "collection",
+                    self._record_error(
                         "article_fetch_http_error",
                         canonical_url,
                         feed.source_id,
@@ -898,9 +1013,7 @@ class Collector:
                 self._progress(
                     f"article {feed.source_id}: failed to fetch page {canonical_url} - {type(exc).__name__}: {exc}"
                 )
-                self.state.record_error(
-                    self.run_id,
-                    "collection",
+                self._record_error(
                     "article_fetch_exception",
                     canonical_url,
                     feed.source_id,
@@ -933,7 +1046,9 @@ class Collector:
             "paywall": _paywall_status(source_paywall, status_code, content_text),
             "content_type": feed.content_hints.get("default_content_type", "unknown"),
             "language": language,
+            "collection_run_id": self.run_id,
             "collection": {
+                "run_id": self.run_id,
                 "feed_url": feed.feed_url,
                 "http_status": status_code,
                 "extractor": extractor,
@@ -959,6 +1074,7 @@ class Collector:
     ) -> dict[str, Any] | None:
         if not candidates:
             self.stats["images_skipped"] += 1
+            self._inc_source_stat(article["source_id"], "images_skipped")
             return None
 
         # If we have any explicit primary lead images, discard general body images (html_img)
@@ -976,6 +1092,7 @@ class Collector:
             if origin and origin in self.disabled_image_origins:
                 self._progress(f"image {article['source_id']}: skipping {image_url} - origin {origin} is disabled")
                 self.stats["images_skipped"] += 1
+                self._inc_source_stat(article["source_id"], "images_skipped")
                 if has_primary:
                     break
                 continue
@@ -985,9 +1102,7 @@ class Collector:
                 response = await self.client.get(image_url)
                 self._progress(f"image {article['source_id']}: fetched {image_url} status={response.status_code}")
                 if response.status_code >= 400:
-                    self.state.record_error(
-                        self.run_id,
-                        "collection",
+                    self._record_error(
                         "image_fetch_http_error",
                         image_url,
                         article["source_id"],
@@ -1014,6 +1129,7 @@ class Collector:
                 image_path = article_path.with_suffix(extension)
                 atomic_write_bytes(image_path, content)
                 self.stats["images_fetched"] += 1
+                self._inc_source_stat(article["source_id"], "images_fetched")
                 self._progress(f"image {article['source_id']}: saved {image_path.name}")
                 if origin:
                     self.image_origin_failures[origin] = 0
@@ -1030,9 +1146,7 @@ class Collector:
                 self._progress(
                     f"image {article['source_id']}: failed to fetch {image_url} - {type(exc).__name__}: {exc}"
                 )
-                self.state.record_error(
-                    self.run_id,
-                    "collection",
+                self._record_error(
                     "image_fetch_exception",
                     image_url,
                     article["source_id"],
@@ -1052,6 +1166,7 @@ class Collector:
                 self._deregister_task(task_id)
 
         self.stats["images_failed"] += 1
+        self._inc_source_stat(article["source_id"], "images_failed")
         self._progress(f"image {article['source_id']}: failed {article['article_id']}")
         return None
 

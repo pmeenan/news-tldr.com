@@ -201,6 +201,12 @@ def test_run_completed_pipeline_runs_collect_digest_and_aggregate(monkeypatch):
         progress("article digest: fake progress")
         return {"completed": 2}
 
+    def fake_maintenance_once(*, progress=None, acquire_lock=True, **kwargs):
+        assert kwargs == {}
+        calls.append(("maintenance", progress is not None, acquire_lock))
+        progress("maintenance: fake progress")
+        return {"expired_articles": 1}
+
     def fake_aggregate_once(*, force=False, progress=None, acquire_lock=True, **kwargs):
         assert kwargs == {}
         calls.append(("aggregate", force, progress is not None, acquire_lock))
@@ -210,12 +216,14 @@ def test_run_completed_pipeline_runs_collect_digest_and_aggregate(monkeypatch):
     monkeypatch.setattr("pipeline.cli.PipelineLock", FakePipelineLock)
     monkeypatch.setattr("pipeline.cli.collect_once", fake_collect_once)
     monkeypatch.setattr("pipeline.cli.digest_once", fake_digest_once)
+    monkeypatch.setattr("pipeline.cli.maintenance_once", fake_maintenance_once)
     monkeypatch.setattr("pipeline.cli.aggregate_once", fake_aggregate_once)
     monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
 
     result = run_completed_pipeline(force=True, progress=progress_messages.append)
 
     assert calls == [
+        ("maintenance", True, False),
         ("collect", True, False),
         ("digest", True, True, False),
         ("aggregate", True, True, False),
@@ -223,6 +231,8 @@ def test_run_completed_pipeline_runs_collect_digest_and_aggregate(monkeypatch):
     assert lock_events == [("init", "pipeline.lock", True), "enter", "exit"]
     assert progress_messages == [
         "run: acquired pipeline lock",
+        "run: starting maintenance",
+        "maintenance: fake progress",
         "run: starting collect",
         "collect: fake progress",
         "run: starting digest",
@@ -233,6 +243,7 @@ def test_run_completed_pipeline_runs_collect_digest_and_aggregate(monkeypatch):
     assert result == {
         "force": True,
         "stages": {
+            "maintenance": {"expired_articles": 1},
             "collect": {"feeds_seen": 1},
             "digest": {"completed": 2},
             "aggregate": {"windows_processed": 3},
@@ -266,6 +277,13 @@ def test_run_command_writes_progress_and_combined_stats(monkeypatch, capsys):
         progress("article digest: fake progress")
         return {"completed": 2}
 
+    def fake_maintenance_once(*, progress=None, acquire_lock=True, **kwargs):
+        assert kwargs == {}
+        assert progress is not None
+        assert acquire_lock is False
+        progress("maintenance: fake progress")
+        return {"expired_articles": 1}
+
     def fake_aggregate_once(*, force=False, progress=None, acquire_lock=True, **kwargs):
         assert kwargs == {}
         assert force is True
@@ -277,6 +295,7 @@ def test_run_command_writes_progress_and_combined_stats(monkeypatch, capsys):
     monkeypatch.setattr("pipeline.cli.PipelineLock", FakePipelineLock)
     monkeypatch.setattr("pipeline.cli.collect_once", fake_collect_once)
     monkeypatch.setattr("pipeline.cli.digest_once", fake_digest_once)
+    monkeypatch.setattr("pipeline.cli.maintenance_once", fake_maintenance_once)
     monkeypatch.setattr("pipeline.cli.aggregate_once", fake_aggregate_once)
     monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
     monkeypatch.setattr("sys.argv", ["news-tldr-pipeline", "run", "--verbose", "--force"])
@@ -285,6 +304,8 @@ def test_run_command_writes_progress_and_combined_stats(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert "run: acquired pipeline lock" in captured.err
+    assert "run: starting maintenance" in captured.err
+    assert "maintenance: fake progress" in captured.err
     assert "run: starting collect" in captured.err
     assert "collect: fake progress" in captured.err
     assert "article digest: fake progress" in captured.err
@@ -292,6 +313,7 @@ def test_run_command_writes_progress_and_combined_stats(monkeypatch, capsys):
     assert json.loads(captured.out) == {
         "force": True,
         "stages": {
+            "maintenance": {"expired_articles": 1},
             "collect": {"feeds_seen": 1},
             "digest": {"completed": 2},
             "aggregate": {"windows_processed": 3},
@@ -375,6 +397,24 @@ def test_aggregate_force_passes_force_to_aggregate_once(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"windows_processed": 2}
+
+
+def test_maintenance_verbose_dry_run_writes_progress_to_stderr(monkeypatch, capsys):
+    def fake_maintenance_once(*, dry_run=False, progress=None):
+        assert dry_run is True
+        assert progress is not None
+        progress("maintenance: fake progress")
+        return {"dry_run": True, "expired_articles": 2}
+
+    monkeypatch.setattr("pipeline.cli.maintenance_once", fake_maintenance_once)
+    monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
+    monkeypatch.setattr("sys.argv", ["news-tldr-pipeline", "maintenance", "--verbose", "--dry-run"])
+
+    main()
+
+    captured = capsys.readouterr()
+    assert "maintenance: fake progress" in captured.err
+    assert json.loads(captured.out) == {"dry_run": True, "expired_articles": 2}
 
 
 def test_digest_verbose_writes_progress_to_stderr(monkeypatch, capsys):

@@ -18,7 +18,7 @@ def _relative_to_project(path: Path) -> str:
         return str(path)
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 # Each migration is the SQL needed to take the database from the previous
@@ -211,6 +211,40 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         CREATE INDEX IF NOT EXISTS idx_articles_is_filtered_published ON articles(is_filtered, published_at);
         """,
     ),
+    (
+        8,
+        """
+        ALTER TABLE articles ADD COLUMN collection_run_id TEXT;
+
+        CREATE TABLE IF NOT EXISTS source_run_stats (
+          run_id TEXT NOT NULL,
+          source_id TEXT NOT NULL,
+          source_name TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          finished_at TEXT NOT NULL,
+          feed_status TEXT NOT NULL,
+          feed_http_status INTEGER,
+          entries_seen INTEGER NOT NULL DEFAULT 0,
+          articles_written INTEGER NOT NULL DEFAULT 0,
+          articles_synced_existing INTEGER NOT NULL DEFAULT 0,
+          articles_skipped INTEGER NOT NULL DEFAULT 0,
+          articles_skipped_old INTEGER NOT NULL DEFAULT 0,
+          articles_skipped_duplicate INTEGER NOT NULL DEFAULT 0,
+          articles_failed INTEGER NOT NULL DEFAULT 0,
+          images_fetched INTEGER NOT NULL DEFAULT 0,
+          images_skipped INTEGER NOT NULL DEFAULT 0,
+          images_failed INTEGER NOT NULL DEFAULT 0,
+          error_count INTEGER NOT NULL DEFAULT 0,
+          stats_json TEXT NOT NULL DEFAULT '{}',
+          PRIMARY KEY (run_id, source_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_articles_collection_run
+          ON articles(collection_run_id);
+        CREATE INDEX IF NOT EXISTS idx_source_run_stats_source_finished
+          ON source_run_stats(source_id, finished_at);
+        """,
+    ),
 )
 
 
@@ -348,15 +382,17 @@ class StateDB:
 
     def insert_article(self, article: dict[str, Any], article_path: Path) -> None:
         collection = article.get("collection", {})
+        collection_run_id = article.get("collection_run_id") or collection.get("run_id")
         with self.conn:
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO articles (
                   article_id, source_id, source_name, url, canonical_url, guid,
                   headline, summary, published_at, publish_date_estimated,
-                  fetched_at, article_path, content_type, language, collection_json
+                  fetched_at, article_path, content_type, language, collection_json,
+                  collection_run_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     article["article_id"],
@@ -374,6 +410,7 @@ class StateDB:
                     article.get("content_type", "unknown"),
                     article.get("language"),
                     json.dumps(collection, sort_keys=True),
+                    collection_run_id,
                 ),
             )
             fp = article.get("fingerprints", {})
@@ -391,6 +428,65 @@ class StateDB:
                     fp.get("summary_hash"),
                     fp.get("content_hash"),
                 ),
+            )
+
+    def upsert_source_run_stats(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO source_run_stats (
+                  run_id, source_id, source_name, started_at, finished_at,
+                  feed_status, feed_http_status, entries_seen, articles_written,
+                  articles_synced_existing, articles_skipped, articles_skipped_old,
+                  articles_skipped_duplicate, articles_failed, images_fetched,
+                  images_skipped, images_failed, error_count, stats_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, source_id) DO UPDATE SET
+                  source_name=excluded.source_name,
+                  started_at=excluded.started_at,
+                  finished_at=excluded.finished_at,
+                  feed_status=excluded.feed_status,
+                  feed_http_status=excluded.feed_http_status,
+                  entries_seen=excluded.entries_seen,
+                  articles_written=excluded.articles_written,
+                  articles_synced_existing=excluded.articles_synced_existing,
+                  articles_skipped=excluded.articles_skipped,
+                  articles_skipped_old=excluded.articles_skipped_old,
+                  articles_skipped_duplicate=excluded.articles_skipped_duplicate,
+                  articles_failed=excluded.articles_failed,
+                  images_fetched=excluded.images_fetched,
+                  images_skipped=excluded.images_skipped,
+                  images_failed=excluded.images_failed,
+                  error_count=excluded.error_count,
+                  stats_json=excluded.stats_json
+                """,
+                [
+                    (
+                        row["run_id"],
+                        row["source_id"],
+                        row["source_name"],
+                        row["started_at"],
+                        row["finished_at"],
+                        row["feed_status"],
+                        row.get("feed_http_status"),
+                        int(row.get("entries_seen", 0)),
+                        int(row.get("articles_written", 0)),
+                        int(row.get("articles_synced_existing", 0)),
+                        int(row.get("articles_skipped", 0)),
+                        int(row.get("articles_skipped_old", 0)),
+                        int(row.get("articles_skipped_duplicate", 0)),
+                        int(row.get("articles_failed", 0)),
+                        int(row.get("images_fetched", 0)),
+                        int(row.get("images_skipped", 0)),
+                        int(row.get("images_failed", 0)),
+                        int(row.get("error_count", 0)),
+                        json.dumps(row.get("stats_json", {}), sort_keys=True),
+                    )
+                    for row in rows
+                ],
             )
 
     def article_time_bounds(self, *, unassigned_only: bool = True) -> tuple[str, str] | None:

@@ -9,10 +9,11 @@ This document tracks the phased buildout of the filesystem-backed RSS aggregator
 - **State**: SQLite for pipeline state and incremental processing. JSON files for human-readable stage artifacts.
 - **No database server** or application runtime for the published site.
 - Filesystem JSON artifacts are the source of truth between stages.
-- Pipeline stages: data collection, story aggregation, editorial, presentation.
+- Pipeline stages: maintenance/retention, data collection, story aggregation, editorial, presentation.
 - Data collection is implemented; story aggregation is implemented and undergoing quality hardening.
 - Article digest generation is now its own runnable stage before story aggregation.
-- The configured source catalog has 83 enabled sources, including AP News and MotorTrend custom scrapers.
+- A maintenance stage now runs before collection in `pipeline run` to expire old pending work, advance event lifecycle state, reconcile event artifacts, and compact old filtered/archived article JSON.
+- The configured source catalog has 69 enabled sources, including AP News and MotorTrend custom scrapers.
 - Neutrality, attribution, and auditability are first-class requirements.
 - Pipeline runs hourly. Stories evolve as new articles arrive across runs.
 - Events are the primary grouping unit. Optional thread tags link related events over time.
@@ -130,7 +131,7 @@ gantt
 - [ ] Implement optional thread tag assignment for linking related events.
 - [x] Filter standalone opinion content from event creation (opinions attach to existing events only).
 - [x] Update event JSON files and state database after each window.
-- [ ] Implement event status lifecycle: active → stale (48h no new articles) → archived.
+- [x] Implement event status lifecycle: active → stale (48h no new articles) → archived.
 - [x] Add deterministic validation for IDs, category values, enum values, confidence thresholds, window cardinality, and retry/fallback behavior.
 - [x] Add tests for grouping and registry updates.
 - [x] Partition window articles and active events by Category Group prior to story aggregation, including bounded sub-batches for oversized groups, to prevent LLM attention breakdown and "mega-event" grouping errors in large windows.
@@ -167,10 +168,12 @@ gantt
 
 - [x] Document that long-running pipeline commands must support `--verbose` progress/status logging to stderr.
 - [x] Add a single command (`./.venv/bin/python -m pipeline.cli run`) to run the completed pipeline stages locally.
+- [x] Add a standalone `maintenance --verbose` stage and run it at the start of the completed pipeline.
 - [ ] Verify pipeline lock, watchdog timeout, and stale lock recovery work end-to-end.
 - [ ] Add prompt/version metadata to all LLM-generated artifacts.
 - [ ] Add JSON schema validation command for all artifact types.
-- [ ] Implement retention cleanup that compacts or removes old full article text while preserving article metadata, fingerprints, event assignments, and citation references.
+- [x] Implement retention cleanup that compacts old filtered/archived full article text while preserving article metadata, fingerprints, event assignments, digest metadata, and citation references.
+- [x] Add durable per-source collection accounting (`source_run_stats` plus article `collection_run_id`) for long-term source-yield analysis.
 - [ ] Add dry-run mode (skips LLM calls, useful for testing collection and aggregation logic).
 - [ ] Track LLM token usage per run in the state database.
 - [ ] Design scheduled-run configuration for cron, GitHub Actions, or another worker host.

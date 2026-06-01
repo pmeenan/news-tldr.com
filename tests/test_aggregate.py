@@ -1310,6 +1310,13 @@ def test_force_reset_aggregation_range_clears_prior_groupings(tmp_path) -> None:
         )
         insert_article(
             state,
+            "filtered-expired",
+            "2026-05-25T03:45:00Z",
+            aggregation_status="filtered_expired",
+            is_filtered=1,
+        )
+        insert_article(
+            state,
             "digest-skipped-video",
             "2026-05-25T04:00:00Z",
             aggregation_status="filtered_video_or_carousel",
@@ -1337,12 +1344,13 @@ def test_force_reset_aggregation_range_clears_prior_groupings(tmp_path) -> None:
             "SELECT article_count FROM events WHERE event_id = 'spanning-event'"
         ).fetchone()
 
-    assert stats == {"articles_reset": 3, "events_deleted": 1, "events_trimmed": 1}
+    assert stats == {"articles_reset": 4, "events_deleted": 1, "events_trimmed": 1}
     assert article_rows["assigned"] == (None, "pending", 0)
     assert article_rows["inside"] == (None, "pending", 0)
     assert article_rows["outside"] == ("spanning-event", "assigned", 0)
     assert article_rows["filtered-low"] == (None, "pending", 0)
     assert article_rows["filtered-sports-cleanup"] == (None, "filtered_sports_category", 1)
+    assert article_rows["filtered-expired"] == (None, "pending", 0)
     assert article_rows["digest-skipped-video"] == (None, "filtered_video_or_carousel", 1)
     assert not delete_path.exists()
     assert remaining_spanning["article_count"] == 1
@@ -2312,7 +2320,7 @@ def test_deduplicate_active_events_llm(tmp_path, monkeypatch) -> None:
             "title": "In Sudans war economy gold keeps flowing",
             "category": "world",
             "created_at": "2026-05-25T10:00:00Z",
-            "updated_at": "2026-05-25T10:00:00Z",
+            "updated_at": "2026-05-31T10:00:00Z",
             "article_ids": ["art1"],
             "article_count": 1,
         }
@@ -2321,7 +2329,7 @@ def test_deduplicate_active_events_llm(tmp_path, monkeypatch) -> None:
             "title": "In Sudans war economy gold keeps flowing",
             "category": "world",
             "created_at": "2026-05-25T11:00:00Z",
-            "updated_at": "2026-05-25T11:00:00Z",
+            "updated_at": "2026-05-31T11:00:00Z",
             "article_ids": ["art2"],
             "article_count": 1,
         }
@@ -2483,7 +2491,7 @@ def test_deduplicate_active_events_llm_requires_high_confidence(tmp_path, monkey
             "title": "In Sudans war economy gold keeps flowing",
             "category": "world",
             "created_at": "2026-05-25T10:00:00Z",
-            "updated_at": "2026-05-25T10:00:00Z",
+            "updated_at": "2026-05-31T10:00:00Z",
             "article_ids": ["art1"],
             "article_count": 1,
         }
@@ -2492,7 +2500,7 @@ def test_deduplicate_active_events_llm_requires_high_confidence(tmp_path, monkey
             "title": "In Sudans war economy gold keeps flowing",
             "category": "world",
             "created_at": "2026-05-25T11:00:00Z",
-            "updated_at": "2026-05-25T11:00:00Z",
+            "updated_at": "2026-05-31T11:00:00Z",
             "article_ids": ["art2"],
             "article_count": 1,
         }
@@ -2553,7 +2561,7 @@ def test_deduplicate_active_events_llm_cross_category_same_group(tmp_path, monke
             "title": "In Sudans war economy gold keeps flowing",
             "category": "world",
             "created_at": "2026-05-25T10:00:00Z",
-            "updated_at": "2026-05-25T10:00:00Z",
+            "updated_at": "2026-05-31T10:00:00Z",
             "article_ids": ["art1"],
             "article_count": 1,
         }
@@ -2563,7 +2571,7 @@ def test_deduplicate_active_events_llm_cross_category_same_group(tmp_path, monke
             "title": "In Sudans war economy gold keeps flowing",
             "category": "us",
             "created_at": "2026-05-25T11:00:00Z",
-            "updated_at": "2026-05-25T11:00:00Z",
+            "updated_at": "2026-05-31T11:00:00Z",
             "article_ids": ["art2"],
             "article_count": 1,
         }
@@ -2573,7 +2581,7 @@ def test_deduplicate_active_events_llm_cross_category_same_group(tmp_path, monke
             "title": "Mandalorian and Grogu opens at Disney box office",
             "category": "entertainment",
             "created_at": "2026-05-25T12:00:00Z",
-            "updated_at": "2026-05-25T12:00:00Z",
+            "updated_at": "2026-05-31T12:00:00Z",
             "article_ids": ["art3"],
             "article_count": 1,
         }
@@ -2668,7 +2676,7 @@ def test_deduplicate_active_events_llm_cross_category_title_match(tmp_path, monk
         "title": "Pope Leo takes aim at big tech in AI encyclical",
         "category": "world",
         "created_at": "2026-05-25T10:00:00Z",
-        "updated_at": "2026-05-25T10:00:00Z",
+        "updated_at": "2026-05-31T10:00:00Z",
         "article_ids": ["art-world"],
         "article_count": 1,
     }
@@ -2677,7 +2685,7 @@ def test_deduplicate_active_events_llm_cross_category_title_match(tmp_path, monk
         "title": "Pope Leo letter on AI has big tech takeaways",
         "category": "technology",
         "created_at": "2026-05-25T11:00:00Z",
-        "updated_at": "2026-05-25T11:00:00Z",
+        "updated_at": "2026-05-31T11:00:00Z",
         "article_ids": ["art-tech"],
         "article_count": 1,
     }
@@ -2741,7 +2749,7 @@ def test_deduplicate_active_events_llm_cross_group_title_cohesion(tmp_path, monk
         "title": "Las Vegas Enhanced Games launch sparks controversy and ethical debate",
         "category": "entertainment",
         "created_at": "2026-05-25T10:00:00Z",
-        "updated_at": "2026-05-25T10:00:00Z",
+        "updated_at": "2026-05-31T10:00:00Z",
         "article_ids": ["art-entertainment"],
         "article_count": 1,
         "keywords": ["enhanced", "games", "vegas", "controversy"],
@@ -2751,7 +2759,7 @@ def test_deduplicate_active_events_llm_cross_group_title_cohesion(tmp_path, monk
         "title": "A Swimmer Broke a World Record at the Enhanced Games",
         "category": "health",
         "created_at": "2026-05-25T11:00:00Z",
-        "updated_at": "2026-05-25T11:00:00Z",
+        "updated_at": "2026-05-31T11:00:00Z",
         "article_ids": ["art-health"],
         "article_count": 1,
         "keywords": ["enhanced", "games", "swimmer", "record"],
@@ -3721,7 +3729,7 @@ def test_deduplicate_active_events_llm_prescreens_news_business_cross_category(
         "title": "Middle East: Deep mistrust clouds US-Iran negotiations",
         "category": "world",
         "created_at": "2026-05-25T10:00:00Z",
-        "updated_at": "2026-05-25T10:00:00Z",
+        "updated_at": "2026-05-31T10:00:00Z",
         "article_ids": ["world-art"],
         "article_count": 12,
         "keywords": ["iran", "negotiations", "hormuz"],
@@ -3731,7 +3739,7 @@ def test_deduplicate_active_events_llm_prescreens_news_business_cross_category(
         "title": "European stocks highest since March 2 as U.S.-Iran talks continue",
         "category": "business",
         "created_at": "2026-05-25T11:00:00Z",
-        "updated_at": "2026-05-25T11:00:00Z",
+        "updated_at": "2026-05-31T11:00:00Z",
         "article_ids": ["business-art"],
         "article_count": 1,
         "keywords": ["stocks", "oil", "hormuz"],
@@ -3826,7 +3834,7 @@ def test_deduplicate_active_events_llm_uses_keyword_overlap_gate(tmp_path, monke
         "title": "Ferrari Goes Electric: The Luce Is Here!",
         "category": "automotive",
         "created_at": "2026-05-25T10:00:00Z",
-        "updated_at": "2026-05-25T10:00:00Z",
+        "updated_at": "2026-05-31T10:00:00Z",
         "article_ids": ["art1"],
         "article_count": 1,
         "keywords": ["ferrari", "luce", "electric", "ev", "polarizing"],
@@ -3836,7 +3844,7 @@ def test_deduplicate_active_events_llm_uses_keyword_overlap_gate(tmp_path, monke
         "title": "Reveals first EV with design help from Jony Ive",
         "category": "automotive",
         "created_at": "2026-05-25T11:00:00Z",
-        "updated_at": "2026-05-25T11:00:00Z",
+        "updated_at": "2026-05-31T11:00:00Z",
         "article_ids": ["art2"],
         "article_count": 1,
         "keywords": ["ferrari", "luce", "ive", "jony", "ev"],
@@ -3946,7 +3954,7 @@ def test_deduplicate_active_events_llm_uses_prescreen_when_keywords_miss(tmp_pat
         "title": "First framing of the news",
         "category": "technology",
         "created_at": "2026-05-25T10:00:00Z",
-        "updated_at": "2026-05-25T10:00:00Z",
+        "updated_at": "2026-05-31T10:00:00Z",
         "article_ids": ["art1"],
         "article_count": 1,
         "keywords": ["something", "alpha", "framing"],
@@ -3956,7 +3964,7 @@ def test_deduplicate_active_events_llm_uses_prescreen_when_keywords_miss(tmp_pat
         "title": "Second framing of the news",
         "category": "technology",
         "created_at": "2026-05-25T11:00:00Z",
-        "updated_at": "2026-05-25T11:00:00Z",
+        "updated_at": "2026-05-31T11:00:00Z",
         "article_ids": ["art2"],
         "article_count": 1,
         "keywords": ["something", "beta", "different"],

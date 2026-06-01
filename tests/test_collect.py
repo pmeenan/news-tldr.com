@@ -22,7 +22,7 @@ FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
       <title>Fixture headline</title>
       <link>https://example.test/story</link>
       <description>Short summary.</description>
-      <pubDate>Sun, 24 May 2026 12:30:00 GMT</pubDate>
+      <pubDate>Sun, 31 May 2026 12:30:00 GMT</pubDate>
       <category>technology</category>
     </item>
   </channel>
@@ -45,7 +45,7 @@ FULL_FEED_XML = (
     + (b"Full article sentence. " * 40)
     + b"""</p>
       ]]></content:encoded>
-      <pubDate>Sun, 24 May 2026 12:30:00 GMT</pubDate>
+      <pubDate>Sun, 31 May 2026 12:30:00 GMT</pubDate>
       <category>technology</category>
     </item>
   </channel>
@@ -73,7 +73,7 @@ IMAGE_FEED_XML = (
       ]]></content:encoded>
       <media:content url="https://example.test/images/story.jpg" medium="image"
                      type="image/jpeg" width="1200" height="800" />
-      <pubDate>Sun, 24 May 2026 12:30:00 GMT</pubDate>
+      <pubDate>Sun, 31 May 2026 12:30:00 GMT</pubDate>
       <category>technology</category>
     </item>
   </channel>
@@ -129,10 +129,24 @@ async def test_collects_feed_entry_to_article_json(tmp_path, monkeypatch):
             collector = Collector(state, client, [feed], run_id="test-run", progress=progress_messages.append)
             stats = await collector.run()
 
-            rows = state.conn.execute("SELECT article_id, headline, article_path FROM articles").fetchall()
+            rows = state.conn.execute(
+                "SELECT article_id, headline, article_path, collection_run_id, collection_json FROM articles"
+            ).fetchall()
+            source_stats = state.conn.execute(
+                "SELECT * FROM source_run_stats WHERE run_id = ? AND source_id = ?",
+                ("test-run", "fixture"),
+            ).fetchone()
 
     assert stats["articles_written"] == 1
     assert rows[0]["headline"] == "Fixture headline"
+    assert rows[0]["collection_run_id"] == "test-run"
+    assert json.loads(rows[0]["collection_json"])["run_id"] == "test-run"
+    assert source_stats["feed_status"] == "fetched"
+    assert source_stats["feed_http_status"] == 200
+    assert source_stats["entries_seen"] == 1
+    assert source_stats["articles_written"] == 1
+    assert source_stats["images_skipped"] == 1
+    assert source_stats["error_count"] == 0
     assert article_dir.glob("*")
     assert list(article_dir.rglob("*.json"))
     assert list(log_dir.glob("*.jsonl"))
@@ -378,9 +392,9 @@ async def test_existing_url_article_skips_page_fetch_before_extraction(tmp_path,
                 "headline": "Fixture headline",
                 "summary": "Short summary.",
                 "content_text": "Existing article body",
-                "published_at": "2026-05-24T12:30:00Z",
+                "published_at": "2026-05-31T12:30:00Z",
                 "publish_date_estimated": False,
-                "fetched_at": "2026-05-24T12:31:00Z",
+                "fetched_at": "2026-05-31T12:31:00Z",
                 "authors": [],
                 "tags": [],
                 "paywall": {"status": "none", "signals": []},
@@ -430,7 +444,7 @@ async def test_scraper_feed_updates_state_and_logs_success(tmp_path, monkeypatch
                 "title": "Scraped headline",
                 "summary": "Scraped summary.",
                 "content": [{"value": " ".join(["Complete scraped article."] * 80)}],
-                "published": "2026-05-24T12:30:00Z",
+                "published": "2026-05-31T12:30:00Z",
             }
         ]
 
@@ -456,6 +470,11 @@ async def test_scraper_feed_updates_state_and_logs_success(tmp_path, monkeypatch
                 "SELECT last_status, consecutive_failures FROM feed_state WHERE source_id = ?",
                 (feed.source_id,),
             ).fetchone()
+            source_stats = state.conn.execute(
+                "SELECT feed_status, feed_http_status, entries_seen, articles_written FROM source_run_stats "
+                "WHERE source_id = ?",
+                (feed.source_id,),
+            ).fetchone()
 
     log_rows = [json.loads(line) for line in next(log_dir.glob("*.jsonl")).read_text(encoding="utf-8").splitlines()]
 
@@ -463,6 +482,12 @@ async def test_scraper_feed_updates_state_and_logs_success(tmp_path, monkeypatch
     assert stats["articles_written"] == 1
     assert feed_state["last_status"] == 200
     assert feed_state["consecutive_failures"] == 0
+    assert dict(source_stats) == {
+        "feed_status": "fetched",
+        "feed_http_status": 200,
+        "entries_seen": 1,
+        "articles_written": 1,
+    }
     assert any(row["item_type"] == "feed" and row["status"] == "fetched" for row in log_rows)
 
 
@@ -667,6 +692,10 @@ async def test_collects_feed_entry_with_failed_article_fetch_fallback(tmp_path, 
 
             rows = state.conn.execute("SELECT article_id, headline, summary FROM articles").fetchall()
             errors = state.conn.execute("SELECT item_type, error_type, error_message FROM item_errors").fetchall()
+            source_stats = state.conn.execute(
+                "SELECT error_count, articles_written FROM source_run_stats WHERE source_id = ?",
+                ("fixture",),
+            ).fetchone()
 
     assert stats["articles_written"] == 1
     assert rows[0]["headline"] == "Fixture headline"
@@ -674,6 +703,8 @@ async def test_collects_feed_entry_with_failed_article_fetch_fallback(tmp_path, 
     assert len(errors) == 1
     assert errors[0]["item_type"] == "article_fetch_http_error"
     assert "500" in errors[0]["error_message"]
+    assert source_stats["error_count"] == 1
+    assert source_stats["articles_written"] == 1
 
 
 @pytest.mark.asyncio
@@ -860,14 +891,14 @@ async def test_collect_skips_fetch_if_file_exists_on_disk(tmp_path, monkeypatch)
         "guid": "fixture-1",
         "headline": "Pre-existing headline",
         "summary": "Pre-existing summary",
-        "published_at": "2026-05-24T12:30:00Z",
-        "fetched_at": "2026-05-24T12:30:00Z",
+        "published_at": "2026-05-31T12:30:00Z",
+        "fetched_at": "2026-05-31T12:30:00Z",
         "collection": {},
     }
 
     from pipeline.collect import _article_path
 
-    article_path = _article_path(article_id, "2026-05-24T12:30:00Z")
+    article_path = _article_path(article_id, "2026-05-31T12:30:00Z")
     article_path.parent.mkdir(parents=True, exist_ok=True)
     with article_path.open("w", encoding="utf-8") as f:
         json.dump(article_data, f)
@@ -965,7 +996,7 @@ async def test_collect_skips_fetch_if_db_identity_matches(tmp_path, monkeypatch)
 
     from pipeline.collect import _article_path
 
-    article_path = _article_path(final_id, "2026-05-24T12:30:00Z")
+    article_path = _article_path(final_id, "2026-05-31T12:30:00Z")
 
     article_data = {
         "article_id": final_id,
@@ -976,8 +1007,8 @@ async def test_collect_skips_fetch_if_db_identity_matches(tmp_path, monkeypatch)
         "guid": "fixture-1",
         "headline": "Pre-existing headline",
         "summary": "Pre-existing summary",
-        "published_at": "2026-05-24T12:30:00Z",
-        "fetched_at": "2026-05-24T12:30:00Z",
+        "published_at": "2026-05-31T12:30:00Z",
+        "fetched_at": "2026-05-31T12:30:00Z",
         "collection": {},
     }
 
@@ -1201,9 +1232,9 @@ def _insert_minimal_article(state: StateDB, **overrides) -> str:
         "headline": overrides.get("headline", "Headline"),
         "summary": "",
         "content_text": "",
-        "published_at": "2026-05-24T12:00:00Z",
+        "published_at": "2026-05-31T12:00:00Z",
         "publish_date_estimated": False,
-        "fetched_at": "2026-05-24T12:00:00Z",
+        "fetched_at": "2026-05-31T12:00:00Z",
         "authors": [],
         "tags": [],
         "paywall": {"status": "none", "signals": []},
