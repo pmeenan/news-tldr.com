@@ -105,7 +105,7 @@ Responsibilities:
 - Reconcile active/stale event artifacts against SQLite by rebuilding `article_ids`, `article_count`, status, event path, keywords, and newsworthiness from current unfiltered article assignments. Empty active/stale events are deleted from SQLite and `data/events/`.
 - Compact old article JSON only when the article is already filtered or belongs to an archived event: remove `content_text`, keep a compact `content_excerpt`, preserve digest/source metadata, and record `content_text_compacted_at`.
 
-The stage records its own `pipeline_runs` entry, supports `--dry-run`, and uses `--verbose` progress output to stderr. The top-level `run` command executes maintenance under the shared pipeline lock before `collect`, `digest`, and `aggregate`.
+The stage records its own `pipeline_runs` entry, supports `--dry-run`, and uses `--verbose` progress output to stderr. The top-level `run` command executes maintenance under the shared pipeline lock before `collect`, `digest`, `aggregate`, `editorial`, and presentation/publish.
 
 ## Stage 1: Data Collection
 
@@ -133,7 +133,7 @@ Responsibilities:
 
 The collection implementation lives in the `pipeline` Python package:
 
-- `pipeline/cli.py`: command-line entrypoint. `./.venv/bin/python -m pipeline.cli init-db` initializes the state database, `./.venv/bin/python -m pipeline.cli run --verbose` runs the completed pipeline stages in order (`maintenance`, `collect`, `digest`, `aggregate`) under one full-duration pipeline lock, `./.venv/bin/python -m pipeline.cli maintenance --verbose` runs retention cleanup/artifact reconciliation, `./.venv/bin/python -m pipeline.cli collect --verbose` streams incremental collection progress to stderr while preserving final JSON stats on stdout, and `./.venv/bin/python -m pipeline.cli clean-data --yes` removes local generated pipeline state for a fresh run.
+- `pipeline/cli.py`: command-line entrypoint. `./.venv/bin/python -m pipeline.cli init-db` initializes the state database, `./.venv/bin/python -m pipeline.cli run --verbose` runs maintenance through production publish under one full-duration pipeline lock, `run --dry-run` performs a non-mutating/no-network/no-LLM preflight, individual stage commands expose focused controls, and `clean-data --yes` removes local generated pipeline state for a fresh run.
 - `pipeline/state.py`: SQLite schema and migration entrypoint. The schema includes feeds, feed conditional request state, articles, article fingerprints, events, pipeline runs, item errors, and LLM usage.
 - `pipeline/lock.py`: atomic lock file acquisition/release with PID and Linux process start-time verification, plus stale-lock recovery based on the configured watchdog timeout.
 - `pipeline/http_client.py`: async HTTP client with browser-like desktop Chrome request headers, per-domain rate limiting, robots.txt and crawl-delay enforcement, retry/backoff handling, and manual redirect validation.
@@ -651,6 +651,47 @@ public files for 433 stories. The homepage, a representative story page, and
 Pipeline commands that can run long enough to feel idle in an interactive shell must support `--verbose`. Verbose progress/status is written to stderr, while final machine-readable output remains on stdout. The collection command currently implements this contract with `./.venv/bin/python -m pipeline.cli collect --verbose`.
 
 The `clean-data` command removes local generated pipeline state for a fresh run: the SQLite database and sidecars, staged article files, event JSON, published JSON, and fetch logs by default. It requires `--yes`, refuses to run while `data/state/pipeline.lock` exists, and can keep fetch logs with `--keep-fetch-log` or override the lock guard with `--ignore-lock`. It does not remove `dist/` or the production document root.
+
+### Validation, Health, and Usage Reporting
+
+`validate-data --verbose` performs deterministic validation across the complete
+artifact boundary: feed/source-policy symmetry, category IDs, SQLite
+`quick_check`, LLM usage prompt provenance, article/digest schema, event schema,
+story citations and source URLs, active-index parity/ranking, and required static
+pages/API assets. Invalid results are emitted as machine-readable JSON and exit
+nonzero.
+
+`health --verbose` combines artifact validation with operational checks. It
+requires recent successful runs for maintenance, collection, digest,
+aggregation, editorial, and presentation; detects stale running jobs; evaluates
+failed feeds/articles from the latest collection; and requests the public
+homepage and active-story API over HTTPS. Its latest report is atomically stored
+at `data/state/health.json`, and any failed check produces a nonzero exit.
+
+Every LLM call records run ID, stage, model, prompt version, input/output tokens,
+optional cost, and timestamp in `llm_usage`. `llm-usage --hours N` groups those
+records for operational/cost review. The artifact validator also rejects usage
+rows or generated artifacts with missing prompt provenance.
+
+`run --dry-run` acquires and releases the real pipeline lock, previews
+maintenance, counts enabled feeds and pending digest/aggregation/editorial work,
+checks presentation inputs, and runs validation. It performs zero network or LLM
+calls and makes no database, artifact, static-build, or production changes.
+
+### Scheduled Production Runs
+
+The production user crontab runs `scripts/run-scheduled.sh` at minute 17 every
+hour. The wrapper invokes the complete pipeline and its automatic production
+publish, then runs the health check. It retains detailed output in
+`data/state/scheduled-pipeline.log`, rotates at 10 MiB, and exits nonzero when
+either the pipeline or health check fails so cron's normal error-mail path can
+alert the operator. `deploy/cron/news-tldr.cron` is the checked-in schedule
+source. The pipeline lock prevents overlap if an earlier run is still active.
+
+Sparse aggregation deliberately revisits the newest completed window to catch
+late arrivals, but replaying a group whose articles are already present in the
+same event is a no-op: its event JSON and `updated_at` stay unchanged. This keeps
+hourly runs incremental and prevents unnecessary editorial LLM regeneration.
 
 ### Concurrency Control
 

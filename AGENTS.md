@@ -32,6 +32,40 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on August 24, 2026 (Milestone 5 Complete + Hourly Production Operations)
+
+- **Scope**: Completed the final Operations & Quality milestone, installed hourly production scheduling, fixed incremental replay churn and a live watchdog edge case, refreshed the dataset, and published a fully healthy 441-story site.
+- **Operational tooling** (`pipeline/operations.py`, `pipeline/cli.py`):
+  - `validate-data --verbose` validates feed/source-policy symmetry, category IDs/order, SQLite integrity, prompt provenance, article/digest/event/story schemas, citations/source URLs, active-index parity/ranking, and generated static files. Invalid output is machine-readable and exits nonzero.
+  - `health --verbose` checks freshness/status for all six recorded stages, stale running jobs, pending editorial events, latest collection failures, full artifact validation, and the public homepage/API over HTTPS. The atomic result is stored at `data/state/health.json`; failed checks exit nonzero.
+  - `llm-usage --hours N` reports calls, input/output tokens, optional cost, and distinct runs grouped by stage/model/prompt. Existing `llm_usage` rows already provide per-run accounting; the live audit found zero rows without a prompt version.
+  - `run --dry-run --verbose` is a non-mutating preflight: it acquires/releases the real lock, previews maintenance, counts work for all stages, and validates artifacts with zero network/LLM calls or database/artifact/publish mutations. Aggregation dry-run is now also plan-only and does not instantiate an LLM client.
+- **Reliability fixes**:
+  - Live expired-process lock recovery testing exposed zombie processes being treated as alive. `pipeline/lock.py` now recognizes `/proc` state `Z`, allowing the watchdog to recover a verified terminated process safely.
+  - Sparse aggregation intentionally revisits the newest completed window, but unchanged groups previously rewrote event `updated_at`, causing 100 unnecessary editorial regenerations in the live run. Replays whose articles are already present in the same event are now true no-ops; article assignment SQL also writes only changed rows.
+  - Post-aggregation deduplication now runs only when aggregation changed events. Merged loser story JSON is removed with the loser event so stale orphan artifacts do not accumulate.
+  - Production concurrency was reduced to `editorial.concurrency=2` and `aggregation.deduplication_concurrency=4`; editorial event context is capped at 40,000 characters to reduce Gemini demand failures during unattended runs.
+- **Scheduling and alerting**:
+  - Installed user cron entry: `17 * * * * /home/pmeenan/src/news-tldr.com/scripts/run-scheduled.sh`. The system cron daemon is active; cron works without an active desktop/login session.
+  - The checked-in schedule source is `deploy/cron/news-tldr.cron`. The wrapper runs the full pipeline/publish and health check, rotates `data/state/scheduled-pipeline.log` at 10 MiB, and exits nonzero for cron's normal error-mail path.
+- **Live refresh and publish**:
+  - Collection reached **69/69 feeds** with **0 feed failures**, **0 article failures**, and **42 new articles**; 31 eligible articles completed Gemini digestion.
+  - Aggregation processed one window with 121 articles, created 15 events, updated existing clusters, and merged five duplicate event splits. The incremental replay fix was added immediately after this run to prevent that existing-event churn from recurring hourly.
+  - Editorial cleanup completed all active events despite Gemini 3.7 high-demand 503s. One seven-source political event used the already-validated 3.5 Flash-Lite capacity fallback; its normal citation/schema checks passed and its real model provenance is recorded. Final corpus: **440** stories on 3.7 Flash and **1** on 3.5 Flash-Lite.
+  - Removed three generated orphan story JSON files belonging to events deleted by deduplication; future merges clean these automatically.
+  - Production now serves **441 active stories**, **890 managed static files**, and zero missing/currently pending editorial stories at [news-tldr.com](https://news-tldr.com/).
+- **Final live state**:
+  - Events: **1,392** = **441 active** + **951 archived**. Articles: **0 unfiltered/unassigned pending**. Editorial: **0 pending**.
+  - SQLite `quick_check`: `ok`. Artifact validation: **3,094 articles**, **1,651 digests**, **1,392 events**, **441 stories**, **441 index entries**, **890 static files**, **0 errors**.
+  - Health status: **healthy**; homepage, active-story API, and representative updated story returned HTTP 200 over HTTPS.
+- **Tests & verification**:
+  - Full suite: `PYTHONPATH=. ./.venv/bin/pytest -q` → **262 passed**.
+  - `ruff check .`, `compileall`, `git diff --check`, scheduler `bash -n`, and `pip-audit -r requirements.txt` all passed; no known dependency vulnerabilities.
+  - Live watchdog test spawns a verified process, expires its lock, confirms termination/zombie handling, reacquires the lock, and releases it cleanly.
+- **Files touched**: `pipeline/{operations,aggregate,cli,config,lock,paths,state}.py`, `config/pipeline.json`, `scripts/run-scheduled.sh`, `deploy/cron/news-tldr.cron`, `tests/{test_operations,test_aggregate,test_cli,test_lock}.py`, `README.md`, `docs/{design,plan}.md`, and this handoff. No dependencies were added.
+- **Not committed.** Source changes for Milestone 5 remain in the working tree. Runtime SQLite/JSON/static/log/health data and the installed crontab are outside source control.
+- **Next steps**: The launch plan is complete. Ongoing work is operational only: review `data/state/scheduled-pipeline.log`/`health.json` if cron reports a failure, and use the backlog for optional post-launch features.
+
 ### State on August 24, 2026 (Milestone 4 Presentation + Automatic Production Publishing)
 
 - **Scope**: Implemented the static presentation stage, integrated it after Editorial in the top-level pipeline, documented automatic publishing, and deployed the current 433-story site to [news-tldr.com](https://news-tldr.com/).

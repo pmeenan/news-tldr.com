@@ -366,9 +366,10 @@ def test_run_command_writes_progress_and_combined_stats(monkeypatch, capsys):
 
 
 def test_run_command_no_publish_overrides_config(monkeypatch, capsys):
-    def fake_run_completed_pipeline(*, force=False, publish=None, progress=None):
+    def fake_run_completed_pipeline(*, force=False, publish=None, dry_run=False, progress=None):
         assert force is False
         assert publish is False
+        assert dry_run is False
         assert progress is None
         return {"force": False, "stages": {"presentation": {"published": False}}}
 
@@ -383,6 +384,32 @@ def test_run_command_no_publish_overrides_config(monkeypatch, capsys):
         "force": False,
         "stages": {"presentation": {"published": False}},
     }
+
+
+def test_run_command_dry_run_uses_non_mutating_preflight(monkeypatch, capsys):
+    def fake_run_completed_pipeline(*, force=False, publish=None, dry_run=False, progress=None):
+        assert force is False
+        assert publish is None
+        assert dry_run is True
+        assert progress is not None
+        progress("preflight: fake progress")
+        return {
+            "force": False,
+            "dry_run": True,
+            "preflight": {"validation": {"valid": True}},
+        }
+
+    monkeypatch.setattr("pipeline.cli.run_completed_pipeline", fake_run_completed_pipeline)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["news-tldr-pipeline", "run", "--dry-run", "--verbose"],
+    )
+
+    main()
+
+    captured = capsys.readouterr()
+    assert "preflight: fake progress" in captured.err
+    assert json.loads(captured.out)["dry_run"] is True
 
 
 def test_editorial_verbose_passes_selection_and_writes_progress(monkeypatch, capsys):

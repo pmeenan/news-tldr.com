@@ -1484,6 +1484,79 @@ def test_apply_grouping_result_opinion_filtering(tmp_path, monkeypatch) -> None:
         }
 
 
+def test_apply_grouping_result_replay_does_not_refresh_unchanged_event(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "pipeline.db"
+    event_dir = tmp_path / "events"
+    event_dir.mkdir()
+    migrate(db_path)
+    monkeypatch.setattr("pipeline.aggregate.EVENT_DIR", event_dir)
+    article = _articles()[0]
+    event_payload = {
+        "event_id": "event-a",
+        "title": "Existing event",
+        "category": "technology",
+        "thread": None,
+        "status": "active",
+        "created_at": "2026-05-24T09:00:00Z",
+        "updated_at": "2026-05-24T10:00:00Z",
+        "article_ids": [article.article_id],
+        "article_count": 1,
+        "keywords": ["existing"],
+        "entities": [],
+        "confidence": 0.8,
+        "newsworthiness": {
+            "global": 0.5,
+            "category": 0.7,
+            "model": "deterministic",
+            "prompt_version": "newsworthiness-v1",
+        },
+        "llm_metadata": {"stage": "aggregation", "prompt_version": "aggregation-v6"},
+    }
+    event_path = event_dir / "event-a.json"
+    event_path.write_text(json.dumps(event_payload, sort_keys=True), encoding="utf-8")
+
+    with StateDB(db_path) as state:
+        state.insert_article(
+            {
+                "article_id": article.article_id,
+                "source_id": article.source_id,
+                "source_name": article.source_name,
+                "url": f"https://example.com/{article.article_id}",
+                "headline": article.headline,
+                "summary": article.summary,
+                "published_at": article.published_at,
+                "publish_date_estimated": False,
+                "fetched_at": article.published_at,
+                "content_type": "news",
+                "language": "en",
+                "collection": {},
+                "fingerprints": {},
+            },
+            tmp_path / f"{article.article_id}.json",
+        )
+        state.upsert_event(event_payload, event_path)
+        state.assign_articles_to_event([article.article_id], "event-a")
+        replay_article = ArticleForAggregation(
+            **{**article.__dict__, "event_id": "event-a"}
+        )
+
+        stats = apply_grouping_result(
+            articles=[replay_article],
+            groups=[{"article_indexes": [0], "existing_event_id": "event-a"}],
+            state=state,
+        )
+
+        row = state.conn.execute(
+            "SELECT updated_at, last_editorial_at FROM events WHERE event_id = 'event-a'"
+        ).fetchone()
+        assignment = state.assign_articles_to_event([article.article_id], "event-a")
+
+    assert stats == {"events_created": 0, "events_updated": 0, "article_assignments": 0}
+    assert row["updated_at"] == "2026-05-24T10:00:00Z"
+    assert json.loads(event_path.read_text(encoding="utf-8"))["updated_at"] == "2026-05-24T10:00:00Z"
+    assert assignment == 0
+
+
 def test_apply_grouping_result_event_merging(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "pipeline.db"
     event_dir = tmp_path / "events"
@@ -1639,8 +1712,12 @@ def test_aggregate_once_dry_run_does_not_mutate_window_or_run_state(tmp_path, mo
 
     monkeypatch.setattr("pipeline.aggregate.StateDB", lambda: StateDB(db_path))
     monkeypatch.setattr("pipeline.aggregate.LOCK_PATH", tmp_path / "pipeline.lock")
+    monkeypatch.setattr(
+        "pipeline.aggregate.create_gemini_client",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("dry-run created an LLM client")),
+    )
 
-    stats = aggregate_once(dry_run=True, client=FakeJsonGenerator({}))
+    stats = aggregate_once(dry_run=True)
 
     assert stats["stale_windows_recovered"] == 0
     with StateDB(db_path) as state:

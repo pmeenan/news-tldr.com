@@ -584,8 +584,15 @@ class StateDB:
                     aggregation_reason = NULL,
                     is_filtered = 0
                 WHERE article_id = ?
+                  AND (
+                    event_id IS NULL
+                    OR event_id != ?
+                    OR aggregation_status != 'assigned'
+                    OR aggregation_reason IS NOT NULL
+                    OR is_filtered != 0
+                  )
                 """,
-                [(event_id, article_id) for article_id in article_ids],
+                [(event_id, article_id, event_id) for article_id in article_ids],
             )
         return cursor.rowcount
 

@@ -15,7 +15,7 @@
     "window_step_hours": 3,
     "stale_threshold_hours": 48,
     "category_batch_concurrency": 8,
-    "deduplication_concurrency": 16,
+    "deduplication_concurrency": 4,
     "min_category_impact": 0.25
   },
   "digest": {
@@ -25,15 +25,20 @@
     "filter_review_margin": 0.1
   },
   "editorial": {
-    "concurrency": 8,
+    "concurrency": 2,
     "article_char_limit": 12000,
-    "event_char_limit": 60000
+    "event_char_limit": 40000
   },
   "presentation": {
     "site_url": "https://news-tldr.com",
     "rolling_window_hours": 72,
     "publish_enabled": true,
     "publish_dir": "/var/www/news-tldr.com"
+  },
+  "operations": {
+    "max_pipeline_age_hours": 3,
+    "max_failed_feeds": 5,
+    "max_article_failures": 25
   },
   "retention": {
     "staging_article_days": 3,

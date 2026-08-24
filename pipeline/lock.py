@@ -32,6 +32,18 @@ def _process_start_time(pid: int) -> str | None:
         return None
 
 
+def _process_state(pid: int) -> str | None:
+    stat = Path(f"/proc/{pid}/stat")
+    if not stat.exists():
+        return None
+    try:
+        # Field 3 is the one-character process state. Zombies still have a
+        # /proc entry but cannot own a useful pipeline lock.
+        return stat.read_text(encoding="utf-8").split()[2]
+    except (OSError, IndexError):
+        return None
+
+
 def _boot_id() -> str | None:
     path = Path("/proc/sys/kernel/random/boot_id")
     try:
@@ -42,7 +54,7 @@ def _boot_id() -> str | None:
 
 def _pid_is_same_process(pid: int, start_time: str | None) -> bool:
     current = _process_start_time(pid)
-    if current is None:
+    if current is None or _process_state(pid) == "Z":
         return False
     return start_time is None or current == start_time
 

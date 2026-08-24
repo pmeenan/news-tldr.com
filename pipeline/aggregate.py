@@ -15,7 +15,7 @@ from typing import Any, Protocol
 from pipeline.config import load_categories, load_feeds, load_pipeline_config
 from pipeline.llm import GeminiResult, create_gemini_client
 from pipeline.lock import PipelineLock
-from pipeline.paths import EVENT_DIR, LOCK_PATH, PROJECT_ROOT
+from pipeline.paths import EVENT_DIR, LOCK_PATH, PROJECT_ROOT, STORY_DIR
 from pipeline.state import StateDB
 from pipeline.util import atomic_write_json, isoformat_z, sanitize_id
 
@@ -892,10 +892,12 @@ def aggregate_once(
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"aggregation-{uuid.uuid4().hex}"
     state = StateDB()
-    owns_generator = client is None
-    generator = client or create_gemini_client("bulk")
-    owns_review_generator = review_client is None and client is None
-    review_generator = review_client or (generator if client is not None else create_gemini_client("review"))
+    owns_generator = client is None and not dry_run
+    generator = client or (None if dry_run else create_gemini_client("bulk"))
+    owns_review_generator = review_client is None and client is None and not dry_run
+    review_generator = review_client or (
+        generator if client is not None or dry_run else create_gemini_client("review")
+    )
     stats: dict[str, Any] = {
         "windows_planned": 0,
         "windows_processed": 0,
@@ -919,8 +921,8 @@ def aggregate_once(
         "force_articles_reset": 0,
         "force_events_deleted": 0,
         "force_events_trimmed": 0,
-        "bulk_model": generator.model,
-        "review_model": review_generator.model,
+        "bulk_model": getattr(generator, "model", None),
+        "review_model": getattr(review_generator, "model", None),
     }
     try:
         lock_context = PipelineLock(LOCK_PATH, lock_timeout, run_id=run_id) if acquire_lock else nullcontext()
@@ -1043,6 +1045,19 @@ def aggregate_once(
 
                         total_articles_in_window = len(articles)
                         category_batches = _category_batches_for_articles(articles, feeds_by_source)
+                        if dry_run:
+                            stats["articles_seen"] += total_articles_in_window
+                            stats["windows_processed"] += 1
+                            stats["category_batches_planned"] = int(
+                                stats.get("category_batches_planned", 0)
+                            ) + len(category_batches)
+                            if progress:
+                                progress(
+                                    "aggregate: dry-run planned "
+                                    f"{len(category_batches)} category batch(es) for "
+                                    f"{total_articles_in_window} article(s); no LLM calls made"
+                                )
+                            continue
 
                         # Pre-fetch active events once per window, partition by category in Python.
                         since = _recent_event_cutoff()
@@ -1270,7 +1285,7 @@ def aggregate_once(
                                 article_count=0,
                                 stats={"error": str(exc)},
                             )
-                if not dry_run:
+                if not dry_run and (stats["events_created"] or stats["events_updated"]):
                     try:
                         deduplicate_active_events_llm(
                             state=state,
@@ -1292,6 +1307,8 @@ def aggregate_once(
                             None,
                             exc,
                         )
+                elif not dry_run and progress:
+                    progress("deduplicate: skipped because aggregation made no event changes")
 
                 if stats["windows_failed"]:
                     status = "failed" if stats["windows_processed"] == 0 else "partial_failure"
@@ -1306,11 +1323,11 @@ def aggregate_once(
         return stats
     finally:
         state.close()
-        if owns_review_generator:
+        if owns_review_generator and review_generator is not None:
             close = getattr(review_generator, "close", None)
             if callable(close):
                 close()
-        if owns_generator:
+        if owns_generator and generator is not None:
             close = getattr(generator, "close", None)
             if callable(close):
                 close()
@@ -1426,9 +1443,28 @@ def apply_grouping_result(
                     other_path.unlink(missing_ok=True)
                 except Exception:
                     pass
+            for other_id in winner_event_ids:
+                try:
+                    (STORY_DIR / f"{other_id}.json").unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         merged_article_ids.update(art.article_id for art in group_articles)
         event_path = EVENT_DIR / f"{event_id}.json"
+
+        # Sparse planning intentionally revisits the newest completed window so
+        # late articles can attach to existing events. Do not turn that replay
+        # into an event update when every grouped article is already present in
+        # the same event: changing updated_at would trigger needless editorial
+        # regeneration on every hourly run.
+        if (
+            not created
+            and not winner_event_ids
+            and existing is not None
+            and {article.article_id for article in group_articles}
+            <= set(existing.get("article_ids", []))
+        ):
+            continue
 
         if existing is None:
             existing_payload = None
@@ -2791,6 +2827,10 @@ def merge_events(
 
     try:
         loser_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        (STORY_DIR / f"{loser_id}.json").unlink(missing_ok=True)
     except Exception:
         pass
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import timedelta
 
 import pytest
@@ -45,6 +46,36 @@ def test_lock_recovers_stale_dead_process(tmp_path):
     assert lock_path.exists()
     lock.release()
     assert not lock_path.exists()
+
+
+def test_lock_watchdog_terminates_verified_expired_process(tmp_path):
+    lock_path = tmp_path / "pipeline.lock"
+    process = subprocess.Popen(["sleep", "60"])
+    try:
+        start_time = _process_start_time(process.pid)
+        assert start_time is not None
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "pid": process.pid,
+                    "pid_start_time": start_time,
+                    "acquired_at": isoformat_z(utc_now() - timedelta(hours=2)),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        lock = PipelineLock(lock_path, timeout=timedelta(minutes=30), run_id="replacement")
+        lock.acquire()
+
+        assert process.wait(timeout=5) is not None
+        assert lock_path.exists()
+        lock.release()
+        assert not lock_path.exists()
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
 
 
 def test_lock_refuses_foreign_host_even_when_expired(tmp_path):

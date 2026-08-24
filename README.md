@@ -93,6 +93,13 @@ Build the site during a full run without updating production:
 ./.venv/bin/python -m pipeline.cli run --verbose --no-publish
 ```
 
+Preflight a complete run without network calls, LLM calls, database changes,
+artifact writes, or publishing:
+
+```bash
+./.venv/bin/python -m pipeline.cli run --dry-run --verbose
+```
+
 Run the maintenance/retention stage on its own. It advances old events through
 the active/stale/archived lifecycle, expires old unassigned articles outside
 the configured staging-retention horizon, restores mistakenly expired articles
@@ -172,6 +179,62 @@ homepage freshness, and the production root. Deployment copies only generated
 static files, removes only stale files recorded in its managed manifest, preserves
 unknown server files, and replaces `index.html` last so readers do not see a new
 homepage before its referenced pages and assets are present.
+
+### Operations and Monitoring
+
+Validate configuration symmetry, SQLite integrity, article/event/story schemas,
+LLM prompt provenance, citation references, the active index, and generated
+static output:
+
+```bash
+./.venv/bin/python -m pipeline.cli validate-data --verbose
+```
+
+Check that every pipeline stage completed successfully within the configured
+freshness limit, inspect the latest collection failures, validate artifacts,
+and verify the public homepage and JSON API over HTTPS:
+
+```bash
+./.venv/bin/python -m pipeline.cli health --verbose
+```
+
+The latest machine-readable health result is written to
+`data/state/health.json`. A failed check exits nonzero. `--no-network` and
+`--no-validate` provide narrower diagnostic modes.
+
+Summarize recorded model calls and token usage by stage, model, and prompt:
+
+```bash
+./.venv/bin/python -m pipeline.cli llm-usage --hours 24
+```
+
+The production machine runs `scripts/run-scheduled.sh` from the user's crontab
+at minute 17 of every hour. The wrapper runs the complete pipeline, publishes
+successful output, runs the health check, rotates its log at 10 MiB, and exits
+nonzero on pipeline or health failure. Detailed output is stored in
+`data/state/scheduled-pipeline.log`; cron's normal mail/error path provides the
+alert signal. The reproducible crontab entry is in
+`deploy/cron/news-tldr.cron`.
+
+Verify the installed schedule:
+
+```bash
+crontab -l | grep news-tldr
+```
+
+### Configuration Catalog
+
+- **Feeds**: Add a unique sanitized `source_id` to `config/feeds.json` with
+  `source_name`, `feed_url`, optional `site_url`, `enabled`, a valid
+  `default_category`, category/content hints, and fetch overrides. Scraper
+  sources must use a module inside `pipeline.scrapers`.
+- **Source policy**: Add the same `source_id` to `config/source-policy.json`
+  with `bias_label`, `reliability`, `paywall`, and an explanatory note. Feed
+  and policy ID sets must remain exactly symmetric; `validate-data` enforces it.
+- **Categories**: Add a sanitized `id`, display `name`, `description`, and
+  unique `sort_order` to `config/categories.json`, then update the aggregation
+  category-group mapping and prompt guidance if the new category changes event
+  grouping behavior.
 
 Remove the local generated SQLite state, staged articles, event files, published files, and fetch logs:
 ```bash

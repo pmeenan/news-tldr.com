@@ -21,6 +21,13 @@ from pipeline.digest import digest_once
 from pipeline.editorial import editorial_once
 from pipeline.lock import PipelineLock
 from pipeline.maintenance import maintenance_once
+from pipeline.operations import (
+    health_report,
+    llm_usage_report,
+    preflight_report,
+    validate_artifacts,
+    write_health_report,
+)
 from pipeline.paths import ARTICLE_DIR, DATA_DIR, DB_PATH, FETCH_LOG_DIR, LOCK_PATH
 from pipeline.present import presentation_once
 from pipeline.state import StateDB, migrate
@@ -98,6 +105,7 @@ def run_completed_pipeline(
     *,
     force: bool = False,
     publish: bool | None = None,
+    dry_run: bool = False,
     progress=None,
 ) -> dict[str, object]:
     config = load_pipeline_config()
@@ -107,6 +115,15 @@ def run_completed_pipeline(
     with PipelineLock(LOCK_PATH, lock_timeout, run_id=run_id):
         if progress:
             progress("run: acquired pipeline lock")
+        if dry_run:
+            if progress:
+                progress("run: starting non-mutating preflight; network and LLM calls are disabled")
+            return {
+                "force": force,
+                "dry_run": True,
+                "preflight": preflight_report(progress=progress),
+            }
+        if progress:
             progress("run: starting maintenance")
         migrate()
         maintenance_stats = maintenance_once(progress=progress, acquire_lock=False)
@@ -167,6 +184,11 @@ def main() -> None:
     )
     run_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and plan the run without network, LLM, database, artifact, or publish mutations.",
+    )
+    run_parser.add_argument(
         "--no-publish",
         action="store_true",
         help="Build the static site but do not copy it to the configured production directory.",
@@ -180,7 +202,7 @@ def main() -> None:
     aggregate_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Run LLM grouping without mutating events, article assignments, or aggregation windows.",
+        help="Plan windows and category batches without LLM calls or mutations.",
     )
     aggregate_parser.add_argument(
         "--force",
@@ -229,6 +251,33 @@ def main() -> None:
         help="Override the configured absolute production directory.",
     )
     presentation_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
+    validate_parser = sub.add_parser(
+        "validate-data",
+        help="Validate config, SQLite, pipeline JSON artifacts, and generated static output.",
+    )
+    validate_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
+    health_parser = sub.add_parser(
+        "health",
+        help="Check recent pipeline stages, collection failures, artifacts, and the live site.",
+    )
+    health_parser.add_argument(
+        "--max-age-hours",
+        type=int,
+        help="Override the maximum age of the latest successful stage run.",
+    )
+    health_parser.add_argument(
+        "--no-network",
+        action="store_true",
+        help="Skip HTTPS checks against the configured public site.",
+    )
+    health_parser.add_argument(
+        "--no-validate",
+        action="store_true",
+        help="Skip the full artifact validation pass.",
+    )
+    health_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
+    usage_parser = sub.add_parser("llm-usage", help="Summarize recorded LLM tokens and cost by stage/model.")
+    usage_parser.add_argument("--hours", type=int, default=24, help="Reporting lookback in hours.")
     maintenance_parser = sub.add_parser(
         "maintenance",
         help="Run retention cleanup, event lifecycle updates, and artifact reconciliation.",
@@ -278,13 +327,18 @@ def main() -> None:
             state.sync_feeds(feeds)
         print("initialized data/state/pipeline.db")
     elif args.command == "run":
+        if args.force and args.dry_run:
+            parser.error("--force and --dry-run cannot be combined")
         progress = _stderr_progress if args.verbose else None
         stats = run_completed_pipeline(
             force=args.force,
             publish=False if args.no_publish else None,
+            dry_run=args.dry_run,
             progress=progress,
         )
         print(json.dumps(stats, indent=2, sort_keys=True))
+        if args.dry_run and not stats["preflight"]["validation"]["valid"]:
+            raise SystemExit(1)
     elif args.command == "collect":
         progress = _stderr_progress if args.verbose else None
         stats = asyncio.run(collect_once(progress=progress))
@@ -347,6 +401,30 @@ def main() -> None:
             progress=progress,
         )
         print(json.dumps(stats, indent=2, sort_keys=True))
+    elif args.command == "validate-data":
+        progress = _stderr_progress if args.verbose else None
+        stats = validate_artifacts(progress=progress)
+        print(json.dumps(stats, indent=2, sort_keys=True))
+        if not stats["valid"]:
+            raise SystemExit(1)
+    elif args.command == "health":
+        if args.max_age_hours is not None and args.max_age_hours < 1:
+            parser.error("--max-age-hours must be at least 1")
+        progress = _stderr_progress if args.verbose else None
+        stats = health_report(
+            check_live_site=not args.no_network,
+            max_age_hours=args.max_age_hours,
+            validate=not args.no_validate,
+            progress=progress,
+        )
+        write_health_report(stats)
+        print(json.dumps(stats, indent=2, sort_keys=True))
+        if stats["status"] != "healthy":
+            raise SystemExit(1)
+    elif args.command == "llm-usage":
+        if args.hours < 1:
+            parser.error("--hours must be at least 1")
+        print(json.dumps(llm_usage_report(hours=args.hours), indent=2, sort_keys=True))
     elif args.command == "maintenance":
         progress = _stderr_progress if args.verbose else None
         migrate()

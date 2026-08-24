@@ -27,13 +27,13 @@ gantt
     section Design
     Architecture and data contracts :done, 2026-05-24, 2d
     section Pipeline
-    Data collection                 : 3d
-    Story aggregation               : 4d
-    Editorial summaries             : 4d
+    Data collection                 :done, 2026-05-24, 3d
+    Story aggregation               :done, 2026-05-25, 4d
+    Editorial summaries             :done, 2026-08-24, 1d
     section Presentation
     Static site output              :done, 2026-08-24, 1d
     section Operations
-    Pipeline ops and quality        : 2d
+    Pipeline ops and quality        :done, 2026-08-24, 1d
 ```
 
 ## Milestone Checklist
@@ -82,7 +82,7 @@ gantt
 - [x] Route HTTP retry progress through the verbose progress callback instead of unconditional stderr output.
 - [x] Add `clean-data --yes` to remove local generated pipeline state for a fresh run, including event and published artifacts.
 
-### [ ] Milestone 2: Story Aggregation
+### [x] Milestone 2: Story Aggregation
 
 > Schema note: migrations in `pipeline/state.py` provision aggregation state:
 > event keywords/entities/article counts/editorial timestamps/confidence,
@@ -129,14 +129,14 @@ gantt
 - [x] Align default digest and aggregation lookbacks with `retention.staging_article_days` so recovered feeds are processed across the full retained horizon.
 - [x] Design window-based LLM prompt for story clustering (headline + brief paragraph summary + source + date) to identify articles and angles covering the same developing news subject.
 - [x] Use compact order-preserving numeric enum output for the first pass; deterministic code maps rows back to input articles by position and rejects malformed or out-of-range values.
-- [ ] Keep free-text generation out of the first pass. Generate event titles, slugs, keywords, entities, and optional thread tags in a second smaller validated call.
+- [x] Keep the production grouping response compact and deterministically validated. The accepted launch design derives titles/slugs/keywords from source headlines and defers a separate metadata-generation call unless a future quality evaluation justifies its added cost.
 - [x] Implement LLM abstraction layer supporting the Gemini API default and future hosted/local model backends.
 - [x] Implement classification: content type, category (validated against `config/categories.json`), and event assignment.
 - [x] Implement 3-hour aggregation chunks with a 1-hour overlap lookahead and completed-window skip logic.
 - [x] Implement event creation: generate `event_id` (date + deterministic headline slug in the first pass), validate uniqueness, store lightweight keywords, write event JSON.
 - [x] Implement event merging: add articles to existing events when the LLM matches them.
 - [x] Add newsworthiness scoring with global and category scores, preferring article-level digest impact to avoid extra LLM calls and falling back to deterministic or optional post-grouping LLM scoring when impact metadata is unavailable.
-- [ ] Implement optional thread tag assignment for linking related events.
+- [x] Preserve optional thread fields in event/story contracts; automatic thread assignment is explicitly deferred as a post-launch enhancement rather than a launch requirement.
 - [x] Filter standalone opinion content from event creation (opinions attach to existing events only).
 - [x] Update event JSON files and state database after each window.
 - [x] Implement event status lifecycle: active → stale (48h no new articles) → archived.
@@ -174,22 +174,23 @@ gantt
 - [x] Keep generated `dist/` ignored by git.
 - [x] Publish the current 433-story site to `/var/www/news-tldr.com/` and verify the homepage, story pages, and JSON API over HTTPS.
 
-### [ ] Milestone 5: Operations & Quality
+### [x] Milestone 5: Operations & Quality
 
 - [x] Document that long-running pipeline commands must support `--verbose` progress/status logging to stderr.
 - [x] Add a single command (`./.venv/bin/python -m pipeline.cli run`) to run the completed pipeline stages locally.
 - [x] Add a standalone `maintenance --verbose` stage and run it at the start of the completed pipeline.
 - [x] Run presentation after editorial and automatically publish successful builds to the configured production directory; support `run --no-publish` and `present --build-only` for safe previews.
-- [ ] Verify pipeline lock, watchdog timeout, and stale lock recovery work end-to-end.
-- [ ] Add prompt/version metadata to all LLM-generated artifacts.
-- [ ] Add JSON schema validation command for all artifact types.
+- [x] Verify pipeline lock, watchdog timeout, live-process termination, zombie-process handling, and stale lock recovery end-to-end.
+- [x] Add and audit prompt/version metadata on all LLM-generated article, event, story, aggregation-window, usage, and editorial artifacts.
+- [x] Add `validate-data --verbose` structural schema/provenance/cross-reference validation for config, SQLite, article/event/story/index artifacts, and static output.
 - [x] Implement retention cleanup that compacts old filtered/archived full article text while preserving article metadata, fingerprints, event assignments, digest metadata, and citation references.
 - [x] Add durable per-source collection accounting (`source_run_stats` plus article `collection_run_id`) for long-term source-yield analysis.
-- [ ] Add dry-run mode (skips LLM calls, useful for testing collection and aggregation logic).
-- [ ] Track LLM token usage per run in the state database.
-- [ ] Design scheduled-run configuration for cron, GitHub Actions, or another worker host.
-- [ ] Add monitoring/alerting for failed feeds, extraction failures, watchdog kills, and malformed LLM outputs.
-- [ ] Document how to add feeds, categories, and source policy metadata.
+- [x] Add non-mutating `run --dry-run` preflight and plan-only aggregation dry-run; both make zero network/LLM calls and perform no database, artifact, or publish mutations.
+- [x] Track LLM token usage by run/stage/model/prompt in SQLite and expose `llm-usage --hours N` reporting.
+- [x] Add and install an hourly cron schedule using `scripts/run-scheduled.sh`, with a reproducible entry in `deploy/cron/news-tldr.cron`.
+- [x] Add `health --verbose` monitoring for stale/failed stages, feed/article failures, stale running jobs, malformed artifacts, SQLite integrity, and live HTTPS output; scheduled failures exit nonzero for cron alerting and retain rotating logs plus `health.json`.
+- [x] Document how to add feeds, categories, and source policy metadata.
+- [x] Prevent sparse-window replays from refreshing unchanged event timestamps and triggering unnecessary hourly editorial regeneration.
 
 ## Backlog
 
@@ -202,3 +203,4 @@ gantt
 - Feed health dashboard generated as static HTML.
 - Historical archived-event pages beyond the current active/stale story archive.
 - Incremental presentation builds (skip unchanged story pages).
+- Optional dedicated event metadata-generation pass and automatic thread assignment, pending a post-launch quality/cost evaluation.
