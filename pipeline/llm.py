@@ -12,7 +12,8 @@ import httpx
 
 from pipeline.paths import PROJECT_ROOT
 
-DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_GEMINI_REVIEW_MODEL = "gemini-3.7-flash"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
@@ -22,6 +23,7 @@ DEFAULT_BACKOFF_MAX_SECONDS = 30.0
 DEFAULT_MAX_CONNECTIONS = 100
 DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20
 DEFAULT_HTTP2 = False
+VALID_THINKING_LEVELS = frozenset({"minimal", "low", "medium", "high"})
 
 
 class GeminiTruncatedError(RuntimeError):
@@ -98,6 +100,7 @@ class GeminiClient:
         http_client: httpx.Client | None = None,
         transport: httpx.BaseTransport | None = None,
         http2: bool = DEFAULT_HTTP2,
+        thinking_level: str | None = None,
     ) -> None:
         load_dotenv()
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
@@ -106,6 +109,11 @@ class GeminiClient:
         self.api_base = api_base.rstrip("/")
         self.max_output_tokens = max_output_tokens
         self.max_attempts = max(1, int(max_attempts))
+        if thinking_level is not None and thinking_level not in VALID_THINKING_LEVELS:
+            raise ValueError(
+                f"thinking_level must be one of {sorted(VALID_THINKING_LEVELS)}"
+            )
+        self.thinking_level = thinking_level
         self.backoff_base_seconds = max(0.0, float(backoff_base_seconds))
         self.backoff_max_seconds = max(0.0, float(backoff_max_seconds))
         self._sleep = sleep or time.sleep
@@ -138,20 +146,30 @@ class GeminiClient:
         system_instruction: str,
         prompt: str,
         response_schema: dict[str, Any],
-        temperature: float = 0,
         max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
     ) -> GeminiResult:
+        selected_thinking_level = thinking_level or self.thinking_level
+        if (
+            selected_thinking_level is not None
+            and selected_thinking_level not in VALID_THINKING_LEVELS
+        ):
+            raise ValueError(
+                f"thinking_level must be one of {sorted(VALID_THINKING_LEVELS)}"
+            )
+        generation_config: dict[str, Any] = {
+            "maxOutputTokens": int(max_output_tokens or self.max_output_tokens),
+            "responseMimeType": "application/json",
+            "responseSchema": response_schema,
+        }
+        if selected_thinking_level is not None:
+            generation_config["thinkingConfig"] = {
+                "thinkingLevel": selected_thinking_level,
+            }
         request_payload = {
             "systemInstruction": {"parts": [{"text": system_instruction}]},
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": temperature,
-                "topP": 1,
-                "topK": 1,
-                "maxOutputTokens": int(max_output_tokens or self.max_output_tokens),
-                "responseMimeType": "application/json",
-                "responseSchema": response_schema,
-            },
+            "generationConfig": generation_config,
         }
         url = f"{self.api_base}/models/{self.model}:generateContent"
         body = json.dumps(request_payload).encode("utf-8")
@@ -212,6 +230,25 @@ class GeminiClient:
         delay = self.backoff_base_seconds * (2 ** (attempt - 1))
         jitter = random.uniform(0.0, 0.5)
         return min(delay + jitter, self.backoff_max_seconds)
+
+
+def gemini_model_for_stage(stage: str) -> str:
+    """Resolve stable stage-specific model IDs while preserving GEMINI_MODEL fallback."""
+    load_dotenv()
+    fallback = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+    if stage == "review":
+        return os.environ.get("GEMINI_REVIEW_MODEL", DEFAULT_GEMINI_REVIEW_MODEL)
+    if stage == "bulk":
+        return os.environ.get("GEMINI_BULK_MODEL", fallback)
+    raise ValueError("stage must be 'bulk' or 'review'")
+
+
+def create_gemini_client(stage: str) -> GeminiClient:
+    if stage == "review":
+        return GeminiClient(model=gemini_model_for_stage(stage), thinking_level="low")
+    if stage == "bulk":
+        return GeminiClient(model=gemini_model_for_stage(stage), thinking_level="minimal")
+    raise ValueError("stage must be 'bulk' or 'review'")
 
 
 def _extract_text(response_payload: dict[str, Any]) -> str:

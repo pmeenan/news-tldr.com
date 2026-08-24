@@ -38,23 +38,26 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-This installs the feed parser, HTTP client with HTTP/2 support, article extraction, and scraper dependencies used by the collection pipeline.
+This installs the feed parser, HTTP client, article extraction, and scraper dependencies used by the collection pipeline.
 
 Any scripts or pipeline executions should run using the Python interpreter inside `.venv` (e.g., `./.venv/bin/python`).
 
 ### Hosted LLM Setup
 
-Stage 2 story aggregation uses the Gemini Developer API by default. Create a
-local `.env` file with an AI Studio API key and the default aggregation model:
+Article digestion and Stage 2 story aggregation use the Gemini Developer API.
+Create a local `.env` file with an AI Studio API key and the two model tiers:
 
 ```bash
 GEMINI_API_KEY=your-ai-studio-api-key
-GEMINI_MODEL=gemini-3.1-flash-lite
+GEMINI_BULK_MODEL=gemini-3.5-flash-lite
+GEMINI_REVIEW_MODEL=gemini-3.7-flash
 ```
 
-The `.env` file is ignored by git and must not be committed. Aggregation calls
-should use Gemini structured output and deterministic generation settings, with
-all LLM responses validated before they update pipeline state.
+`GEMINI_MODEL` remains a supported fallback for the bulk tier. The `.env` file
+is ignored by git and must not be committed. Bulk digestion, grouping, scoring,
+and candidate discovery use 3.5 Flash-Lite with minimal thinking. Borderline
+article-filter decisions and final event-merge decisions use 3.7 Flash with low
+thinking. All calls use Gemini structured output and validated responses.
 
 ### Pipeline Commands
 
@@ -84,8 +87,9 @@ running the completed pipeline:
 
 Run the maintenance/retention stage on its own. It advances old events through
 the active/stale/archived lifecycle, expires old unassigned articles outside
-the default aggregation horizon, reconciles active/stale event JSON with SQLite
-assignments, and compacts old filtered or archived article JSON:
+the configured staging-retention horizon, restores mistakenly expired articles
+that are still inside that horizon, reconciles active/stale event JSON with
+SQLite assignments, and compacts old filtered or archived article JSON:
 ```bash
 ./.venv/bin/python -m pipeline.cli maintenance --verbose
 ```
@@ -101,7 +105,8 @@ Print incremental collection progress to stderr while keeping final stats on std
 ```
 
 Run the article digest stage. This generates factual per-article summaries,
-key facts, and article-level impact scores before story aggregation:
+key facts, and article-level impact scores before story aggregation. With no
+explicit range, it covers the configured staging retention horizon:
 ```bash
 ./.venv/bin/python -m pipeline.cli digest --verbose
 ```
@@ -114,7 +119,7 @@ Regenerate existing current-version digests after prompt or validation changes:
 Run stage 2 story aggregation. Aggregation consumes completed article digests,
 filters out non-news/promotional/video-carousel items and low category-impact
 articles according to `config/pipeline.json`, then groups eligible articles
-into events:
+into events. Its default lookback matches the staging retention horizon:
 ```bash
 ./.venv/bin/python -m pipeline.cli aggregate --verbose
 ```

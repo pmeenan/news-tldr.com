@@ -193,7 +193,7 @@ Custom scraper entries use `"feed_type": "scraper"` and a `fetch.scraper_module`
       "rationale_codes": ["public_safety", "economic_impact"]
     },
     "generated_at": "2026-05-24T12:50:00Z",
-    "model": "gemini-3.1-flash-lite",
+    "model": "gemini-3.5-flash-lite",
     "prompt_version": "article-digest-v6",
     "content_chars_used": 12000
   },
@@ -250,6 +250,7 @@ Responsibilities:
   - `content_quality in {thin, extraction_noise, paywalled}` (without a HIGH rationale code) → both axes capped at `0.65`.
 - Schema-emit an optional `study_stage` enum on medical/biological/materials research articles (`preclinical`, `animal`, `early_human`, `trial_phase`, `approved`, `observational`, `lab_bench`, `unknown`); `not_applicable`, unrecognized values, and stages attached to uncovered domains such as climate, astronomy, aeronautics, software, or general engineering research are dropped before persistence so the field stays present only when meaningful.
 - Reset aggregation status to `pending` when a digest is generated or refreshed, so a changed impact score can make a previously filtered article eligible again.
+- Use `gemini-3.5-flash-lite` for the first digest. When category impact is within `digest.filter_review_margin` of the aggregation threshold, or a non-`ok` quality label conflicts with a high-impact rationale, run `article-filter-review-v1` on `gemini-3.7-flash`. Persist the first-pass score/quality/model, final reviewer model, rationale, and both usage records. The reviewer may rescue or drop an article; it is not a one-way promotion pass.
 
 The CLI entrypoint is:
 
@@ -257,7 +258,7 @@ The CLI entrypoint is:
 ./.venv/bin/python -m pipeline.cli digest --verbose
 ```
 
-Optional `--range-start`, `--range-end`, `--limit`, and `--concurrency` flags make the stage practical to debug independently from aggregation. `--force` regenerates current-version digests instead of treating them as completed, which is useful after prompt or validation changes. By default, if no range is specified, the processing window is restricted to articles published within the current and previous UTC days (starting at 00:00:00 UTC of yesterday) to avoid processing older retained data.
+Optional `--range-start`, `--range-end`, `--limit`, and `--concurrency` flags make the stage practical to debug independently from aggregation. `--force` regenerates current-version digests instead of treating them as completed, which is useful after prompt or validation changes. By default, if no range is specified, the stage starts at the configured staging-retention boundary (three UTC days by default), ensuring that late-arriving articles from recovered feeds are digested before maintenance expires them.
 
 ## Stage 2b: Story Aggregation
 
@@ -290,20 +291,20 @@ Studio API key in local `.env` configuration:
 
 ```bash
 GEMINI_API_KEY=your-ai-studio-api-key
-GEMINI_MODEL=gemini-3.1-flash-lite
+GEMINI_BULK_MODEL=gemini-3.5-flash-lite
+GEMINI_REVIEW_MODEL=gemini-3.7-flash
 ```
 
-The initial hosted model is `gemini-3.1-flash-lite`, called through the
-`generativelanguage.googleapis.com` API with the `x-goog-api-key` header using
-a pooled `httpx` HTTP/1.1 client. The LLM client intentionally avoids HTTP/2
-because the pipeline's small concurrent request pool benefits more from
-predictable parallel connections than from multiplexing.
-Aggregation requests should use deterministic generation settings and Gemini
-structured output (`responseMimeType: application/json` plus a response JSON
-schema). API keys must not be written to logs, command output, JSON artifacts,
-or committed files.
+Bulk calls use `gemini-3.5-flash-lite` with minimal thinking; selective review
+calls use `gemini-3.7-flash` with low thinking. `GEMINI_MODEL` remains a bulk
+fallback. Both are called through `generativelanguage.googleapis.com` with the
+`x-goog-api-key` header and a pooled `httpx` HTTP/1.1 client. Requests omit the
+deprecated Gemini 3 sampling fields (`temperature`, `topP`, and `topK`) and use
+structured output (`responseMimeType: application/json` plus a JSON schema).
+API keys must not be written to logs, command output, JSON artifacts, or
+committed files.
 
-Aggregation runs over fixed UTC publish-time chunks with a short overlap lookahead. The default aggregation chunk is 3 hours with an additional 1-hour overlap, so actual LLM windows are 4 hours wide and anchored to UTC boundaries (`00:00-04:00`, `03:00-07:00`, `06:00-10:00`, `09:00-13:00`, `12:00-16:00`, `15:00-19:00`, `18:00-22:00`, `21:00-01:00`). Hourly cron runs keep returning to those same fixed windows rather than shifting the window start based on the current hour or first unassigned article. The digest stage should run before aggregation; aggregation then filters non-news/spammy/video-carousel artifacts and articles whose digest category/vertical impact score is below the configured threshold. The state database records completed aggregation windows; normal pipeline runs use sparse planning, selecting only fixed window starts that have unassigned articles in that publish-time bucket, plus the latest completed window when it falls in range. This avoids rerunning every intervening old window when late-arriving articles appear with older publication timestamps. Forced aggregation remains continuous so reset coverage is explicit. For each aggregation window, we load all eligible articles published within those hours (both assigned and unassigned) and send their metadata (headline + digest summary/key facts when available, otherwise collected summary + source + publish date) to the LLM to:
+Aggregation runs over fixed UTC publish-time chunks with a short overlap lookahead. The default aggregation chunk is 3 hours with an additional 1-hour overlap, so actual LLM windows are 4 hours wide and anchored to UTC boundaries (`00:00-04:00`, `03:00-07:00`, `06:00-10:00`, `09:00-13:00`, `12:00-16:00`, `15:00-19:00`, `18:00-22:00`, `21:00-01:00`). Hourly cron runs keep returning to those same fixed windows rather than shifting the window start based on the current hour or first unassigned article. The default planning horizon matches `retention.staging_article_days` (three days), so late-arriving articles accepted by collection are not outside digest/aggregation coverage. The digest stage should run before aggregation; aggregation then filters non-news/spammy/video-carousel artifacts and articles whose digest category/vertical impact score is below the configured threshold. The state database records completed aggregation windows; normal pipeline runs use sparse planning, selecting only fixed window starts that have unassigned articles in that publish-time bucket, plus the latest completed window when it falls in range. This avoids rerunning every intervening old window when late-arriving articles appear with older publication timestamps. Forced aggregation remains continuous so reset coverage is explicit. For each aggregation window, we load all eligible articles published within those hours (both assigned and unassigned) and send their metadata (headline + digest summary/key facts when available, otherwise collected summary + source + publish date) to the LLM to:
 
 1. Classify each article's content type and category.
 2. Group articles into story clusters (matching and referencing existing event IDs where applicable) by identifying multiple outlets and angles reporting on the same developing news subject.
@@ -355,7 +356,7 @@ Scores are normalized from `0.0` to `1.0`, validated by deterministic code, stor
 
 ### Stage 2 Implementation
 
-The initial aggregation implementation lives in `pipeline/aggregate.py` and is exposed by `./.venv/bin/python -m pipeline.cli aggregate`. It plans 3-hour aggregation chunks with a 1-hour overlap lookahead (4-hour LLM windows fixed to `00/03/06/09/12/15/18/21` UTC starts), skips completed windows using `aggregation_windows`, loads category-impact-eligible articles in each planned window, calls Gemini with headline + digest/summary metadata in category-bounded batches, validates that every article index appears exactly once, scores resulting groups for newsworthiness from digest impact or fallback scoring, writes `data/events/<event_id>.json`, upserts the `events` table, assigns `articles.event_id`, and records completed windows. Windows remain sequential because each window should see event state from earlier windows; within a window the LLM-only category batch work is concurrent. The command supports `--range-start`, `--range-end`, `--limit-windows`, `--dry-run`, `--force`, and `--verbose`. By default, if no range is specified, aggregation bounds still cover unassigned articles in the current and previous UTC days (starting at 00:00:00 UTC of yesterday), but non-force planning sparsely selects only the fixed UTC windows that have unassigned articles in their own publish-time bucket, plus the latest completed window when applicable. If no unassigned articles exist within this window, the run completes early without planning windows. With `--force`, default planning instead uses recently completed digests in the current and previous UTC days, clears prior event assignments and aggregation-stage filter decisions for the actual planned window coverage, deletes or trims affected event artifacts, and then reruns the continuous window range even if windows were previously marked completed.
+The initial aggregation implementation lives in `pipeline/aggregate.py` and is exposed by `./.venv/bin/python -m pipeline.cli aggregate`. It plans 3-hour aggregation chunks with a 1-hour overlap lookahead (4-hour LLM windows fixed to `00/03/06/09/12/15/18/21` UTC starts), skips completed windows using `aggregation_windows`, loads category-impact-eligible articles in each planned window, calls Gemini with headline + digest/summary metadata in category-bounded batches, validates that every article index appears exactly once, scores resulting groups for newsworthiness from digest impact or fallback scoring, writes `data/events/<event_id>.json`, upserts the `events` table, assigns `articles.event_id`, and records completed windows. Windows remain sequential because each window should see event state from earlier windows; within a window the LLM-only category batch work is concurrent. The command supports `--range-start`, `--range-end`, `--limit-windows`, `--dry-run`, `--force`, and `--verbose`. By default, if no range is specified, aggregation bounds cover the configured staging-retention horizon, while non-force planning sparsely selects only fixed UTC windows that have unassigned articles in their publish-time bucket, plus the latest completed window when applicable. If no unassigned articles exist within this horizon, the run completes early without planning windows. With `--force`, default planning instead uses completed digests in the same retention horizon, clears prior event assignments and aggregation-stage filter decisions for the actual planned window coverage, deletes or trims affected event artifacts, and then reruns the continuous window range even if windows were previously marked completed.
 
 Event naming in this first pass is deterministic and intentionally simple: existing event IDs are reused when a group contains already-assigned articles; otherwise code derives a stable date + headline slug and stores lightweight keyword metadata. Richer title/slug/entity generation remains a follow-up LLM pass.
 
@@ -368,7 +369,7 @@ Prompt version `article-digest-v6` includes URL, canonical URL, and estimated-pu
 To handle stories that develop over longer periods and span across different 3-hour windows, the system implements a two-layered event merging strategy:
 
 1. **Proactive Active-Events Matching**: During the window aggregation pass, the aggregator queries the SQLite database for events updated within the last 48 hours matching the categories of the window articles. These active events are filtered to only include those whose title shares at least 2 non-stopword words with at least one article's headline in the current window (or shares the single non-stopword if the event title only has one). This prevents context bloat and false-positive groupings in the LLM. The matched active events are passed to the grouping LLM call (containing their IDs, categories, and titles/headlines). The LLM is instructed to assign window articles directly to these existing events where appropriate, returning their `existing_event_id` in the JSON groups response. The validator only preserves event IDs that were actually included in that prompt.
-2. **Reactive Post-Aggregation Deduplication**: At the end of the aggregation pass, a reactive deduplication process runs over all active events updated in the last 48 hours. It checks for candidate event pairs using suffix conflicts (e.g. `event-name` vs `event-name-2` date-slug collisions), title word overlaps, and highly similar article headlines. For each candidate pair, a targeted LLM call evaluates their full article lists, headlines, and digests to decide if they represent the exact same real-world event. A merge requires both `should_merge=true` and confidence of at least `0.80`.
+2. **Reactive Post-Aggregation Deduplication**: At the end of the aggregation pass, a reactive deduplication process runs over all active events updated in the last 48 hours. It checks for candidate event pairs using suffix conflicts (e.g. `event-name` vs `event-name-2` date-slug collisions), title word overlaps, highly similar article headlines, distinctive keyword overlap, and an inclusive 3.5 Flash-Lite prescreen. Each unique candidate pair then goes to the strict `deduplication-review-v1` call on `gemini-3.7-flash`, which evaluates full article lists, headlines, and digests. A merge requires both `should_merge=true` and confidence of at least `0.80`.
 
 When a merge is triggered (either proactively via the window LLM or reactively via post-aggregation deduplication), the aggregator selects a winning event ID, loads historical article IDs from both events, merges their article lists, updates the winning event's JSON and database assignments, deletes the merged-away events' JSON files, and removes their SQLite database entries to prevent historical data loss.
 
@@ -378,7 +379,7 @@ Model evaluation notes:
 - `qwen3.6:27b` with `think: false` produced good structured output but was much slower, about 227 seconds for the same 8-article CPU batch.
 - `llama3.1:8b` produced valid structured output but lower classification quality.
 - Free-text JSON fields and calls without local-model thinking controls caused empty responses, looping, malformed JSON, or poor reliability in local tests.
-- Direct Gemini Developer API smoke tests with an AI Studio key succeeded for `gemini-2.5-flash-lite` and `gemini-3.1-flash-lite`; the project default is now `gemini-3.1-flash-lite`.
+- August 24, 2026 live structured-output smoke tests succeeded for `gemini-3.5-flash-lite` and `gemini-3.7-flash`. A curated comparison found that 3.7 added useful judgment on some borderline article-impact decisions but also shifted scores in both directions; it is therefore used only for near-threshold/conflicting article-filter decisions and strict final event-pair adjudication. Bulk digestion, grouping, scoring, and dedupe candidate discovery remain on 3.5 Flash-Lite.
 
 ### Event JSON Sketch
 
@@ -409,7 +410,7 @@ Model evaluation notes:
     "category": 0.91,
     "rationale_codes": ["geopolitical_escalation", "multi_source"],
     "scored_at": "2026-05-24T18:31:00Z",
-    "model": "gemini-3.1-flash-lite",
+    "model": "gemini-3.5-flash-lite",
     "prompt_version": "newsworthiness-v1"
   }
 }
@@ -643,7 +644,7 @@ All SQLite interactions must use parameterized queries to prevent SQL injection.
 
 ### Error Recovery
 
-- Each stage logs errors per-item (per feed, per article, per event) without aborting the entire run. A failed feed fetch does not block other feeds. A failed article extraction does not block aggregation.
+- Each stage logs errors per-item (per feed, per article, per event) without aborting the entire run. A failed feed fetch does not block other feeds. Collection uses HTTP/1.1 and retries transient transport/protocol errors with bounded backoff; this avoids shared HTTP/2 connection-state failures seen under live high concurrency. A failed article extraction does not block aggregation.
 - Failed items are logged in the state database with error details and retry count. Items with repeated failures are skipped after a configurable retry limit (default: 3).
 - If a pipeline run is killed by the watchdog, the next run picks up where the state database left off. Partially written JSON artifacts are avoided by the atomic write pattern (write to temp, then rename).
 
@@ -653,7 +654,7 @@ Configurable retention windows (defaults in `config/pipeline.json`):
 
 - **Staging articles**: Full extracted article JSON can be compacted after 3 days, but cleanup must retain durable article metadata, source links, canonical URL hashes, fingerprints, event assignments, and citation references in SQLite. Do not delete article rows that are needed for deduplication, archives, or published story source attribution.
 - **Full article text**: Extracted `content_text` may be removed or replaced with a compact excerpt after the staging retention window if the article is no longer needed for active editorial regeneration.
-- **Expired pending work**: Unassigned articles older than the default aggregation horizon are marked `filtered_expired` so retained historical rows do not keep future runs planning old windows.
+- **Expired pending work**: Digest, aggregation, and maintenance use the same full staging-retention horizon. Unassigned articles older than that horizon are marked `filtered_expired`; maintenance restores `filtered_expired` rows that are still inside the horizon, which self-heals earlier horizon changes or premature expiration.
 - **Stale events**: Events transition from `active` to `stale` after the configured stale threshold, then to `archived` after the retention window. Archived events are excluded from aggregation context and active story generation.
 - **Event artifacts**: Maintenance reconciles active/stale event JSON against SQLite article assignments and deletes empty active/stale events.
 - **Published stories**: Stories for archived events are removed from `active-stories.json` but story JSON files are retained indefinitely for archive pages.
@@ -688,7 +689,8 @@ This keeps decisions auditable and makes reruns straightforward when prompts cha
 ### Model Flexibility
 
 The LLM integration should abstract the model backend. The Stage 2 aggregation
-default is the Gemini Developer API with `gemini-3.1-flash-lite`; other
+default is the Gemini Developer API with `gemini-3.5-flash-lite` for bulk work
+and selective `gemini-3.7-flash` adjudication; other
 backends remain swappable behind the same interface. The system may use:
 
 - Hosted API models for aggregation and high-quality editorial summaries.

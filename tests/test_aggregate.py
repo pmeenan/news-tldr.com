@@ -31,6 +31,15 @@ from pipeline.llm import GeminiResult
 from pipeline.state import StateDB, migrate
 
 
+@pytest.fixture(autouse=True)
+def _stable_recent_event_cutoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep fixed historical event fixtures inside the production 48-hour window."""
+    monkeypatch.setattr(
+        "pipeline.aggregate._recent_event_cutoff",
+        lambda hours=48: "2026-05-30T00:00:00Z",
+    )
+
+
 class FakeJsonGenerator:
     model = "fake-model"
 
@@ -1823,16 +1832,16 @@ def test_aggregate_once_default_range(tmp_path, monkeypatch) -> None:
     migrate(db_path)
     state = StateDB(db_path)
 
-    # Insert an unassigned article older than limit_dt (e.g. 2 days ago)
+    # The default range follows the configured staging retention horizon.
     ref = utc_now()
     today_start = datetime.combine(ref.date(), time.min, tzinfo=UTC)
-    limit_dt = today_start - timedelta(days=1)
+    limit_dt = today_start - timedelta(days=3)
 
-    # 2 days ago
+    # Outside the three-day retention horizon.
     old_time = limit_dt - timedelta(hours=12)
     old_time_str = old_time.isoformat().replace("+00:00", "Z")
 
-    # Yesterday 12 hours ago (within range)
+    # Inside the retention horizon.
     new_time = limit_dt + timedelta(hours=12)
     new_time_str = new_time.isoformat().replace("+00:00", "Z")
 
@@ -1887,7 +1896,7 @@ def test_aggregate_once_default_range(tmp_path, monkeypatch) -> None:
         lambda: PipelineConfig(
             collection={},
             aggregation={"window_hours": 6, "window_overlap_hours": 1, "window_step_hours": 6},
-            retention={},
+            retention={"staging_article_days": 3},
             pipeline={},
             digest={},
         ),

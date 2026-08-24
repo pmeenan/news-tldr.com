@@ -4,15 +4,15 @@ This document tracks the phased buildout of the filesystem-backed RSS aggregator
 
 ## Current Direction
 
-- **Pipeline**: Python with `feedparser`, `httpx`/`h2` for collection, pooled `httpx` HTTP/1.1 for Gemini LLM calls, `trafilatura`, `beautifulsoup4`, standard-library `sqlite3`, and LLM client libraries.
+- **Pipeline**: Python with `feedparser`, pooled `httpx` HTTP/1.1 clients for collection and Gemini calls, `trafilatura`, `beautifulsoup4`, standard-library `sqlite3`, and LLM client libraries.
 - **Presentation**: Astro (or similar frontend-focused SSG) for static site generation.
 - **State**: SQLite for pipeline state and incremental processing. JSON files for human-readable stage artifacts.
 - **No database server** or application runtime for the published site.
 - Filesystem JSON artifacts are the source of truth between stages.
 - Pipeline stages: maintenance/retention, data collection, story aggregation, editorial, presentation.
-- Data collection is implemented; story aggregation is implemented and undergoing quality hardening.
+- Data collection and story aggregation are implemented and refreshed through August 24, 2026; editorial and presentation are next.
 - Article digest generation is now its own runnable stage before story aggregation.
-- A maintenance stage now runs before collection in `pipeline run` to expire old pending work, advance event lifecycle state, reconcile event artifacts, and compact old filtered/archived article JSON.
+- A maintenance stage now runs before collection in `pipeline run` to expire old pending work outside the configured staging horizon, restore prematurely expired in-horizon work, advance event lifecycle state, reconcile event artifacts, and compact old filtered/archived article JSON.
 - The configured source catalog has 69 enabled sources, including AP News and MotorTrend custom scrapers.
 - Neutrality, attribution, and auditability are first-class requirements.
 - Pipeline runs hourly. Stories evolve as new articles arrive across runs.
@@ -66,6 +66,7 @@ gantt
 - [x] Implement atomic pipeline lock acquisition and release with verified process identity and watchdog timeout.
 - [x] Implement RSS/Atom feed fetching with conditional requests (`If-Modified-Since`, `ETag`) and secure XML parsing (disable external entities).
 - [x] Implement HTTP client with desktop Chrome UA, per-domain rate limiting, robots.txt respect, exponential backoff, and redirect-aware SSRF protection (validate scheme/host/port/resolved IP before each request and redirect).
+- [x] Harden collection reliability by using HTTP/1.1 for the high-concurrency shared pool and retrying transient transport/protocol errors with bounded backoff.
 - [x] Parse feed entries into normalized article JSON.
 - [x] Implement article text extraction via `trafilatura` (or similar readability library) for partial feed entries.
 - [x] Implement paywall detection signals and source-level paywall hints.
@@ -94,21 +95,24 @@ gantt
 > (4-hour LLM windows fixed to `00/03/06/09/12/15/18/21` UTC starts), tracked
 > in `aggregation_windows` so completed windows are not rerun on every
 > pipeline pass. Normal aggregation uses sparse planning: after computing the
-> current/previous-day bounds, it selects only fixed UTC window starts that have
+> staging-retention bounds, it selects only fixed UTC window starts that have
 > unassigned articles in their own publish-time bucket, plus the latest
 > completed window when it falls in range. Forced aggregation remains
 > continuous so reset coverage is explicit.
-> By default, if no range is specified, aggregation and digestion processing starts
-> from the start of the previous UTC day to avoid processing older retained staging data.
+> By default, if no range is specified, aggregation and digestion start at the
+> configured staging retention boundary (three UTC days by default). This keeps
+> late-arriving articles from recovered feeds from being silently skipped.
 
-> Hosted LLM decision: Stage 2 aggregation will use the Gemini Developer API
-> by default with an AI Studio key loaded from local `.env` as
-> `GEMINI_API_KEY`. The default model is `gemini-3.1-flash-lite`
-> (`GEMINI_MODEL`). May 24 local Ollama evaluation showed that local models
+> Hosted LLM decision: pipeline LLM stages use the Gemini Developer API with an
+> AI Studio key loaded from local `.env` as `GEMINI_API_KEY`. Bulk work uses
+> `gemini-3.5-flash-lite` (`GEMINI_BULK_MODEL`, with `GEMINI_MODEL` as a
+> fallback); selective article-filter and final deduplication adjudication use
+> `gemini-3.7-flash` (`GEMINI_REVIEW_MODEL`). May 24 local Ollama evaluation showed that local models
 > could produce valid small-batch structured output, but larger clustering
 > experiments were too slow for the pipeline's needs. Direct Gemini API smoke
-> tests succeeded with structured JSON output for `gemini-2.5-flash-lite` and
-> `gemini-3.1-flash-lite`.
+> tests succeeded, but hosted models remained the practical choice. August 24
+> live evaluation and a full refresh validated structured output for both new
+> model tiers.
 
 - [x] Implement state database query for unprocessed articles (`event_id` is null).
 - [x] Generate and persist per-article LLM digests before aggregation, including factual summaries, key facts, content-quality signals, article-level impact scores, prompt metadata, SQLite status tracking, and bounded parallel API calls.
@@ -119,6 +123,10 @@ gantt
 - [x] Article-digest v6 hardening: deterministically filters stale estimated-date URL/live pages before LLM calls and code-gates `study_stage` persistence to covered biomedical/pharmaceutical/materials research contexts.
 - [x] Implement near-duplicate detection for exact reprints (content text and canonical URL hashes). Headline-hash and summary-hash signals are stored in `article_fingerprints` for future use, but are intentionally not used to short-circuit digest generation because generic shared headlines would silently propagate one story's digest onto unrelated stories.
 - [x] Implement Gemini Developer API client using pooled `httpx` HTTP/1.1 transport, loading `GEMINI_API_KEY` and `GEMINI_MODEL` from `.env`/environment, with structured output, request timeouts, model/prompt metadata, retry/backoff handling, and usage/timing capture.
+- [x] Upgrade bulk LLM work to `gemini-3.5-flash-lite`, remove deprecated sampling parameters, and configure Gemini 3 thinking levels explicitly.
+- [x] Add selective `gemini-3.7-flash` article-filter review for borderline/conflicting first-pass digests, with first/final decisions and both usage records preserved for audit.
+- [x] Route the strict final event-pair merge decision to `gemini-3.7-flash` while retaining 3.5 Flash-Lite for candidate discovery and prescreening.
+- [x] Align default digest and aggregation lookbacks with `retention.staging_article_days` so recovered feeds are processed across the full retained horizon.
 - [x] Design window-based LLM prompt for story clustering (headline + brief paragraph summary + source + date) to identify articles and angles covering the same developing news subject.
 - [x] Use compact order-preserving numeric enum output for the first pass; deterministic code maps rows back to input articles by position and rejects malformed or out-of-range values.
 - [ ] Keep free-text generation out of the first pass. Generate event titles, slugs, keywords, entities, and optional thread tags in a second smaller validated call.

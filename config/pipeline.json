@@ -20,7 +20,9 @@
   },
   "digest": {
     "concurrency": 10,
-    "content_char_limit": 12000
+    "content_char_limit": 12000,
+    "filter_review_enabled": true,
+    "filter_review_margin": 0.1
   },
   "retention": {
     "staging_article_days": 3,

@@ -7,8 +7,10 @@ import pytest
 
 from pipeline.digest import (
     ArticleForDigest,
+    article_filter_review_reason,
     digest_articles_for_aggregation,
     generate_article_digest,
+    generate_article_digest_with_review,
     validate_digest_response,
 )
 from pipeline.llm import GeminiResult
@@ -98,6 +100,102 @@ def test_validate_digest_response_accepts_clean_payload() -> None:
             "rationale_codes": ["low_public_impact"],
         },
     }
+
+
+def test_article_filter_review_reason_routes_borderline_and_conflicting_digests() -> None:
+    borderline = {
+        "content_quality": "ok",
+        "impact": {"category": 0.24, "rationale_codes": []},
+    }
+    conflict = {
+        "content_quality": "non_news",
+        "impact": {"category": 0.1, "rationale_codes": ["public_safety"]},
+    }
+    clear = {
+        "content_quality": "ok",
+        "impact": {"category": 0.8, "rationale_codes": ["public_safety"]},
+    }
+
+    assert "filter threshold" in (
+        article_filter_review_reason(
+            borderline,
+            min_category_impact=0.25,
+            review_margin=0.10,
+        )
+        or ""
+    )
+    assert "conflicts" in (
+        article_filter_review_reason(
+            conflict,
+            min_category_impact=0.25,
+            review_margin=0.10,
+        )
+        or ""
+    )
+    assert (
+        article_filter_review_reason(
+            clear,
+            min_category_impact=0.25,
+            review_margin=0.10,
+        )
+        is None
+    )
+
+
+def test_generate_article_digest_with_review_uses_review_model_for_borderline_result() -> None:
+    article = ArticleForDigest(
+        article_id="review-me",
+        source_id="source-a",
+        source_name="Source A",
+        headline="Borderline but legitimate vertical story",
+        summary="Summary",
+        published_at="2026-05-24T10:00:00Z",
+        article_path="data/staging/articles/review-me.json",
+        content_text="Substantive reported article text. " * 100,
+        selection_reason="control",
+    )
+    bulk = FakeJsonGenerator({
+        "summary": "First pass.",
+        "key_facts": ["A fact."],
+        "content_quality": "ok",
+        "impact": {
+            "global": 0.15,
+            "category": 0.24,
+            "scope": "niche",
+            "novelty": "update",
+            "rationale_codes": [],
+        },
+    })
+    bulk.model = "bulk-model"
+    reviewer = FakeJsonGenerator({
+        "summary": "Reviewed digest.",
+        "key_facts": ["A reviewed fact."],
+        "content_quality": "ok",
+        "impact": {
+            "global": 0.2,
+            "category": 0.45,
+            "scope": "niche",
+            "novelty": "update",
+            "rationale_codes": [],
+        },
+    })
+    reviewer.model = "review-model"
+
+    result = generate_article_digest_with_review(
+        article,
+        client=bulk,
+        review_client=reviewer,
+        min_category_impact=0.25,
+        review_margin=0.10,
+    )
+
+    assert result["model"] == "review-model"
+    assert result["digest"]["impact"]["category"] == 0.45
+    assert result["review"]["first_pass_model"] == "bulk-model"
+    assert [record["stage"] for record in result["usage_records"]] == [
+        "article_digest",
+        "article_filter_review",
+    ]
 
 
 def test_validate_digest_response_normalizes_common_impact_scales() -> None:
@@ -1453,8 +1551,8 @@ def test_digest_once_default_range(tmp_path, monkeypatch) -> None:
 
     ref = utc_now()
     expected_today_start = datetime.combine(ref.date(), time.min, tzinfo=ref.tzinfo)
-    expected_prev_day_start = expected_today_start - timedelta(days=1)
-    expected_range_start = isoformat_z(expected_prev_day_start)
+    expected_retention_start = expected_today_start - timedelta(days=3)
+    expected_range_start = isoformat_z(expected_retention_start)
 
     assert params_passed.get("published_after") == expected_range_start
     assert params_passed.get("published_before") is None

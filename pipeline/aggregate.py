@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pipeline.config import load_categories, load_feeds, load_pipeline_config
-from pipeline.llm import GeminiClient, GeminiResult
+from pipeline.llm import GeminiResult, create_gemini_client
 from pipeline.lock import PipelineLock
 from pipeline.paths import EVENT_DIR, LOCK_PATH, PROJECT_ROOT
 from pipeline.state import StateDB
@@ -23,6 +23,7 @@ AGGREGATION_PROMPT_VERSION = "aggregation-v6"
 AGGREGATION_EXPERIMENT_PROMPT_VERSION = "aggregation-experiment-v6"
 NEWSWORTHINESS_PROMPT_VERSION = "newsworthiness-v1"
 DEDUPLICATION_PRESCREEN_PROMPT_VERSION = "deduplication-prescreen-v1"
+DEDUPLICATION_REVIEW_PROMPT_VERSION = "deduplication-review-v1"
 GROUPING_MODES = ("titles", "titles_summaries")
 DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD = 0.8
 DEDUPLICATION_KEYWORD_OVERLAP_MIN = 2
@@ -78,6 +79,10 @@ def _category_group_for_category(category: str) -> dict[str, Any]:
         if category in group["categories"]:
             return group
     return CATEGORY_GROUPS[1]
+
+
+def _recent_event_cutoff(hours: int = 48) -> str:
+    return (datetime.now(UTC) - timedelta(hours=hours)).isoformat().replace("+00:00", "Z")
 
 
 def _category_batches_for_articles(
@@ -180,7 +185,6 @@ class JsonGenerator(Protocol):
         system_instruction: str,
         prompt: str,
         response_schema: dict[str, Any],
-        temperature: float = 0,
     ) -> GeminiResult: ...
 
 
@@ -592,7 +596,7 @@ def run_grouping_experiment(
     )
     if not articles:
         return {"article_count": 0, "modes": {}, "comparison": None}
-    generator = client or GeminiClient()
+    generator = client or create_gemini_client("bulk")
 
     results_by_mode: dict[str, dict[str, Any]] = {}
     for mode in selected_modes:
@@ -865,6 +869,7 @@ def aggregate_once(
     limit_windows: int | None = None,
     dry_run: bool = False,
     client: JsonGenerator | None = None,
+    review_client: JsonGenerator | None = None,
     progress: Callable[[str], None] | None = None,
     force: bool = False,
     acquire_lock: bool = True,
@@ -887,7 +892,10 @@ def aggregate_once(
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"aggregation-{uuid.uuid4().hex}"
     state = StateDB()
-    generator = client or GeminiClient()
+    owns_generator = client is None
+    generator = client or create_gemini_client("bulk")
+    owns_review_generator = review_client is None and client is None
+    review_generator = review_client or (generator if client is not None else create_gemini_client("review"))
     stats: dict[str, Any] = {
         "windows_planned": 0,
         "windows_processed": 0,
@@ -911,6 +919,8 @@ def aggregate_once(
         "force_articles_reset": 0,
         "force_events_deleted": 0,
         "force_events_trimmed": 0,
+        "bulk_model": generator.model,
+        "review_model": review_generator.model,
     }
     try:
         lock_context = PipelineLock(LOCK_PATH, lock_timeout, run_id=run_id) if acquire_lock else nullcontext()
@@ -933,7 +943,8 @@ def aggregate_once(
 
                     ref = utc_now()
                     today_start = datetime.combine(ref.date(), time.min, tzinfo=UTC)
-                    limit_dt = today_start - timedelta(days=1)
+                    lookback_days = max(1, int(config.retention.get("staging_article_days", 1)))
+                    limit_dt = today_start - timedelta(days=lookback_days)
                     if force:
                         bounds = _completed_digest_article_time_bounds(
                             state,
@@ -941,7 +952,7 @@ def aggregate_once(
                         )
                         if not bounds:
                             if progress:
-                                progress("aggregate: no completed digest articles in the current and previous day")
+                                progress("aggregate: no completed digest articles in the retention window")
                             return stats
                     else:
                         bounds = state.article_time_bounds(unassigned_only=True)
@@ -953,7 +964,7 @@ def aggregate_once(
 
                     if not force and bounds_end < limit_dt:
                         if progress:
-                            progress("aggregate: no unassigned articles in the current and previous day")
+                            progress("aggregate: no unassigned articles in the retention window")
                         return stats
 
                     if bounds_start < limit_dt:
@@ -1034,8 +1045,7 @@ def aggregate_once(
                         category_batches = _category_batches_for_articles(articles, feeds_by_source)
 
                         # Pre-fetch active events once per window, partition by category in Python.
-                        since_dt = datetime.now(UTC) - timedelta(hours=48)
-                        since = since_dt.isoformat().replace("+00:00", "Z")
+                        since = _recent_event_cutoff()
                         all_active_rows = state.conn.execute(
                             """
                             SELECT event_id, title, category, updated_at
@@ -1265,6 +1275,7 @@ def aggregate_once(
                         deduplicate_active_events_llm(
                             state=state,
                             client=generator,
+                            review_client=review_generator,
                             feeds_by_source=feeds_by_source,
                             progress=progress,
                             run_id=run_id,
@@ -1295,6 +1306,14 @@ def aggregate_once(
         return stats
     finally:
         state.close()
+        if owns_review_generator:
+            close = getattr(review_generator, "close", None)
+            if callable(close):
+                close()
+        if owns_generator:
+            close = getattr(generator, "close", None)
+            if callable(close):
+                close()
 
 
 def apply_grouping_result(
@@ -1484,7 +1503,6 @@ def score_groups_newsworthiness(
             ),
             prompt=_build_newsworthiness_prompt(articles, groups_for_model, feeds_by_source=feeds_by_source),
             response_schema=_newsworthiness_response_schema(),
-            temperature=0,
         )
         model_scores = validate_newsworthiness_response(
             result.payload,
@@ -1554,7 +1572,6 @@ def group_articles_with_gemini(
             ),
             prompt=prompt,
             response_schema=_grouping_response_schema(valid_categories),
-            temperature=0.2 if attempt else 0,
         )
         try:
             groups, classifications = validate_grouping_response(
@@ -1902,7 +1919,6 @@ def _filter_active_events_with_llm_result(
             ),
             prompt=prompt,
             response_schema=schema,
-            temperature=0,
         )
         matched_ids = set(result.payload.get("matched_event_ids", []))
         return ActiveEventsFilterResult(
@@ -2905,7 +2921,6 @@ def _evaluate_deduplication_pair(
         ),
         prompt=_build_event_merge_prompt(payload1, payload2),
         response_schema=_event_merge_response_schema(),
-        temperature=0,
     )
     should_merge = result.payload.get("should_merge") is True
     raw_confidence = result.payload.get("confidence")
@@ -2932,6 +2947,8 @@ def _evaluate_and_apply_deduplication_candidates(
     progress: Callable[[str], None] | None = None,
     run_id: str | None = None,
     concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
+    usage_stage: str = "deduplication",
+    prompt_version: str = "deduplication-v1",
 ) -> int:
     pending = list(candidates)
     merges_count = 0
@@ -3034,9 +3051,9 @@ def _evaluate_and_apply_deduplication_candidates(
                 try:
                     state.record_llm_usage(
                         run_id=run_id,
-                        stage="deduplication",
+                        stage=usage_stage,
                         model=client.model,
-                        prompt_version="deduplication-v1",
+                        prompt_version=prompt_version,
                         input_tokens=decision.usage.get("promptTokenCount"),
                         output_tokens=decision.usage.get("candidatesTokenCount"),
                     )
@@ -3241,7 +3258,6 @@ def _run_prescreen_chunk(
         ),
         prompt=_build_prescreen_prompt(payload),
         response_schema=_prescreen_response_schema(),
-        temperature=0,
     )
 
     pairs: list[tuple[str, str]] = []
@@ -3449,6 +3465,7 @@ def deduplicate_active_events_llm(
     *,
     state: StateDB,
     client: JsonGenerator,
+    review_client: JsonGenerator | None = None,
     feeds_by_source: dict[str, Any],
     progress: Callable[[str], None] | None = None,
     run_id: str | None = None,
@@ -3458,6 +3475,7 @@ def deduplicate_active_events_llm(
         merges_count = _deduplicate_active_events_llm_pass(
             state=state,
             client=client,
+            review_client=review_client,
             feeds_by_source=feeds_by_source,
             progress=progress,
             run_id=run_id,
@@ -3476,13 +3494,13 @@ def _deduplicate_active_events_llm_pass(
     *,
     state: StateDB,
     client: JsonGenerator,
+    review_client: JsonGenerator | None = None,
     feeds_by_source: dict[str, Any],
     progress: Callable[[str], None] | None = None,
     run_id: str | None = None,
     concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
 ) -> int:
-    since_dt = datetime.now(UTC) - timedelta(hours=48)
-    since = since_dt.isoformat().replace("+00:00", "Z")
+    since = _recent_event_cutoff()
 
     rows = state.conn.execute(
         """
@@ -3634,14 +3652,22 @@ def _deduplicate_active_events_llm_pass(
             continue
         candidates.append((e1, e2))
 
+    adjudicator = review_client or client
+    is_second_pass_review = adjudicator is not client or adjudicator.model != client.model
     merges_count = _evaluate_and_apply_deduplication_candidates(
         candidates=candidates,
         state=state,
-        client=client,
+        client=adjudicator,
         feeds_by_source=feeds_by_source,
         progress=progress,
         run_id=run_id,
         concurrency=concurrency,
+        usage_stage="deduplication_review" if is_second_pass_review else "deduplication",
+        prompt_version=(
+            DEDUPLICATION_REVIEW_PROMPT_VERSION
+            if is_second_pass_review
+            else "deduplication-v1"
+        ),
     )
 
     if progress and merges_count > 0:

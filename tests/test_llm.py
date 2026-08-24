@@ -9,6 +9,7 @@ import pytest
 from pipeline.llm import (
     GeminiClient,
     GeminiTruncatedError,
+    gemini_model_for_stage,
     parse_dotenv,
 )
 
@@ -128,6 +129,42 @@ def test_generate_json_includes_max_output_tokens(monkeypatch: pytest.MonkeyPatc
         )
 
     assert captured["body"]["generationConfig"]["maxOutputTokens"] == 12345
+
+
+def test_generate_json_uses_thinking_level_without_deprecated_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return _gemini_response()
+
+    with _make_client(
+        monkeypatch,
+        thinking_level="minimal",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        client.generate_json(
+            system_instruction="sys",
+            prompt="p",
+            response_schema={"type": "OBJECT"},
+        )
+
+    generation_config = captured["body"]["generationConfig"]
+    assert generation_config["thinkingConfig"] == {"thinkingLevel": "minimal"}
+    assert "temperature" not in generation_config
+    assert "topP" not in generation_config
+    assert "topK" not in generation_config
+
+
+def test_stage_specific_model_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_MODEL", "fallback-model")
+    monkeypatch.setenv("GEMINI_BULK_MODEL", "bulk-model")
+    monkeypatch.setenv("GEMINI_REVIEW_MODEL", "review-model")
+
+    assert gemini_model_for_stage("bulk") == "bulk-model"
+    assert gemini_model_for_stage("review") == "review-model"
 
 
 def test_generate_json_reuses_injected_httpx_client(monkeypatch: pytest.MonkeyPatch) -> None:

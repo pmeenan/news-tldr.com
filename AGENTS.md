@@ -32,6 +32,48 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on August 24, 2026 (Gemini 3.5/3.7 Upgrade and Full Dataset Refresh)
+
+- **Scope**: Upgraded the hosted LLM stack, evaluated a selective stronger-model second pass, hardened live collection/retry behavior, aligned pipeline lookbacks with retention, and refreshed the complete retained dataset so Milestone 3 can start from current data.
+- **Model architecture**:
+  - Bulk digestion, article classification/impact, grouping, active-event filtering, newsworthiness, and dedupe prescreening use `gemini-3.5-flash-lite` with `thinkingLevel=minimal`.
+  - Borderline/conflicting article-filter decisions use `gemini-3.7-flash` with `thinkingLevel=low` and prompt version `article-filter-review-v1`.
+  - Strict final event-pair merge adjudication uses `gemini-3.7-flash` with prompt version `deduplication-review-v1`; candidate discovery stays on 3.5 Flash-Lite.
+  - `GEMINI_BULK_MODEL` and `GEMINI_REVIEW_MODEL` configure the tiers; `GEMINI_MODEL` remains the bulk fallback. `.env.example` and the ignored local `.env` were updated.
+  - Deprecated Gemini 3 sampling parameters (`temperature`, `topP`, `topK`) were removed. Structured output and deterministic response validation remain mandatory.
+- **Article-filter review**:
+  - Review is triggered when category impact is within `0.10` of `aggregation.min_category_impact`, or when non-`ok` content quality conflicts with a high-impact rationale.
+  - Review audit metadata preserves first-pass score/quality/model, reviewer result/rationale/model, and usage for both calls.
+  - Across the refresh, 251 of 930 bulk article-digest calls were reviewed; 15 articles were rescued across the threshold and 33 were dropped. This supports selective adjudication rather than using 3.7 for all bulk work.
+- **Live evaluation**:
+  - Structured-output API smoke tests passed for both new model tiers.
+  - Five curated duplicate/non-duplicate event pairs produced the same decisions on 3.5 and 3.7, with 3.7 generally giving tighter rationales.
+  - Borderline article comparisons showed 3.7 moving scores in both directions; explicit no-sports/low-signal reviewer guidance improved the expected filtering behavior. The stronger model is therefore intentionally narrow.
+- **Collection reliability**:
+  - The first refresh exposed shared HTTP/2 connection-state failures across unrelated hosts (20/69 feeds failed). Collection now defaults to HTTP/1.1 and retries transient `httpx.TransportError` failures with bounded backoff.
+  - Recovery collection reached all **69/69 feeds** with **0 feed failures**, added 297 missed articles, and reduced image failures from 208 to 11.
+- **Retention/lookback correctness**:
+  - Digest and aggregation defaults now start at `retention.staging_article_days` (3 UTC days), not a hardcoded one-day horizon.
+  - Maintenance uses the same horizon and restores `filtered_expired` rows that are still inside it. This recovered 334 prematurely expired articles; all were digested/filtered and aggregated.
+- **Final live state**:
+  - SQLite quick check: `ok`.
+  - Articles: **4,740** total. Current retained work has **647 assigned/completed** articles and **0 unfiltered pending** articles; all other retained rows are intentionally filtered.
+  - Events: **1,384** total = **433 active** + **951 archived**; **1,384** `data/events/*.json` files (exact parity).
+  - Active categories: world 77, business 64, technology 62, politics 59, entertainment 39, health 38, us 33, environment 28, science 23, automotive 10.
+  - Published/editorial artifacts remain **0** because Milestone 3 has not been implemented.
+  - The refresh merged **71** duplicate event clusters. One final dedupe pair review received a Gemini 503 and was logged for retry; it does not leave article work pending.
+- **Verification**:
+  - Full suite: `PYTHONPATH=. ./.venv/bin/pytest -q` → **239 passed**.
+  - Linter: `./.venv/bin/ruff check .` → clean.
+  - Patch validation: `git diff --check` → clean.
+  - Final maintenance dry-run: restored 0, expired 0, reconciled 0, compacted 0, errors 0.
+- **Files touched**: `.env.example`, `README.md`, `config/pipeline.json`, `pipeline/{llm,digest,aggregate,http_client,maintenance}.py`, tests for all affected modules, `docs/{design,plan}.md`, and this handoff. Live SQLite/staging/event data were refreshed and are not source-controlled.
+- **Not committed.** The source working tree contains the upgrade and hardening changes.
+- **Next steps**:
+  1. Begin Milestone 3 Editorial: per-event neutral TL;DR generation, source-attributed key facts/uncertainty, importance ranking, story JSON, and `active-stories.json`.
+  2. Use `gemini-3.7-flash` for editorial generation initially, then evaluate whether a 3.5 draft + selective 3.7 review is worthwhile once editorial fixtures exist.
+  3. Build the Astro presentation after the editorial artifact contract is implemented.
+
 ### State on May 26, 2026 (Dedupe Candidate Gates: Keyword Overlap + LLM Pre-screen)
 
 - **Scope of this pass**: Followed up on the missed-merge analysis (Ferrari Luce split across 2 events, Congo Ebola fragmented into 4 events, etc.) by widening post-aggregation dedupe candidate retrieval without weakening the strict per-pair merge decision.

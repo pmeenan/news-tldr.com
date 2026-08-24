@@ -175,6 +175,44 @@ async def test_retry_after_capped(monkeypatch, capsys):
 
 
 @pytest.mark.asyncio
+async def test_transport_error_is_retried(monkeypatch):
+    async def fake_validate(url: str) -> ResolvedURL:
+        return ResolvedURL(url=url, hostname=httpx.URL(url).host or "example.test", port=80, ips=("93.184.216.34",))
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("pipeline.http_client.validate_url", fake_validate)
+    progress_messages: list[str] = []
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        attempts += 1
+        if attempts == 1:
+            raise httpx.LocalProtocolError("connection closed", request=request)
+        return httpx.Response(200, text="ok")
+
+    async with PoliteHTTPClient(
+        rate_limit_seconds=0,
+        backoff_initial_seconds=0.1,
+        transport=httpx.MockTransport(handler),
+        progress=progress_messages.append,
+    ) as client:
+        response = await client.get("https://example.test/retry")
+
+    assert response.status_code == 200
+    assert attempts == 2
+    assert progress_messages == [
+        "HTTP request to https://example.test/retry failed with LocalProtocolError: connection closed. "
+        "Retrying in 0.1s (attempt 1/3)"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_robots_policy_uses_zero_retries(monkeypatch):
     async def fake_validate(url: str) -> ResolvedURL:
         return ResolvedURL(url=url, hostname=httpx.URL(url).host or "example.test", port=80, ips=("93.184.216.34",))
@@ -290,6 +328,6 @@ async def test_network_backend_decrements_timeout_across_ips(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_http_client_enables_http2():
+async def test_http_client_disables_http2_for_collection_reliability():
     async with PoliteHTTPClient(rate_limit_seconds=0) as client:
-        assert client.client._transport._pool._http2 is True
+        assert client.client._transport._pool._http2 is False

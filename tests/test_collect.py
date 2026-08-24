@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -12,6 +13,15 @@ from pipeline.config import FeedConfig, PipelineConfig
 from pipeline.http_client import PoliteHTTPClient
 from pipeline.security import ResolvedURL
 from pipeline.state import StateDB, migrate
+
+
+@pytest.fixture(autouse=True)
+def _stable_collection_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep fixed May 2026 feed fixtures inside the collector age horizon."""
+    monkeypatch.setattr(
+        "pipeline.collect.utc_now",
+        lambda: datetime(2026, 6, 1, 13, 0, tzinfo=UTC),
+    )
 
 FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">

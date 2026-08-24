@@ -12,13 +12,14 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from pipeline.config import load_pipeline_config
-from pipeline.llm import GeminiClient, GeminiResult
+from pipeline.llm import GeminiResult, create_gemini_client
 from pipeline.lock import PipelineLock
 from pipeline.paths import LOCK_PATH, PROJECT_ROOT
 from pipeline.state import StateDB
 from pipeline.util import atomic_write_json, isoformat_z
 
 ARTICLE_DIGEST_PROMPT_VERSION = "article-digest-v6"
+ARTICLE_FILTER_REVIEW_PROMPT_VERSION = "article-filter-review-v1"
 DEFAULT_CONTENT_CHAR_LIMIT = 12000
 NON_NEWS_IMPACT_CAP = 0.10
 PROMOTIONAL_IMPACT_CAP = 0.15
@@ -262,7 +263,6 @@ class JsonGenerator(Protocol):
         system_instruction: str,
         prompt: str,
         response_schema: dict[str, Any],
-        temperature: float = 0,
     ) -> GeminiResult: ...
 
 
@@ -290,11 +290,13 @@ def digest_once(
     concurrency: int | None = None,
     force: bool = False,
     client: JsonGenerator | None = None,
+    review_client: JsonGenerator | None = None,
     progress: Callable[[str], None] | None = None,
     acquire_lock: bool = True,
 ) -> dict[str, Any]:
     if (range_start is None) != (range_end is None):
         raise ValueError("range_start and range_end must be provided together or both omitted")
+    config = load_pipeline_config()
     if range_start is None:
         from datetime import time
 
@@ -302,16 +304,23 @@ def digest_once(
 
         ref = utc_now()
         today_start = datetime.combine(ref.date(), time.min, tzinfo=ref.tzinfo)
-        prev_day_start = today_start - timedelta(days=1)
-        range_start = isoformat_z(prev_day_start)
+        lookback_days = max(1, int(config.retention.get("staging_article_days", 1)))
+        range_start = isoformat_z(today_start - timedelta(days=lookback_days))
     if limit is not None and limit < 1:
         raise ValueError("limit must be at least 1")
-    config = load_pipeline_config()
     selected_concurrency = int(concurrency or config.digest.get("concurrency", 10))
     content_char_limit = int(config.digest.get("content_char_limit", DEFAULT_CONTENT_CHAR_LIMIT))
+    review_enabled = bool(config.digest.get("filter_review_enabled", True))
+    review_margin = float(config.digest.get("filter_review_margin", 0.10))
+    min_category_impact = float(config.aggregation.get("min_category_impact", 0.25))
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"article-digest-{uuid.uuid4().hex}"
-    generator = client or GeminiClient()
+    owns_generator = client is None
+    generator = client or create_gemini_client("bulk")
+    owns_review_generator = review_client is None and client is None and review_enabled
+    reviewer = review_client
+    if reviewer is None and client is None and review_enabled:
+        reviewer = create_gemini_client("review")
     state = StateDB()
     stats: dict[str, Any] = {"run_id": run_id}
     try:
@@ -331,6 +340,9 @@ def digest_once(
                         content_char_limit=content_char_limit,
                         force=force,
                         client=generator,
+                        review_client=reviewer,
+                        min_category_impact=min_category_impact,
+                        review_margin=review_margin,
                         progress=progress,
                     )
                 )
@@ -344,6 +356,14 @@ def digest_once(
         return stats
     finally:
         state.close()
+        if owns_review_generator and reviewer is not None:
+            close = getattr(reviewer, "close", None)
+            if callable(close):
+                close()
+        if owns_generator:
+            close = getattr(generator, "close", None)
+            if callable(close):
+                close()
 
 
 def digest_articles_for_aggregation(
@@ -357,13 +377,16 @@ def digest_articles_for_aggregation(
     content_char_limit: int = DEFAULT_CONTENT_CHAR_LIMIT,
     force: bool = False,
     client: JsonGenerator | None = None,
+    review_client: JsonGenerator | None = None,
+    min_category_impact: float = 0.25,
+    review_margin: float = 0.10,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     if limit is not None and limit < 1:
         raise ValueError("limit must be at least 1")
     if concurrency < 1:
         raise ValueError("concurrency must be at least 1")
-    generator = client or GeminiClient()
+    generator = client or create_gemini_client("bulk")
     max_retries = int(load_pipeline_config().pipeline.get("max_item_retries", 3))
     stats: dict[str, Any] = {
         "candidates": 0,
@@ -374,6 +397,11 @@ def digest_articles_for_aggregation(
         "forced": force,
         "reprints_copied_persisted": 0,
         "reprints_copied_in_batch": 0,
+        "reviewed": 0,
+        "review_rescued": 0,
+        "review_dropped": 0,
+        "bulk_model": generator.model,
+        "review_model": review_client.model if review_client is not None else None,
         "usage": {"promptTokenCount": 0, "candidatesTokenCount": 0},
     }
     candidates: list[ArticleForDigest] = []
@@ -456,10 +484,13 @@ def digest_articles_for_aggregation(
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         future_to_article = {
             executor.submit(
-                generate_article_digest,
+                generate_article_digest_with_review,
                 article,
                 client=generator,
+                review_client=review_client,
                 content_char_limit=content_char_limit,
+                min_category_impact=min_category_impact,
+                review_margin=review_margin,
             ): article
             for article in candidates
         }
@@ -473,8 +504,16 @@ def digest_articles_for_aggregation(
                     result,
                     state=state,
                     run_id=run_id,
-                    model=generator.model,
                 )
+
+                if result.get("review"):
+                    stats["reviewed"] += 1
+                    first_score = float(result["review"]["first_pass_category_impact"])
+                    final_score = float(result["digest"]["impact"]["category"])
+                    if first_score < min_category_impact <= final_score:
+                        stats["review_rescued"] += 1
+                    elif final_score < min_category_impact <= first_score:
+                        stats["review_dropped"] += 1
 
                 # Propagate digest to any deferred reprints in this batch
                 duplicates = canonical_to_duplicates.get(article.article_id)
@@ -485,12 +524,14 @@ def digest_articles_for_aggregation(
                         "content_quality": result["digest"]["content_quality"],
                         "impact": result["digest"]["impact"],
                         "generated_at": isoformat_z(),
-                        "model": generator.model,
+                        "model": result["model"],
                         "prompt_version": ARTICLE_DIGEST_PROMPT_VERSION,
                         "content_chars_used": result["content_chars_used"],
                     }
                     if "study_stage" in result["digest"]:
                         generated_digest["study_stage"] = result["digest"]["study_stage"]
+                    if result.get("review"):
+                        generated_digest["review"] = result["review"]
                     for dup_id, dup_path in duplicates:
                         _copy_digest_to_article(
                             target_article_id=dup_id,
@@ -503,8 +544,10 @@ def digest_articles_for_aggregation(
                         if progress:
                             progress(f"article digest: copied generated digest to reprint {dup_id[:12]}")
 
-                for key in stats["usage"]:
-                    stats["usage"][key] += int(result["usage"].get(key) or 0)
+                for usage_record in result.get("usage_records", []):
+                    usage = usage_record.get("usage") or {}
+                    for key in stats["usage"]:
+                        stats["usage"][key] += int(usage.get(key) or 0)
                 stats["completed"] += 1
                 if progress:
                     progress(
@@ -563,7 +606,6 @@ def generate_article_digest(
         ),
         prompt=prompt,
         response_schema=_digest_response_schema(),
-        temperature=0,
     )
     digest = _drop_irrelevant_study_stage(validate_digest_response(result.payload), article)
     return {
@@ -579,7 +621,121 @@ def generate_article_digest(
         "digest": digest,
         "elapsed_ms": result.elapsed_ms,
         "usage": result.usage,
+        "model": client.model,
+        "usage_records": [
+            {
+                "stage": "article_digest",
+                "model": client.model,
+                "prompt_version": ARTICLE_DIGEST_PROMPT_VERSION,
+                "usage": result.usage,
+            }
+        ],
     }
+
+
+def generate_article_digest_with_review(
+    article: ArticleForDigest,
+    *,
+    client: JsonGenerator,
+    review_client: JsonGenerator | None,
+    content_char_limit: int = DEFAULT_CONTENT_CHAR_LIMIT,
+    min_category_impact: float = 0.25,
+    review_margin: float = 0.10,
+) -> dict[str, Any]:
+    first_pass = generate_article_digest(
+        article,
+        client=client,
+        content_char_limit=content_char_limit,
+    )
+    if review_client is None:
+        return first_pass
+    review_reason = article_filter_review_reason(
+        first_pass["digest"],
+        min_category_impact=min_category_impact,
+        review_margin=review_margin,
+    )
+    if review_reason is None:
+        return first_pass
+
+    result = review_client.generate_json(
+        system_instruction=(
+            "You are the senior review editor for a news aggregation pipeline. "
+            "Independently verify the article digest and especially whether the article "
+            "should survive a category-impact filter. Use only the supplied article text."
+        ),
+        prompt=(
+            _build_digest_prompt(article, content_char_limit=content_char_limit)
+            + "\n\nA lower-cost model produced this first-pass digest:\n"
+            + json.dumps(first_pass["digest"], ensure_ascii=False, indent=2)
+            + f"\n\nReview trigger: {review_reason}. Return a corrected digest using the same schema. "
+            "Do not preserve the first-pass scores merely for consistency. For this final filtering decision, "
+            "category impact means importance within one of the site's configured categories: world, US, "
+            "politics, business, technology, science, health, environment, automotive, or entertainment. "
+            "There is no sports category: routine games, standings, tournament live blogs, athlete profiles, "
+            "and ordinary sports results must remain below the 0.25 category threshold unless the article has "
+            "unusually broad non-sports public impact. Local human-interest stories should also remain below "
+            "the threshold unless they reveal a broader consequential development."
+        ),
+        response_schema=_digest_response_schema(),
+    )
+    reviewed_digest = _drop_irrelevant_study_stage(
+        validate_digest_response(result.payload), article
+    )
+    return {
+        **first_pass,
+        "digest": reviewed_digest,
+        "elapsed_ms": int(first_pass["elapsed_ms"]) + int(result.elapsed_ms),
+        "usage": result.usage,
+        "model": review_client.model,
+        "usage_records": [
+            *first_pass["usage_records"],
+            {
+                "stage": "article_filter_review",
+                "model": review_client.model,
+                "prompt_version": ARTICLE_FILTER_REVIEW_PROMPT_VERSION,
+                "usage": result.usage,
+            },
+        ],
+        "review": {
+            "reason": review_reason,
+            "first_pass_model": client.model,
+            "review_model": review_client.model,
+            "prompt_version": ARTICLE_FILTER_REVIEW_PROMPT_VERSION,
+            "first_pass_content_quality": first_pass["digest"]["content_quality"],
+            "first_pass_category_impact": first_pass["digest"]["impact"]["category"],
+            "first_pass_global_impact": first_pass["digest"]["impact"]["global"],
+        },
+    }
+
+
+def article_filter_review_reason(
+    digest: dict[str, Any],
+    *,
+    min_category_impact: float,
+    review_margin: float,
+) -> str | None:
+    impact = digest.get("impact")
+    if not isinstance(impact, dict):
+        return "missing impact metadata"
+    category_score = impact.get("category")
+    if isinstance(category_score, int | float) and not isinstance(category_score, bool):
+        lower = min_category_impact - max(0.0, review_margin)
+        upper = min_category_impact + max(0.0, review_margin)
+        if lower <= float(category_score) <= upper:
+            return (
+                f"category impact {float(category_score):.3f} is within "
+                f"{review_margin:.3f} of the {min_category_impact:.3f} filter threshold"
+            )
+    rationale_codes = {
+        str(code) for code in impact.get("rationale_codes", []) if str(code).strip()
+    }
+    quality = digest.get("content_quality")
+    if quality != "ok" and rationale_codes & HIGH_IMPACT_RATIONALE_CODES:
+        return (
+            f"content quality {quality!r} conflicts with high-impact rationale codes "
+            f"{sorted(rationale_codes & HIGH_IMPACT_RATIONALE_CODES)}"
+        )
+    return None
 
 
 def validate_digest_response(payload: dict[str, Any]) -> dict[str, Any]:
@@ -925,7 +1081,6 @@ def _persist_pipeline_digest_result(
     *,
     state: StateDB,
     run_id: str,
-    model: str,
 ) -> None:
     article_id = result["article_id"]
     generated_at = isoformat_z()
@@ -938,30 +1093,34 @@ def _persist_pipeline_digest_result(
         "content_quality": result["digest"]["content_quality"],
         "impact": result["digest"]["impact"],
         "generated_at": generated_at,
-        "model": model,
+        "model": result["model"],
         "prompt_version": ARTICLE_DIGEST_PROMPT_VERSION,
         "content_chars_used": result["content_chars_used"],
     }
     if "study_stage" in result["digest"]:
         digest_payload["study_stage"] = result["digest"]["study_stage"]
+    if result.get("review"):
+        digest_payload["review"] = result["review"]
     data["llm_digest"] = digest_payload
     atomic_write_json(article_path, data)
     state.update_article_digest_status(
         article_id,
         status="completed",
         generated_at=generated_at,
-        model=model,
+        model=result["model"],
         prompt_version=ARTICLE_DIGEST_PROMPT_VERSION,
     )
     state.set_article_aggregation_pending_if_unassigned(article_id)
-    state.record_llm_usage(
-        run_id=run_id,
-        stage="article_digest",
-        model=model,
-        prompt_version=ARTICLE_DIGEST_PROMPT_VERSION,
-        input_tokens=result["usage"].get("promptTokenCount"),
-        output_tokens=result["usage"].get("candidatesTokenCount"),
-    )
+    for usage_record in result.get("usage_records", []):
+        usage = usage_record.get("usage") or {}
+        state.record_llm_usage(
+            run_id=run_id,
+            stage=usage_record["stage"],
+            model=usage_record["model"],
+            prompt_version=usage_record["prompt_version"],
+            input_tokens=usage.get("promptTokenCount"),
+            output_tokens=usage.get("candidatesTokenCount"),
+        )
 
 
 def _summary_quality_reason(headline: str | None, summary: str, content_text: str) -> str:

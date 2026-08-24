@@ -47,6 +47,7 @@ def maintenance_once(
         "dry_run": dry_run,
         "events_marked_stale": 0,
         "events_archived": 0,
+        "restored_articles": 0,
         "expired_articles": 0,
         "events_reconciled": 0,
         "events_deleted": 0,
@@ -83,7 +84,22 @@ def maintenance_once(
                         f"stale={stats['events_marked_stale']} archived={stats['events_archived']}"
                     )
 
-                expired = _expire_old_pending_articles(state, now=now_dt, dry_run=dry_run)
+                restored = _restore_expired_pending_articles(
+                    state,
+                    now=now_dt,
+                    horizon_days=staging_article_days,
+                    dry_run=dry_run,
+                )
+                stats["restored_articles"] = restored
+                if progress and restored:
+                    progress(f"maintenance: restored {restored} article(s) inside retention horizon")
+
+                expired = _expire_old_pending_articles(
+                    state,
+                    now=now_dt,
+                    horizon_days=staging_article_days,
+                    dry_run=dry_run,
+                )
                 stats["expired_articles"] = expired
                 if progress and expired:
                     progress(f"maintenance: expired {expired} old unassigned article(s)")
@@ -184,8 +200,56 @@ def _apply_event_lifecycle(
     return {"events_marked_stale": marked_stale, "events_archived": archived}
 
 
-def _expire_old_pending_articles(state: StateDB, *, now: datetime, dry_run: bool) -> int:
-    horizon_start = _default_processing_horizon_start(now)
+def _restore_expired_pending_articles(
+    state: StateDB,
+    *,
+    now: datetime,
+    horizon_days: int,
+    dry_run: bool,
+) -> int:
+    horizon = _format(_default_processing_horizon_start(now, horizon_days=horizon_days))
+    row = state.conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM articles
+        WHERE event_id IS NULL
+          AND is_filtered = 1
+          AND aggregation_status = ?
+          AND published_at IS NOT NULL
+          AND published_at >= ?
+        """,
+        (EXPIRED_AGGREGATION_STATUS, horizon),
+    ).fetchone()
+    count = int(row["count"]) if row else 0
+    if dry_run or count == 0:
+        return count
+
+    with state.conn:
+        state.conn.execute(
+            """
+            UPDATE articles
+            SET aggregation_status = 'pending',
+                aggregation_reason = NULL,
+                is_filtered = 0
+            WHERE event_id IS NULL
+              AND is_filtered = 1
+              AND aggregation_status = ?
+              AND published_at IS NOT NULL
+              AND published_at >= ?
+            """,
+            (EXPIRED_AGGREGATION_STATUS, horizon),
+        )
+    return count
+
+
+def _expire_old_pending_articles(
+    state: StateDB,
+    *,
+    now: datetime,
+    horizon_days: int,
+    dry_run: bool,
+) -> int:
+    horizon_start = _default_processing_horizon_start(now, horizon_days=horizon_days)
     horizon = _format(horizon_start)
     row = state.conn.execute(
         """
@@ -469,9 +533,9 @@ def _compact_excerpt(content: str) -> str:
     return excerpt[:CONTENT_EXCERPT_CHARS].rsplit(" ", 1)[0]
 
 
-def _default_processing_horizon_start(now: datetime) -> datetime:
+def _default_processing_horizon_start(now: datetime, *, horizon_days: int = 1) -> datetime:
     today_start = datetime.combine(now.astimezone(UTC).date(), time.min, tzinfo=UTC)
-    return today_start - timedelta(days=1)
+    return today_start - timedelta(days=max(1, horizon_days))
 
 
 def _format(value: datetime) -> str:

@@ -104,8 +104,19 @@ def test_maintenance_expires_old_pending_articles_without_touching_current(tmp_p
     now = datetime(2026, 5, 31, 12, tzinfo=UTC)
 
     with StateDB(db_path) as state:
-        _insert_article(state, tmp_path, "old-pending", published_at="2026-05-29T23:59:00Z")
-        _insert_article(state, tmp_path, "current-pending", published_at="2026-05-30T00:00:00Z")
+        _insert_article(state, tmp_path, "old-pending", published_at="2026-05-27T23:59:00Z")
+        _insert_article(state, tmp_path, "current-pending", published_at="2026-05-28T00:00:00Z")
+        _insert_article(state, tmp_path, "restorable", published_at="2026-05-29T00:00:00Z")
+        with state.conn:
+            state.conn.execute(
+                """
+                UPDATE articles
+                SET aggregation_status = 'filtered_expired',
+                    aggregation_reason = 'outside old horizon',
+                    is_filtered = 1
+                WHERE article_id = 'restorable'
+                """
+            )
 
     stats = maintenance_once(now=now, db_path=db_path, event_dir=event_dir, acquire_lock=False)
 
@@ -122,10 +133,12 @@ def test_maintenance_expires_old_pending_articles_without_touching_current(tmp_p
         }
 
     assert stats["expired_articles"] == 1
+    assert stats["restored_articles"] == 1
     assert rows["old-pending"][0] == "filtered_expired"
     assert rows["old-pending"][1] == 1
     assert "outside aggregation horizon" in rows["old-pending"][2]
     assert rows["current-pending"] == ("pending", 0, None)
+    assert rows["restorable"] == ("pending", 0, None)
 
 
 def test_maintenance_lifecycle_and_event_artifact_reconciliation(tmp_path: Path) -> None:

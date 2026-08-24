@@ -107,7 +107,7 @@ class SSRFProtectedAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
 
 
 class SSRFProtectedAsyncHTTPTransport(httpx.AsyncBaseTransport):
-    def __init__(self, *, limits: Limits = DEFAULT_LIMITS) -> None:
+    def __init__(self, *, limits: Limits = DEFAULT_LIMITS, http2: bool = False) -> None:
         ssl_context = create_ssl_context(verify=True, cert=None, trust_env=False)
         self._pool = httpcore.AsyncConnectionPool(
             ssl_context=ssl_context,
@@ -115,7 +115,7 @@ class SSRFProtectedAsyncHTTPTransport(httpx.AsyncBaseTransport):
             max_keepalive_connections=limits.max_keepalive_connections,
             keepalive_expiry=limits.keepalive_expiry,
             http1=True,
-            http2=True,
+            http2=http2,
             retries=0,
             network_backend=SSRFProtectedAsyncNetworkBackend(),
         )
@@ -182,7 +182,7 @@ class PoliteHTTPClient:
             timeout=timeout,
             transport=transport or SSRFProtectedAsyncHTTPTransport(),
             trust_env=False,
-            http2=True,
+            http2=False,
         )
         self._domain_locks: dict[str, asyncio.Lock] = {}
         self._last_request: dict[str, float] = {}
@@ -224,7 +224,20 @@ class PoliteHTTPClient:
         backoff = self.backoff_initial_seconds
         while True:
             await self._respect_rate_limit(domain)
-            response = await self._send_capped(url, headers)
+            try:
+                response = await self._send_capped(url, headers)
+            except httpx.TransportError as exc:
+                if attempt >= limit:
+                    raise
+                sleep_time = min(backoff, self.backoff_max_seconds)
+                self._progress(
+                    f"HTTP request to {url} failed with {type(exc).__name__}: {exc}. "
+                    f"Retrying in {sleep_time:.1f}s (attempt {attempt + 1}/{limit})"
+                )
+                await asyncio.sleep(sleep_time)
+                backoff = min(backoff * 2, self.backoff_max_seconds)
+                attempt += 1
+                continue
             if response.status_code not in {429, 500, 502, 503, 504} or attempt >= limit:
                 return response
             retry_after = self._retry_after_seconds(response.headers.get("retry-after"))
