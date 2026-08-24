@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,9 +25,16 @@ DEFAULT_MAX_CONNECTIONS = 100
 DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20
 DEFAULT_HTTP2 = False
 VALID_THINKING_LEVELS = frozenset({"minimal", "low", "medium", "high"})
+DEFAULT_REVIEW_FALLBACK_MODELS = ("gemini-3.6-flash", "gemini-3.5-flash")
+DEFAULT_REVIEW_LITE_FALLBACK_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_CAPACITY_COOLDOWN_SECONDS = 300.0
 
 
 class GeminiTruncatedError(RuntimeError):
+    pass
+
+
+class GeminiEmptyResponseError(RuntimeError):
     pass
 
 
@@ -191,7 +199,7 @@ class GeminiClient:
                     last_error = GeminiRetryableError(f"transport error: {exc}")
                     self._sleep(self._backoff_delay(attempt))
                     continue
-                raise RuntimeError(f"Gemini API transport error: {exc}") from exc
+                raise GeminiRetryableError(f"Gemini API transport error: {exc}") from exc
 
             if response.status_code >= 400:
                 error_body = response.text
@@ -202,9 +210,16 @@ class GeminiClient:
                     )
                     self._sleep(self._backoff_delay(attempt))
                     continue
-                raise RuntimeError(
-                    f"Gemini API request failed with HTTP {response.status_code}: {error_body[:1000]}"
+                message = (
+                    f"Gemini API request failed with HTTP {response.status_code}: "
+                    f"{error_body[:1000]}"
                 )
+                if response.status_code in RETRYABLE_STATUS_CODES:
+                    raise GeminiRetryableError(
+                        message,
+                        status_code=response.status_code,
+                    )
+                raise RuntimeError(message)
 
             elapsed_ms = round((time.monotonic() - started) * 1000)
             try:
@@ -232,6 +247,84 @@ class GeminiClient:
         return min(delay + jitter, self.backoff_max_seconds)
 
 
+class FallbackGeminiClient:
+    """Try stable Gemini models in order and temporarily bypass capacity-limited tiers."""
+
+    def __init__(
+        self,
+        clients: list[GeminiClient],
+        *,
+        cooldown_seconds: float = DEFAULT_CAPACITY_COOLDOWN_SECONDS,
+        monotonic: Callable[[], float] | None = None,
+    ) -> None:
+        if not clients:
+            raise ValueError("fallback client requires at least one Gemini client")
+        self._clients = tuple(clients)
+        self.models = tuple(client.model for client in clients)
+        self.model = self.models[0]
+        self.cooldown_seconds = max(0.0, float(cooldown_seconds))
+        self._monotonic = monotonic or time.monotonic
+        self._unavailable_until: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def close(self) -> None:
+        for client in self._clients:
+            client.close()
+
+    def __enter__(self) -> FallbackGeminiClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def generate_json(
+        self,
+        *,
+        system_instruction: str,
+        prompt: str,
+        response_schema: dict[str, Any],
+        max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
+    ) -> GeminiResult:
+        last_error: GeminiRetryableError | None = None
+        empty_response_count = 0
+        now = self._monotonic()
+        attempted = 0
+        for index, client in enumerate(self._clients):
+            with self._lock:
+                unavailable_until = self._unavailable_until.get(client.model, 0.0)
+            if unavailable_until > now and index < len(self._clients) - 1:
+                continue
+            attempted += 1
+            try:
+                return client.generate_json(
+                    system_instruction=system_instruction,
+                    prompt=prompt,
+                    response_schema=response_schema,
+                    max_output_tokens=max_output_tokens,
+                    thinking_level=thinking_level,
+                )
+            except GeminiRetryableError as exc:
+                last_error = exc
+                with self._lock:
+                    self._unavailable_until[client.model] = (
+                        self._monotonic() + self.cooldown_seconds
+                    )
+            except GeminiEmptyResponseError as exc:
+                empty_response_count += 1
+                last_error = GeminiRetryableError(str(exc))
+        models = ", ".join(self.models)
+        if attempted and empty_response_count == attempted:
+            raise GeminiEmptyResponseError(
+                f"all Gemini fallback models returned empty responses ({models})"
+            )
+        raise GeminiRetryableError(
+            f"all Gemini fallback models unavailable after {attempted} attempt(s) "
+            f"({models}): {last_error}",
+            status_code=getattr(last_error, "status_code", None),
+        )
+
+
 def gemini_model_for_stage(stage: str) -> str:
     """Resolve stable stage-specific model IDs while preserving GEMINI_MODEL fallback."""
     load_dotenv()
@@ -243,9 +336,49 @@ def gemini_model_for_stage(stage: str) -> str:
     raise ValueError("stage must be 'bulk' or 'review'")
 
 
-def create_gemini_client(stage: str) -> GeminiClient:
+def _review_fallback_model_names(*, include_lite: bool) -> tuple[str, ...]:
+    configured = os.environ.get("GEMINI_REVIEW_FALLBACK_MODELS")
+    fallback_models = (
+        tuple(model.strip() for model in configured.split(",") if model.strip())
+        if configured is not None
+        else DEFAULT_REVIEW_FALLBACK_MODELS
+    )
+    if include_lite:
+        lite_model = os.environ.get(
+            "GEMINI_REVIEW_LITE_FALLBACK_MODEL",
+            DEFAULT_REVIEW_LITE_FALLBACK_MODEL,
+        ).strip()
+        if lite_model:
+            fallback_models = (*fallback_models, lite_model)
+    return fallback_models
+
+
+def create_gemini_client(
+    stage: str, *, include_lite: bool = False
+) -> GeminiClient | FallbackGeminiClient:
     if stage == "review":
-        return GeminiClient(model=gemini_model_for_stage(stage), thinking_level="low")
+        primary = gemini_model_for_stage(stage)
+        models = tuple(
+            dict.fromkeys((primary, *_review_fallback_model_names(include_lite=include_lite)))
+        )
+        attempts = max(1, int(os.environ.get("GEMINI_REVIEW_ATTEMPTS_PER_MODEL", "1")))
+        cooldown = float(
+            os.environ.get(
+                "GEMINI_CAPACITY_COOLDOWN_SECONDS",
+                str(DEFAULT_CAPACITY_COOLDOWN_SECONDS),
+            )
+        )
+        return FallbackGeminiClient(
+            [
+                GeminiClient(
+                    model=model,
+                    thinking_level="minimal" if model.endswith("-lite") else "low",
+                    max_attempts=attempts,
+                )
+                for model in models
+            ],
+            cooldown_seconds=cooldown,
+        )
     if stage == "bulk":
         return GeminiClient(model=gemini_model_for_stage(stage), thinking_level="minimal")
     raise ValueError("stage must be 'bulk' or 'review'")
@@ -254,7 +387,7 @@ def create_gemini_client(stage: str) -> GeminiClient:
 def _extract_text(response_payload: dict[str, Any]) -> str:
     candidates = response_payload.get("candidates") or []
     if not candidates:
-        raise RuntimeError("Gemini response did not include candidates")
+        raise GeminiEmptyResponseError("Gemini response did not include candidates")
     candidate = candidates[0]
     finish_reason = candidate.get("finishReason")
     if finish_reason and finish_reason not in ("STOP", "FINISH_REASON_UNSPECIFIED", None):
@@ -267,5 +400,5 @@ def _extract_text(response_payload: dict[str, Any]) -> str:
     parts = candidate.get("content", {}).get("parts") or []
     text = "".join(str(part.get("text", "")) for part in parts)
     if not text:
-        raise RuntimeError("Gemini response candidate did not include text")
+        raise GeminiEmptyResponseError("Gemini response candidate did not include text")
     return text

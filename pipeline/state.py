@@ -18,7 +18,7 @@ def _relative_to_project(path: Path) -> str:
         return str(path)
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 # Each migration is the SQL needed to take the database from the previous
@@ -243,6 +243,27 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
           ON articles(collection_run_id);
         CREATE INDEX IF NOT EXISTS idx_source_run_stats_source_finished
           ON source_run_stats(source_id, finished_at);
+        """,
+    ),
+    (
+        9,
+        """
+        CREATE TABLE IF NOT EXISTS deduplication_reviews (
+          event_a TEXT NOT NULL,
+          event_b TEXT NOT NULL,
+          event_a_updated_at TEXT NOT NULL,
+          event_b_updated_at TEXT NOT NULL,
+          should_merge INTEGER NOT NULL,
+          confidence REAL NOT NULL,
+          rationale TEXT NOT NULL DEFAULT '',
+          model TEXT NOT NULL,
+          prompt_version TEXT NOT NULL,
+          reviewed_at TEXT NOT NULL,
+          PRIMARY KEY (event_a, event_b, prompt_version)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_deduplication_reviews_reviewed_at
+          ON deduplication_reviews(reviewed_at);
         """,
     ),
 )
@@ -489,33 +510,54 @@ class StateDB:
                 ],
             )
 
-    def article_time_bounds(self, *, unassigned_only: bool = True) -> tuple[str, str] | None:
+    def article_time_bounds(
+        self,
+        *,
+        unassigned_only: bool = True,
+        max_article_rowid: int | None = None,
+    ) -> tuple[str, str] | None:
         where = "WHERE published_at IS NOT NULL"
+        params: list[Any] = []
         if unassigned_only:
             where += " AND event_id IS NULL AND is_filtered = 0"
+        if max_article_rowid is not None:
+            where += " AND rowid <= ?"
+            params.append(max_article_rowid)
         row = self.conn.execute(
             f"""
             SELECT MIN(published_at) AS min_published_at, MAX(published_at) AS max_published_at
             FROM articles
             {where}
-            """
+            """,
+            params,
         ).fetchone()
         if not row or not row["min_published_at"] or not row["max_published_at"]:
             return None
         return row["min_published_at"], row["max_published_at"]
 
-    def unassigned_article_published_times(self, range_start: str, range_end: str) -> list[str]:
+    def unassigned_article_published_times(
+        self,
+        range_start: str,
+        range_end: str,
+        *,
+        max_article_rowid: int | None = None,
+    ) -> list[str]:
+        rowid_clause = " AND rowid <= ?" if max_article_rowid is not None else ""
+        params: list[Any] = [range_start, range_end]
+        if max_article_rowid is not None:
+            params.append(max_article_rowid)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT published_at
             FROM articles
             WHERE event_id IS NULL
               AND is_filtered = 0
               AND published_at >= ?
               AND published_at < ?
+              {rowid_clause}
             ORDER BY published_at
             """,
-            (range_start, range_end),
+            params,
         ).fetchall()
         return [row["published_at"] for row in rows if row["published_at"]]
 
@@ -734,6 +776,114 @@ class StateDB:
         )
         self.conn.commit()
 
+    def fail_stale_running_pipeline_runs(self) -> int:
+        now = isoformat_z()
+        with self.conn:
+            cursor = self.conn.execute(
+                """
+                UPDATE pipeline_runs
+                SET status = 'failed',
+                    finished_at = ?,
+                    stats_json = ?
+                WHERE status = 'running'
+                """,
+                (now, json.dumps({"recovered_as_stale": True}, sort_keys=True)),
+            )
+            return cursor.rowcount or 0
+
+    @staticmethod
+    def _canonical_deduplication_pair(
+        event_a: str,
+        event_b: str,
+        event_a_updated_at: str,
+        event_b_updated_at: str,
+    ) -> tuple[str, str, str, str]:
+        if event_a <= event_b:
+            return event_a, event_b, event_a_updated_at, event_b_updated_at
+        return event_b, event_a, event_b_updated_at, event_a_updated_at
+
+    def get_cached_deduplication_review(
+        self,
+        *,
+        event_a: str,
+        event_b: str,
+        event_a_updated_at: str,
+        event_b_updated_at: str,
+        prompt_version: str,
+    ) -> sqlite3.Row | None:
+        event_a, event_b, event_a_updated_at, event_b_updated_at = (
+            self._canonical_deduplication_pair(
+                event_a,
+                event_b,
+                event_a_updated_at,
+                event_b_updated_at,
+            )
+        )
+        return self.conn.execute(
+            """
+            SELECT *
+            FROM deduplication_reviews
+            WHERE event_a = ?
+              AND event_b = ?
+              AND event_a_updated_at = ?
+              AND event_b_updated_at = ?
+              AND prompt_version = ?
+            """,
+            (event_a, event_b, event_a_updated_at, event_b_updated_at, prompt_version),
+        ).fetchone()
+
+    def record_deduplication_review(
+        self,
+        *,
+        event_a: str,
+        event_b: str,
+        event_a_updated_at: str,
+        event_b_updated_at: str,
+        should_merge: bool,
+        confidence: float,
+        rationale: str,
+        model: str,
+        prompt_version: str,
+    ) -> None:
+        event_a, event_b, event_a_updated_at, event_b_updated_at = (
+            self._canonical_deduplication_pair(
+                event_a,
+                event_b,
+                event_a_updated_at,
+                event_b_updated_at,
+            )
+        )
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO deduplication_reviews (
+                  event_a, event_b, event_a_updated_at, event_b_updated_at,
+                  should_merge, confidence, rationale, model, prompt_version, reviewed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_a, event_b, prompt_version) DO UPDATE SET
+                  event_a_updated_at = excluded.event_a_updated_at,
+                  event_b_updated_at = excluded.event_b_updated_at,
+                  should_merge = excluded.should_merge,
+                  confidence = excluded.confidence,
+                  rationale = excluded.rationale,
+                  model = excluded.model,
+                  reviewed_at = excluded.reviewed_at
+                """,
+                (
+                    event_a,
+                    event_b,
+                    event_a_updated_at,
+                    event_b_updated_at,
+                    int(should_merge),
+                    confidence,
+                    rationale,
+                    model,
+                    prompt_version,
+                    isoformat_z(),
+                ),
+            )
+
     def record_error(
         self,
         run_id: str,
@@ -791,17 +941,28 @@ class StateDB:
         ).fetchone()
         return row["status"] if row else None
 
-    def unassigned_article_count_in_window(self, window_start: str, window_end: str) -> int:
+    def unassigned_article_count_in_window(
+        self,
+        window_start: str,
+        window_end: str,
+        *,
+        max_article_rowid: int | None = None,
+    ) -> int:
+        rowid_clause = " AND rowid <= ?" if max_article_rowid is not None else ""
+        params: list[Any] = [window_start, window_end]
+        if max_article_rowid is not None:
+            params.append(max_article_rowid)
         row = self.conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS count
             FROM articles
             WHERE event_id IS NULL
               AND is_filtered = 0
               AND published_at >= ?
               AND published_at < ?
+              {rowid_clause}
             """,
-            (window_start, window_end),
+            params,
         ).fetchone()
         return int(row["count"]) if row else 0
 
@@ -875,9 +1036,10 @@ class StateDB:
 
 def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 

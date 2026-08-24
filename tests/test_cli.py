@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -233,6 +234,13 @@ def test_run_completed_pipeline_runs_through_presentation(monkeypatch):
     monkeypatch.setattr("pipeline.cli.editorial_once", fake_editorial_once)
     monkeypatch.setattr("pipeline.cli.presentation_once", fake_presentation_once)
     monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
+    monkeypatch.setattr("pipeline.cli._recover_stale_pipeline_runs", lambda: 0)
+    monkeypatch.setattr("pipeline.cli._pending_editorial_count", lambda: 0)
+    monkeypatch.setattr(
+        "pipeline.cli._pending_upstream_counts",
+        lambda **kwargs: {"digest": 0, "aggregation": 0},
+    )
+    monkeypatch.setattr("pipeline.cli._max_article_rowid", lambda: 42)
 
     result = run_completed_pipeline(force=True, progress=progress_messages.append)
 
@@ -249,8 +257,9 @@ def test_run_completed_pipeline_runs_through_presentation(monkeypatch):
         "run: acquired pipeline lock",
         "run: starting maintenance",
         "maintenance: fake progress",
-        "run: starting collect",
+        "run: starting collection alongside backlog processing",
         "collect: fake progress",
+        "run: collection complete; starting downstream work",
         "run: starting digest",
         "article digest: fake progress",
         "run: starting aggregate",
@@ -271,6 +280,157 @@ def test_run_completed_pipeline_runs_through_presentation(monkeypatch):
             "presentation": {"published": True},
         },
     }
+
+
+def test_run_completed_pipeline_defers_new_work_while_editorial_backlog_remains(
+    monkeypatch,
+):
+    calls = []
+
+    class FakePipelineLock:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    backlog_counts = iter((12, 3))
+    collection_started = threading.Event()
+
+    async def fake_collect_once(*, progress=None, acquire_lock=True):
+        calls.append("collect")
+        collection_started.set()
+        return {"feeds_seen": 1}
+
+    def fake_editorial_once(**kwargs):
+        assert collection_started.wait(1)
+        calls.append(("editorial", kwargs["force"]))
+        return {"completed": 9}
+
+    monkeypatch.setattr("pipeline.cli.PipelineLock", FakePipelineLock)
+    monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
+    monkeypatch.setattr("pipeline.cli._recover_stale_pipeline_runs", lambda: 0)
+    monkeypatch.setattr("pipeline.cli._pending_editorial_count", lambda: next(backlog_counts))
+    monkeypatch.setattr(
+        "pipeline.cli._pending_upstream_counts",
+        lambda **kwargs: {"digest": 0, "aggregation": 0},
+    )
+    monkeypatch.setattr("pipeline.cli._max_article_rowid", lambda: 42)
+    monkeypatch.setattr(
+        "pipeline.cli.maintenance_once",
+        lambda **kwargs: calls.append("maintenance") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        "pipeline.cli.editorial_once",
+        fake_editorial_once,
+    )
+    monkeypatch.setattr(
+        "pipeline.cli.presentation_once",
+        lambda **kwargs: calls.append("presentation") or {"published": True},
+    )
+    monkeypatch.setattr(
+        "pipeline.cli.collect_once",
+        fake_collect_once,
+    )
+    monkeypatch.setattr(
+        "pipeline.cli.digest_once",
+        lambda **kwargs: pytest.fail("digestion must be deferred"),
+    )
+    monkeypatch.setattr(
+        "pipeline.cli.aggregate_once",
+        lambda **kwargs: pytest.fail("aggregation must be deferred"),
+    )
+
+    result = run_completed_pipeline(progress=lambda _message: None)
+
+    assert calls == ["maintenance", "collect", ("editorial", False), "presentation"]
+    assert result["backlog_blocked"] is True
+    assert result["pending_editorial"] == 3
+    assert result["stages"]["collect"] == {"feeds_seen": 1}
+
+
+def test_run_completed_pipeline_drains_prior_upstream_work_before_collection(monkeypatch):
+    calls = []
+
+    class FakePipelineLock:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    upstream_counts = iter(
+        (
+            {"digest": 4, "aggregation": 2},
+            {"digest": 1, "aggregation": 0},
+        )
+    )
+    collection_started = threading.Event()
+
+    async def fake_collect_once(*, progress=None, acquire_lock=True):
+        calls.append("collect")
+        collection_started.set()
+        return {"feeds_seen": 1}
+
+    def fake_digest_once(**kwargs):
+        assert collection_started.wait(1)
+        assert kwargs["max_article_rowid"] == 42
+        calls.append(("digest", kwargs["force"]))
+        return {"completed": 3}
+
+    monkeypatch.setattr("pipeline.cli.PipelineLock", FakePipelineLock)
+    monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
+    monkeypatch.setattr("pipeline.cli._recover_stale_pipeline_runs", lambda: 0)
+    monkeypatch.setattr("pipeline.cli._pending_editorial_count", lambda: 0)
+    monkeypatch.setattr(
+        "pipeline.cli._pending_upstream_counts",
+        lambda **kwargs: next(upstream_counts),
+    )
+    monkeypatch.setattr("pipeline.cli._max_article_rowid", lambda: 42)
+    monkeypatch.setattr(
+        "pipeline.cli.maintenance_once",
+        lambda **kwargs: calls.append("maintenance") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        "pipeline.cli.digest_once",
+        fake_digest_once,
+    )
+    monkeypatch.setattr(
+        "pipeline.cli.aggregate_once",
+        lambda **kwargs: calls.append(("aggregate", kwargs["force"])) or {"processed": 2},
+    )
+    monkeypatch.setattr(
+        "pipeline.cli.editorial_once",
+        lambda **kwargs: calls.append(("editorial", kwargs["force"])) or {"completed": 2},
+    )
+    monkeypatch.setattr(
+        "pipeline.cli.presentation_once",
+        lambda **kwargs: calls.append("presentation") or {"published": True},
+    )
+    monkeypatch.setattr(
+        "pipeline.cli.collect_once",
+        fake_collect_once,
+    )
+
+    result = run_completed_pipeline(progress=lambda _message: None)
+
+    assert calls == [
+        "maintenance",
+        "collect",
+        ("digest", False),
+        ("aggregate", False),
+        ("editorial", False),
+        "presentation",
+    ]
+    assert result["backlog_blocked"] is True
+    assert result["pending_digest"] == 1
+    assert result["pending_aggregation"] == 0
 
 
 def test_run_command_writes_progress_and_combined_stats(monkeypatch, capsys):
@@ -338,6 +498,13 @@ def test_run_command_writes_progress_and_combined_stats(monkeypatch, capsys):
     monkeypatch.setattr("pipeline.cli.editorial_once", fake_editorial_once)
     monkeypatch.setattr("pipeline.cli.presentation_once", fake_presentation_once)
     monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
+    monkeypatch.setattr("pipeline.cli._recover_stale_pipeline_runs", lambda: 0)
+    monkeypatch.setattr("pipeline.cli._pending_editorial_count", lambda: 0)
+    monkeypatch.setattr(
+        "pipeline.cli._pending_upstream_counts",
+        lambda **kwargs: {"digest": 0, "aggregation": 0},
+    )
+    monkeypatch.setattr("pipeline.cli._max_article_rowid", lambda: 42)
     monkeypatch.setattr("sys.argv", ["news-tldr-pipeline", "run", "--verbose", "--force"])
 
     main()

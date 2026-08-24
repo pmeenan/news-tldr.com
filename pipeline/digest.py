@@ -293,6 +293,7 @@ def digest_once(
     review_client: JsonGenerator | None = None,
     progress: Callable[[str], None] | None = None,
     acquire_lock: bool = True,
+    max_article_rowid: int | None = None,
 ) -> dict[str, Any]:
     if (range_start is None) != (range_end is None):
         raise ValueError("range_start and range_end must be provided together or both omitted")
@@ -344,6 +345,7 @@ def digest_once(
                         min_category_impact=min_category_impact,
                         review_margin=review_margin,
                         progress=progress,
+                        max_article_rowid=max_article_rowid,
                     )
                 )
                 if stats.get("failed"):
@@ -381,6 +383,7 @@ def digest_articles_for_aggregation(
     min_category_impact: float = 0.25,
     review_margin: float = 0.10,
     progress: Callable[[str], None] | None = None,
+    max_article_rowid: int | None = None,
 ) -> dict[str, Any]:
     if limit is not None and limit < 1:
         raise ValueError("limit must be at least 1")
@@ -402,6 +405,7 @@ def digest_articles_for_aggregation(
         "review_dropped": 0,
         "bulk_model": generator.model,
         "review_model": review_client.model if review_client is not None else None,
+        "max_article_rowid": max_article_rowid,
         "usage": {"promptTokenCount": 0, "candidatesTokenCount": 0},
     }
     candidates: list[ArticleForDigest] = []
@@ -418,6 +422,7 @@ def digest_articles_for_aggregation(
         published_before=published_before,
         limit=limit,
         force=force,
+        max_article_rowid=max_article_rowid,
     )
     retry_counts = _digest_retry_counts(state, [row["article_id"] for row in rows])
 
@@ -686,12 +691,12 @@ def generate_article_digest_with_review(
         "digest": reviewed_digest,
         "elapsed_ms": int(first_pass["elapsed_ms"]) + int(result.elapsed_ms),
         "usage": result.usage,
-        "model": review_client.model,
+        "model": result.model,
         "usage_records": [
             *first_pass["usage_records"],
             {
                 "stage": "article_filter_review",
-                "model": review_client.model,
+                "model": result.model,
                 "prompt_version": ARTICLE_FILTER_REVIEW_PROMPT_VERSION,
                 "usage": result.usage,
             },
@@ -699,7 +704,7 @@ def generate_article_digest_with_review(
         "review": {
             "reason": review_reason,
             "first_pass_model": client.model,
-            "review_model": review_client.model,
+            "review_model": result.model,
             "prompt_version": ARTICLE_FILTER_REVIEW_PROMPT_VERSION,
             "first_pass_content_quality": first_pass["digest"]["content_quality"],
             "first_pass_category_impact": first_pass["digest"]["impact"]["category"],
@@ -777,6 +782,7 @@ def _digest_candidate_rows(
     published_before: str | None,
     limit: int | None,
     force: bool = False,
+    max_article_rowid: int | None = None,
 ) -> list[Any]:
     # Select rows that either (a) are not yet completed/skipped, or
     # (b) were processed at an older prompt version and need refreshing.
@@ -801,6 +807,9 @@ def _digest_candidate_rows(
     if published_before is not None:
         where += " AND a.published_at < ?"
         params.append(published_before)
+    if max_article_rowid is not None:
+        where += " AND a.rowid <= ?"
+        params.append(max_article_rowid)
     limit_clause = ""
     if limit is not None:
         limit_clause = "LIMIT ?"

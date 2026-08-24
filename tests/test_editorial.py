@@ -1,23 +1,27 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from pipeline.editorial import (
+    EDITORIAL_COMPACT_PROMPT_VERSION,
     EDITORIAL_PROMPT_VERSION,
     EditorialArticle,
     EditorialEvent,
     _build_editorial_prompt,
+    _display_rank_scores,
     build_story_payload,
     editorial_candidate_rows,
     generate_editorial_stories,
+    generate_story,
     validate_editorial_response,
     write_active_stories_index,
 )
-from pipeline.llm import GeminiResult
+from pipeline.llm import GeminiEmptyResponseError, GeminiResult
 from pipeline.state import StateDB, migrate
 
 
@@ -223,6 +227,38 @@ def test_prompt_only_enables_framing_with_left_and_right_sources() -> None:
     assert "Omit political_framing" in _build_editorial_prompt(one_sided)
 
 
+def test_generate_story_retries_empty_responses_with_compact_digest_context() -> None:
+    event = _event(
+        EditorialArticle(
+            **{
+                **_article("a1").__dict__,
+                "content": "Sensitive full article text " * 500,
+            }
+        )
+    )
+
+    class CompactRetryClient(FakeEditorialClient):
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                raise GeminiEmptyResponseError("no candidates")
+            return GeminiResult(
+                payload=self.payload,
+                model="gemini-3.6-flash",
+                elapsed_ms=25,
+                usage={"promptTokenCount": 50, "candidatesTokenCount": 20},
+            )
+
+    client = CompactRetryClient(_response("a1"))
+    generated = generate_story(event, client=client)
+
+    assert len(client.calls) == 2
+    assert "Sensitive full article text" in client.calls[0]["prompt"]
+    assert "Sensitive full article text" not in client.calls[1]["prompt"]
+    assert generated["model"] == "gemini-3.6-flash"
+    assert generated["prompt_version"] == EDITORIAL_COMPACT_PROMPT_VERSION
+
+
 def test_build_story_preserves_created_at_and_has_auditable_importance() -> None:
     event = _event(_article("a1"), _article("a2"))
     generated = {
@@ -241,6 +277,56 @@ def test_build_story_preserves_created_at_and_has_auditable_importance() -> None
     assert story["importance"]["score"] > 0.7
     assert story["importance"]["components"]["stage2_global"] == 0.8
     assert story["sources"][0]["article_id"] == "a1"
+
+
+def test_display_ranking_balances_freshness_and_view_specific_impact() -> None:
+    now = datetime(2026, 8, 24, 12, tzinfo=UTC)
+    global_first = _display_rank_scores(
+        {
+            "score": 0.8,
+            "components": {
+                "stage2_global": 0.95,
+                "stage2_category": 0.45,
+                "editorial": 0.8,
+                "source_quality": 0.9,
+                "source_count": 0.8,
+            },
+        },
+        event_updated_at="2026-08-24T10:00:00Z",
+        now=now,
+    )
+    category_first = _display_rank_scores(
+        {
+            "score": 0.8,
+            "components": {
+                "stage2_global": 0.45,
+                "stage2_category": 0.95,
+                "editorial": 0.8,
+                "source_quality": 0.9,
+                "source_count": 0.8,
+            },
+        },
+        event_updated_at="2026-08-24T10:00:00Z",
+        now=now,
+    )
+    older = _display_rank_scores(
+        {
+            "score": 0.8,
+            "components": {
+                "stage2_global": 0.95,
+                "stage2_category": 0.45,
+                "editorial": 0.8,
+                "source_quality": 0.9,
+                "source_count": 0.8,
+            },
+        },
+        event_updated_at="2026-08-22T10:00:00Z",
+        now=now,
+    )
+
+    assert global_first["homepage"] > category_first["homepage"]
+    assert category_first["category"] > global_first["category"]
+    assert global_first["homepage"] > older["homepage"]
 
 
 def test_generate_stories_persists_checkpoint_usage_and_ignores_filtered_articles(
@@ -315,5 +401,8 @@ def test_active_index_includes_only_current_events_with_story_files(tmp_path: Pa
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert [story["story_id"] for story in payload["stories"]] == ["event-2", "event-1"]
     assert payload["stories"][0]["source_count"] == 1
+    assert payload["stories"][0]["homepage_rank_score"] > 0
+    assert payload["stories"][0]["category_rank_score"] > 0
+    assert payload["ranking_version"] == "display-ranking-v1"
     assert payload["stories"][0]["event_updated_at"] == "2026-08-24T01:00:00Z"
     assert stats == {"active_index_stories": 2, "active_index_missing": 0}

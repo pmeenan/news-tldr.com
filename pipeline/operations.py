@@ -548,7 +548,7 @@ def _validate_active_index(
         report(path, "stories must be a list")
         return 0, set()
     seen: set[str] = set()
-    previous_importance: float | None = None
+    previous_rank: float | None = None
     for row in rows:
         if not isinstance(row, dict):
             report(path, "index rows must be objects")
@@ -569,12 +569,13 @@ def _validate_active_index(
             report(path, f"index has unknown category for {story_id}")
         try:
             importance = float(row.get("importance_score"))
+            rank = float(row.get("homepage_rank_score", importance))
         except (TypeError, ValueError):
-            report(path, f"invalid importance_score for {story_id}")
+            report(path, f"invalid importance or homepage rank score for {story_id}")
             continue
-        if previous_importance is not None and importance > previous_importance + 1e-9:
-            report(path, "stories are not sorted by descending importance")
-        previous_importance = importance
+        if previous_rank is not None and rank > previous_rank + 1e-9:
+            report(path, "stories are not sorted by descending homepage rank")
+        previous_rank = rank
     return len(rows), seen
 
 

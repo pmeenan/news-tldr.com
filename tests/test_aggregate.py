@@ -820,6 +820,48 @@ def test_load_window_articles_filters_low_impact_and_marks_status(tmp_path) -> N
     }
 
 
+def test_load_window_articles_respects_snapshot_rowid(tmp_path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        for article_id in ("before", "after"):
+            article_path = tmp_path / f"{article_id}.json"
+            payload = {
+                "article_id": article_id,
+                "source_id": "source",
+                "source_name": "Source",
+                "url": f"https://example.com/{article_id}",
+                "headline": f"Headline {article_id}",
+                "summary": f"Summary {article_id}",
+                "published_at": "2026-05-24T16:30:00Z",
+                "fetched_at": "2026-05-24T16:31:00Z",
+                "collection": {},
+                "fingerprints": {},
+                "llm_digest": {
+                    "summary": "Generated digest.",
+                    "key_facts": ["A key fact."],
+                    "content_quality": "ok",
+                    "impact": {"global": 0.5, "category": 0.7},
+                },
+            }
+            article_path.write_text(json.dumps(payload), encoding="utf-8")
+            state.insert_article(payload, article_path)
+            if article_id == "before":
+                snapshot_rowid = state.conn.execute(
+                    "SELECT rowid FROM articles WHERE article_id = 'before'"
+                ).fetchone()[0]
+
+        articles = load_window_articles(
+            window_start="2026-05-24T16:00:00Z",
+            window_end="2026-05-24T22:00:00Z",
+            min_category_impact=0.25,
+            db=state,
+            max_article_rowid=snapshot_rowid,
+        )
+
+    assert [article.article_id for article in articles] == ["before"]
+
+
 def test_load_window_articles_filters_non_news_and_spammy_content(tmp_path) -> None:
     db_path = tmp_path / "pipeline.db"
     migrate(db_path)
@@ -2630,6 +2672,36 @@ def test_deduplicate_active_events_llm_requires_high_confidence(tmp_path, monkey
 
         assert (event_dir / "2026-05-25-sudans-war-economy-2.json").exists()
         assert state.conn.execute("SELECT 1 FROM events WHERE event_id = ?", (event2["event_id"],)).fetchone()
+
+        from pipeline.aggregate import _evaluate_and_apply_deduplication_candidates
+
+        lite_client = FakeJsonGenerator(
+            {"should_merge": True, "confidence": 0.99, "rationale": "Same story"}
+        )
+        lite_client.model = "gemini-3.5-flash-lite"
+        merges = _evaluate_and_apply_deduplication_candidates(
+            candidates=[(event1, event2)],
+            state=state,
+            client=lite_client,
+            feeds_by_source={},
+            prompt_version="lite-safety-test",
+        )
+        assert merges == 0
+        assert state.event_exists(event2["event_id"])
+        assert state.conn.execute(
+            "SELECT COUNT(*) FROM deduplication_reviews WHERE prompt_version = 'lite-safety-test'"
+        ).fetchone()[0] == 0
+
+        second_client = FakeJsonGenerator(
+            {"should_merge": False, "confidence": 1.0, "rationale": "Different"}
+        )
+        deduplicate_active_events_llm(
+            state=state,
+            client=second_client,
+            feeds_by_source={},
+        )
+        # The loose prescreen still runs, but the unchanged pair's strict review is cached.
+        assert len(second_client.prompts) == 1
 
 
 def test_deduplicate_active_events_llm_cross_category_same_group(tmp_path, monkeypatch) -> None:

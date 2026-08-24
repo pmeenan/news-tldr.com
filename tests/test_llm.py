@@ -7,7 +7,11 @@ import httpx
 import pytest
 
 from pipeline.llm import (
+    FallbackGeminiClient,
     GeminiClient,
+    GeminiEmptyResponseError,
+    GeminiResult,
+    GeminiRetryableError,
     GeminiTruncatedError,
     gemini_model_for_stage,
     parse_dotenv,
@@ -188,3 +192,88 @@ def test_generate_json_reuses_injected_httpx_client(monkeypatch: pytest.MonkeyPa
 def test_gemini_client_defaults_to_http11(monkeypatch: pytest.MonkeyPatch) -> None:
     with _make_client(monkeypatch) as client:
         assert client._http_client._transport._pool._http2 is False
+
+
+def test_fallback_client_uses_next_model_and_opens_circuit() -> None:
+    calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self, model: str, *, fail: bool = False) -> None:
+            self.model = model
+            self.fail = fail
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            calls.append(self.model)
+            if self.fail:
+                raise GeminiRetryableError("capacity", status_code=503)
+            return GeminiResult(
+                payload={"ok": True},
+                model=self.model,
+                elapsed_ms=1,
+                usage={},
+            )
+
+        def close(self) -> None:
+            pass
+
+    client = FallbackGeminiClient(
+        [FakeClient("gemini-3.7-flash", fail=True), FakeClient("gemini-3.6-flash")],
+        cooldown_seconds=300,
+        monotonic=lambda: 100.0,
+    )
+    first = client.generate_json(system_instruction="s", prompt="p", response_schema={})
+    second = client.generate_json(system_instruction="s", prompt="p", response_schema={})
+
+    assert first.model == "gemini-3.6-flash"
+    assert second.model == "gemini-3.6-flash"
+    assert calls == ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.6-flash"]
+
+
+def test_fallback_client_does_not_mask_nonretryable_errors() -> None:
+    class BadClient:
+        model = "gemini-3.7-flash"
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            raise RuntimeError("invalid schema")
+
+        def close(self) -> None:
+            pass
+
+    class UnusedClient(BadClient):
+        model = "gemini-3.6-flash"
+
+    client = FallbackGeminiClient([BadClient(), UnusedClient()])
+    with pytest.raises(RuntimeError, match="invalid schema"):
+        client.generate_json(system_instruction="s", prompt="p", response_schema={})
+
+
+def test_fallback_client_tries_next_model_for_empty_response_without_opening_circuit() -> None:
+    calls: list[str] = []
+
+    class EmptyClient:
+        model = "gemini-3.7-flash"
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            calls.append(self.model)
+            raise GeminiEmptyResponseError("no candidates")
+
+        def close(self) -> None:
+            pass
+
+    class GoodClient(EmptyClient):
+        model = "gemini-3.6-flash"
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            calls.append(self.model)
+            return GeminiResult(payload={"ok": True}, model=self.model, elapsed_ms=1, usage={})
+
+    client = FallbackGeminiClient([EmptyClient(), GoodClient()])
+    client.generate_json(system_instruction="s", prompt="p", response_schema={})
+    client.generate_json(system_instruction="s", prompt="p", response_schema={})
+
+    assert calls == [
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+    ]

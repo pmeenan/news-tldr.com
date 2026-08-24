@@ -295,11 +295,21 @@ Studio API key in local `.env` configuration:
 GEMINI_API_KEY=your-ai-studio-api-key
 GEMINI_BULK_MODEL=gemini-3.5-flash-lite
 GEMINI_REVIEW_MODEL=gemini-3.7-flash
+GEMINI_REVIEW_FALLBACK_MODELS=gemini-3.6-flash,gemini-3.5-flash
+GEMINI_REVIEW_LITE_FALLBACK_MODEL=gemini-3.5-flash-lite
 ```
 
-Bulk calls use `gemini-3.5-flash-lite` with minimal thinking; selective review
-calls use `gemini-3.7-flash` with low thinking. `GEMINI_MODEL` remains a bulk
-fallback. Both are called through `generativelanguage.googleapis.com` with the
+Bulk calls use `gemini-3.5-flash-lite` with minimal thinking. Selective review
+and editorial calls use the ordered full-Flash chain 3.7 → 3.6 → 3.5 with low
+thinking. A retryable transport, 429, or 5xx failure opens a five-minute
+per-process circuit for that tier so concurrent and subsequent calls bypass it.
+Deduplication alone may use 3.5 Flash-Lite as a final capacity fallback; Lite
+can reject a candidate but cannot authorize a destructive event merge.
+If every full-Flash tier returns an empty response for safety-sensitive
+editorial input, editorial retries the same full-Flash chain once with compact
+digest/key-fact context and records a distinct compact prompt version; it still
+never falls back to Lite.
+`GEMINI_MODEL` remains a bulk fallback. Calls go through `generativelanguage.googleapis.com` with the
 `x-goog-api-key` header and a pooled `httpx` HTTP/1.1 client. Requests omit the
 deprecated Gemini 3 sampling fields (`temperature`, `topP`, and `topK`) and use
 structured output (`responseMimeType: application/json` plus a JSON schema).
@@ -339,7 +349,7 @@ Post-aggregation deduplication collects candidate event pairs from four compleme
 1. **Slug / title heuristics** — base-slug equality, title-word overlap (`_titles_similar`), and highly similar individual article headlines (catches reprints with different lead facts).
 2. **Keyword-overlap gate** (`_keyword_overlap_candidates`) — within a single category-group batch, pairs events that share at least 2 distinctive event-level keywords after stripping a global static stopword list and a per-batch *dynamic* hot-keyword stopword list (`_dynamic_keyword_stopwords`). The dynamic list flags any keyword appearing in ≥20% of the batch's events AND in ≥4 events (an absolute floor that prevents tiny batches from stopwording distinctive entities like "ferrari" that only appear in the 2 candidate duplicates).
 3. **LLM pre-screen gate** (`_llm_prescreen_candidates`) — loose-recall LLM calls over category-group batches (`politics_gov`, `news_business_{us,world,business}`, `sci_tech`, `leisure`), sending each event's id, title, top-6 filtered keywords, and top-3 article headlines. The model is instructed to err on the side of inclusion; false positives are filtered by the strict per-pair merge call. Each call is bounded to `DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH = 40` events and chunked when batches exceed that. For oversized batches, the top high-article-count anchor events are repeated into every prescreen chunk so large ongoing stories can still be compared with later singleton updates that would otherwise land in a different chunk. `news_business` also gets an additional parent-level cross-category prescreen because market, business, U.S., and world framings often describe the same underlying event from different verticals. All prescreen chunks across all category-group batches share one worker pool up to `aggregation.deduplication_concurrency` (default: 16). Prompt version: `deduplication-prescreen-v1`. Token usage and errors are recorded under stage `deduplication_prescreen`.
-4. **Per-pair merge LLM** — for every unique candidate pair from the union of (1)–(3), the existing `_build_event_merge_prompt` call decides `should_merge` with confidence ≥ `DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD` (0.8). This is the single source of truth for actually merging; over-merging risk lives here only. Candidate-pair reviews run concurrently in rounds of disjoint event IDs, then accepted merges are applied serially in deterministic order so one merge cannot race another merge touching the same event.
+4. **Per-pair merge LLM** — for every unique candidate pair from the union of (1)–(3), the existing `_build_event_merge_prompt` call decides `should_merge` with confidence ≥ `DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD` (0.8). This is the single source of truth for actually merging; over-merging risk lives here only. Candidate-pair reviews run concurrently in rounds of disjoint event IDs, then accepted merges are applied serially in deterministic order so one merge cannot race another merge touching the same event. Full-Flash decisions are cached against both event `updated_at` values and the prompt version, so unchanged negative pairs are not paid for or retried every hour. Reviews prioritize the newest changed events and are bounded to 40 new pairs and one merge pass per production run. A changed event invalidates its cached pair decisions automatically.
 
 Over-merging protection comes from the strict per-pair call; recall comes from the diversity of candidate gates. Adding a new gate cannot weaken the merge decision — at worst it adds extra per-pair LLM calls that return `should_merge=false`.
 
@@ -563,6 +573,16 @@ When political framing is present:
 
 The presentation layer reads this index to decide which stories to render and how to order them, then reads individual story JSON files for full content. The presentation layer owns the time window (e.g., "last 24 hours", "last 48 hours") and filtering logic. Rolling news windows use `event_updated_at`; story `created_at`/`updated_at` describe editorial artifact generation and must not make an old event appear newly reported after a forced regeneration.
 
+The index also carries presentation ranks refreshed whenever Editorial rebuilds
+the index. `homepage_rank_score` weights global impact most heavily, while
+`category_rank_score` weights the event's category impact most heavily. Both
+reserve 20% for freshness derived from `event_updated_at` and include editorial
+judgment plus source quality/coverage. The All view is emitted in homepage-rank
+order; the client re-sorts a selected category by its category rank. This keeps
+forced story regeneration timestamps from affecting news freshness and lets a
+high-impact vertical story lead its own section without necessarily leading the
+general briefing.
+
 ### Stage 3 Implementation
 
 The editorial implementation lives in `pipeline/editorial.py` and is exposed by
@@ -607,6 +627,20 @@ Responsibilities:
 
 - Build static pages from story JSON with the standard-library renderer in `pipeline/present.py`. All JSON strings are treated as untrusted and HTML-escaped; external links are restricted to HTTP/HTTPS URLs and raw upstream HTML is never rendered.
 - The main page shows all active stories in a **rolling time window**, editorially ranked by importance. Category tabs (one per category from `config/categories.json`, plus an "All" default) filter the same ranked list client-side — they are not separate pages with independent layouts.
+- Category navigation uses the optional concise `short_name` from category
+  config so all sections fit in one desktop row; full names remain in story
+  labels and metadata.
+- A device-local New/All control supports repeat reading. An Intersection
+  Observer records a story after at least 55% of its card remains visible for
+  10 seconds. Local storage retains those story IDs for three days. New hides
+  stories recorded before the current page visit, avoiding disruptive card
+  removal while someone is actively reading; All always restores the complete
+  rolling window. Reading history is never sent to the server.
+- Cards use restrained tinting for visual separation. The All view assigns a
+  deterministic muted tint from the story's source set; category views switch
+  to that category's theme color. Tint depth is a small combination of display
+  rank and distinct source count, so better-supported, higher-priority stories
+  carry more visual weight without reducing text contrast.
 - Build individual story pages with TL;DR, key facts, uncertainties, source links, and political framing sections.
 - Build an active-story archive plus sitemap, robots, 404, and JSON API files. Historical pages for archived events remain a future enhancement.
 - Render source links with paywall indicators and uncertainty notes.
@@ -688,6 +722,18 @@ either the pipeline or health check fails so cron's normal error-mail path can
 alert the operator. `deploy/cron/news-tldr.cron` is the checked-in schedule
 source. The pipeline lock prevents overlap if an earlier run is still active.
 
+At the start of every combined run, interrupted `pipeline_runs` rows are marked
+failed for auditability. After maintenance, the runner snapshots the maximum
+article SQLite `rowid` and starts collection in a dedicated thread/event loop.
+Pending editorial work is processed and published while feed/article HTTP
+requests run. Retained digest and aggregation work is restricted to the
+snapshotted row boundary, then flows through editorial and another publish;
+articles inserted by the concurrent collection cannot move that backlog's
+finish line. If the snapshot backlog remains, collection still completes and
+checkpoints, but new downstream work is deferred and the command exits nonzero.
+SQLite connections use a 30-second connection/busy timeout so the collection
+writer and short editorial/usage writes serialize safely under WAL mode.
+
 Sparse aggregation deliberately revisits the newest completed window to catch
 late arrivals, but replaying a group whose articles are already present in the
 same event is a no-op: its event JSON and `updated_at` stay unchanged. This keeps
@@ -695,7 +741,7 @@ hourly runs incremental and prevents unnecessary editorial LLM regeneration.
 
 ### Concurrency Control
 
-Only one pipeline run may execute at a time. Concurrency is controlled by a lock file at `data/state/pipeline.lock`. Individual stage commands acquire this lock for that stage. The combined `run` command acquires the same lock once for maintenance → collect → digest → aggregate → editorial → presentation/publish and calls the inner stage implementations without reacquiring it, so another scheduled run or manual stage command cannot slip between stages.
+Only one pipeline run may execute at a time. Concurrency is controlled by a lock file at `data/state/pipeline.lock`. Individual stage commands acquire this lock for that stage. The combined `run` command acquires the same lock once. After maintenance it overlaps collection with any snapshotted editorial/digest/aggregation backlog, waits for collection before admitting its new article rows downstream, and then follows digest → aggregate → editorial → presentation/publish. Inner stage implementations do not reacquire the lock, so another scheduled run or manual stage command cannot slip between stages; the collection thread remains owned by the same locked top-level run.
 
 **Lock acquisition:**
 1. Create `pipeline.lock` atomically using exclusive creation (`O_CREAT | O_EXCL`) or an atomic lock directory. Do not use a separate check-then-create sequence.

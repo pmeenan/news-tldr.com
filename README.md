@@ -51,13 +51,20 @@ Create a local `.env` file with an AI Studio API key and the two model tiers:
 GEMINI_API_KEY=your-ai-studio-api-key
 GEMINI_BULK_MODEL=gemini-3.5-flash-lite
 GEMINI_REVIEW_MODEL=gemini-3.7-flash
+GEMINI_REVIEW_FALLBACK_MODELS=gemini-3.6-flash,gemini-3.5-flash
+GEMINI_REVIEW_LITE_FALLBACK_MODEL=gemini-3.5-flash-lite
 ```
 
 `GEMINI_MODEL` remains a supported fallback for the bulk tier. The `.env` file
 is ignored by git and must not be committed. Bulk digestion, grouping, scoring,
 and candidate discovery use 3.5 Flash-Lite with minimal thinking. Borderline
-article-filter decisions and final event-merge decisions use 3.7 Flash with low
-thinking. All calls use Gemini structured output and validated responses.
+article-filter decisions, editorial, and final event-merge decisions try 3.7,
+3.6, then 3.5 Flash with low thinking when capacity is constrained.
+Deduplication may fall back once more to 3.5 Flash-Lite, but a Lite result can
+only reject or defer a pair and can never authorize a merge. All calls use
+Gemini structured output and validated responses. Safety-sensitive editorial
+inputs that produce empty responses across all full-Flash tiers get one compact
+digest/key-fact retry on the same full-Flash chain; editorial never uses Lite.
 
 ### Pipeline Commands
 
@@ -80,6 +87,14 @@ with individual stage commands:
 ```bash
 ./.venv/bin/python -m pipeline.cli run --verbose
 ```
+
+After maintenance, the combined command snapshots the existing article queue
+and starts collection in parallel with backlog processing. Existing editorial
+work is drained and published first; prior digest and aggregation work is then
+processed only through the snapshot boundary, so newly fetched articles cannot
+move the finish line. If backlog remains, collection is still checkpointed but
+new downstream work is deferred and the command exits nonzero. SQLite writers
+use a 30-second busy timeout to tolerate brief collection/editorial contention.
 
 Force stages that support forced recomputation (`digest`, `aggregate`, and `editorial`) while
 running the completed pipeline:
@@ -180,6 +195,12 @@ static files, removes only stale files recorded in its managed manifest, preserv
 unknown server files, and replaces `index.html` last so readers do not see a new
 homepage before its referenced pages and assets are present.
 
+The homepage ranks the All view by fresh global impact and re-ranks each category
+by fresh category impact. Its New/All control remembers stories that were at
+least half-visible for 10 seconds, retains that device-local history for three
+days, and hides previously seen stories on later visits when New is selected.
+No reading history leaves the browser.
+
 ### Operations and Monitoring
 
 Validate configuration symmetry, SQLite integrity, article/event/story schemas,
@@ -232,7 +253,8 @@ crontab -l | grep news-tldr
   with `bias_label`, `reliability`, `paywall`, and an explanatory note. Feed
   and policy ID sets must remain exactly symmetric; `validate-data` enforces it.
 - **Categories**: Add a sanitized `id`, display `name`, `description`, and
-  unique `sort_order` to `config/categories.json`, then update the aggregation
+  unique `sort_order` to `config/categories.json`. Add a concise `short_name`
+  for the homepage navigation, then update the aggregation
   category-group mapping and prompt guidance if the new category changes event
   grouping behavior.
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -62,6 +63,12 @@ def test_fresh_migrate_creates_full_schema(tmp_path: Path) -> None:
         assert "idx_events_newsworthiness_global" in _indexes(conn, "events")
         assert "idx_aggregation_windows_status_end" in _indexes(conn, "aggregation_windows")
         assert "idx_source_run_stats_source_finished" in _indexes(conn, "source_run_stats")
+        assert "deduplication_reviews" in {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert "idx_deduplication_reviews_reviewed_at" in _indexes(
+            conn, "deduplication_reviews"
+        )
         version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
         assert version == SCHEMA_VERSION
     finally:
@@ -103,7 +110,7 @@ def test_migrate_upgrades_existing_v1_database(tmp_path: Path) -> None:
         assert "source_run_stats" in {
             row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-        assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     finally:
         conn.close()
 
@@ -248,6 +255,48 @@ def test_unassigned_window_count_ignores_filtered_articles(tmp_path: Path) -> No
             )
             == []
         )
+
+
+def test_article_queries_respect_snapshot_rowid(tmp_path: Path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        for article_id, published_at in (
+            ("before", "2026-05-24T16:30:00Z"),
+            ("after", "2026-05-24T17:30:00Z"),
+        ):
+            state.insert_article(
+                {
+                    "article_id": article_id,
+                    "source_id": "source",
+                    "source_name": "Source",
+                    "url": f"https://example.com/{article_id}",
+                    "headline": article_id,
+                    "published_at": published_at,
+                    "fetched_at": published_at,
+                    "collection": {},
+                    "fingerprints": {},
+                },
+                tmp_path / f"{article_id}.json",
+            )
+            if article_id == "before":
+                snapshot_rowid = state.conn.execute(
+                    "SELECT rowid FROM articles WHERE article_id = 'before'"
+                ).fetchone()[0]
+
+        assert state.article_time_bounds(
+            max_article_rowid=snapshot_rowid
+        ) == ("2026-05-24T16:30:00Z", "2026-05-24T16:30:00Z")
+        assert state.unassigned_article_published_times(
+            "2026-05-24T00:00:00Z",
+            "2026-05-25T00:00:00Z",
+            max_article_rowid=snapshot_rowid,
+        ) == ["2026-05-24T16:30:00Z"]
+        assert state.unassigned_article_count_in_window(
+            "2026-05-24T16:00:00Z",
+            "2026-05-24T22:00:00Z",
+            max_article_rowid=snapshot_rowid,
+        ) == 1
 
 
 def test_state_upserts_event_and_assigns_articles(tmp_path: Path) -> None:
@@ -483,3 +532,53 @@ def test_set_article_aggregation_pending_if_unassigned(tmp_path: Path) -> None:
         ).fetchone()
         assert row["aggregation_status"] == "pending"
         assert row["aggregation_reason"] == "sentinel"
+
+
+def test_deduplication_review_cache_is_invalidated_by_event_updates(tmp_path: Path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        state.record_deduplication_review(
+            event_a="b",
+            event_b="a",
+            event_a_updated_at="2026-08-24T02:00:00Z",
+            event_b_updated_at="2026-08-24T01:00:00Z",
+            should_merge=False,
+            confidence=0.9,
+            rationale="different events",
+            model="gemini-3.6-flash",
+            prompt_version="deduplication-review-v1",
+        )
+
+        cached = state.get_cached_deduplication_review(
+            event_a="a",
+            event_b="b",
+            event_a_updated_at="2026-08-24T01:00:00Z",
+            event_b_updated_at="2026-08-24T02:00:00Z",
+            prompt_version="deduplication-review-v1",
+        )
+        invalidated = state.get_cached_deduplication_review(
+            event_a="a",
+            event_b="b",
+            event_a_updated_at="2026-08-24T03:00:00Z",
+            event_b_updated_at="2026-08-24T02:00:00Z",
+            prompt_version="deduplication-review-v1",
+        )
+
+        assert cached is not None
+        assert cached["model"] == "gemini-3.6-flash"
+        assert invalidated is None
+
+
+def test_fail_stale_running_pipeline_runs(tmp_path: Path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        state.start_run("old-run", "aggregation")
+        assert state.fail_stale_running_pipeline_runs() == 1
+        row = state.conn.execute(
+            "SELECT status, finished_at, stats_json FROM pipeline_runs WHERE run_id = 'old-run'"
+        ).fetchone()
+        assert row["status"] == "failed"
+        assert row["finished_at"] is not None
+        assert json.loads(row["stats_json"]) == {"recovered_as_stale": True}

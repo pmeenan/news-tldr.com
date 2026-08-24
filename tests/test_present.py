@@ -115,6 +115,42 @@ def test_build_static_site_renders_current_stories_and_keeps_old_detail_pages(tm
     assert (output_dir / "sitemap.xml").exists()
 
 
+def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
+    tmp_path: Path,
+) -> None:
+    story = _story("2026-08-24-polish", updated_at="2026-08-24T00:00:00Z")
+    _, story_dir, active_path = _write_published_fixture(tmp_path, [story])
+    payload = json.loads(active_path.read_text(encoding="utf-8"))
+    payload["stories"][0].update(
+        {"homepage_rank_score": 0.82, "category_rank_score": 0.91}
+    )
+    active_path.write_text(json.dumps(payload), encoding="utf-8")
+    output_dir = tmp_path / "dist"
+
+    build_static_site(
+        output_dir=output_dir,
+        story_dir=story_dir,
+        active_stories_path=active_path,
+        now=datetime(2026, 8, 24, 1, tzinfo=UTC),
+    )
+
+    home = (output_dir / "index.html").read_text(encoding="utf-8")
+    script = (output_dir / "assets" / "site.js").read_text(encoding="utf-8")
+    assert '>World</button>' in home
+    assert '>Business</button>' in home
+    assert '>Tech</button>' in home
+    assert '>Climate</button>' in home
+    assert 'data-view-filter="new"' in home
+    assert 'data-view-filter="all"' in home
+    assert 'data-rank-all="0.8200"' in home
+    assert 'data-rank-category="0.9100"' in home
+    assert "source-tone-" in home
+    assert "shade-" in home
+    assert "VIEW_THRESHOLD_MS = 10 * 1000" in script
+    assert "VIEWED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000" in script
+    assert "IntersectionObserver" in script
+
+
 def test_build_static_site_rejects_path_traversal_story_id(tmp_path: Path) -> None:
     story = _story("valid-story", updated_at="2026-08-24T00:00:00Z")
     _, story_dir, active_path = _write_published_fixture(tmp_path, [story])

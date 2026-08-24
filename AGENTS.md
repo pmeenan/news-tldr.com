@@ -32,6 +32,60 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on August 24, 2026 (Capacity Fallbacks + Concurrent Backlog-First Scheduling)
+
+- **Scope**: Prevented hourly runs from growing an editorial backlog when Gemini 3.7 Flash is capacity-constrained, bounded repeated deduplication work, recovered the live queue, and parallelized collection with bounded backlog processing.
+- **Model fallback policy**:
+  - Editorial and selective full-quality review now try `gemini-3.7-flash` → `gemini-3.6-flash` → `gemini-3.5-flash`. Retryable transport/429/5xx failures open a five-minute per-model circuit so subsequent calls bypass a saturated tier.
+  - Deduplication may additionally fall back to `gemini-3.5-flash-lite`, but Lite cannot authorize a merge and Lite decisions are not cached. Editorial never uses Lite.
+  - Empty responses try the next full-Flash tier. Safety-sensitive editorial input that is empty across all full tiers gets one compact digest/key-fact retry, recorded under `editorial-v2-compact` or `editorial-framing-v1-compact`.
+  - Live recovery provenance: editorial used 115 Gemini 3.6 calls and 60 Gemini 3.5 calls; deduplication review used 26 Gemini 3.6 calls and 7 Gemini 3.5 calls. No editorial Lite calls occurred.
+- **Deduplication controls**:
+  - Schema v9 adds `deduplication_reviews`, keyed by canonical event pair, both event `updated_at` values, and prompt version. Unchanged reviewed pairs are skipped; any event update invalidates its cached pair decisions.
+  - Production dedup reviews are ordered newest-first and bounded to 40 new pairs and one pass per run. The live pass found 173 candidates, admitted 40 for review, deferred 133, and completed in about 90 seconds instead of overrunning the watchdog. It applied 13 merges and recorded 33 versioned review rows; pairs invalidated by an earlier merge in the same round were skipped.
+- **Backlog-first combined run**:
+  - `pipeline.cli run` marks interrupted `pipeline_runs` rows failed, performs maintenance, snapshots the maximum article `rowid`, and starts collection in a dedicated thread while editorial/digest/aggregation backlog processing continues.
+  - Prior digest/aggregation queries are capped at the snapshot rowid, so concurrently inserted articles cannot move the finish line. If backlog remains, collection is still checkpointed but those new rows are deferred downstream; once the snapshot queues reach zero, the normal downstream pass admits them.
+  - SQLite connections now use a 30-second connection/busy timeout so short collection and editorial/usage writes serialize safely under WAL mode.
+- **Live recovery**:
+  - Stopped the verified pre-fix 12:17 process while it was re-reviewing all 167 candidate pairs, then ran the patched pipeline.
+  - Recovered 155 pending editorial events (154 on the first pass); the final safety-sensitive Wired story completed through the compact full-Flash retry. A subsequent full run collected 69/69 feeds, wrote 38 articles, digested 30/30 eligible articles, processed 4/4 aggregation windows, completed 20/20 resulting editorial stories, and published production.
+  - Final state: **590 active stories**, **0 pending editorial**, **0 unfiltered/unassigned articles**, **0 running stage rows**, SQLite `quick_check=ok`, artifact validation clean, and homepage/API HTTP 200. Health is `healthy`.
+- **Concurrent production verification**:
+  - The 13:17 scheduled run exercised the new normal path: collection started immediately after the rowid snapshot, completed without SQLite lock errors, found 39 eligible articles, and downstream digestion/aggregation/editorial/presentation completed normally.
+  - The run and health check both exited 0. Artifact validation found 0 errors across 3,579 articles, 2,068 digests, 1,547 events, 596 stories, and 1,200 static files; homepage/API returned HTTP 200. The live pre-run backlog was empty, while unit tests explicitly verify collection overlaps both editorial and snapshot-bounded upstream backlog work.
+- **Verification**: `PYTHONPATH=. ./.venv/bin/pytest -q` → **275 passed**; `ruff check .`, `compileall`, and `git diff --check` passed. `validate-data --verbose` and `health --verbose` passed all checks.
+- **Files touched for this work**: `.env.example`, `README.md`, `config/pipeline.json`, `pipeline/{llm,digest,aggregate,editorial,cli,state}.py`, `tests/{test_llm,test_state,test_aggregate,test_editorial,test_cli}.py`, `docs/{design,plan}.md`, and this handoff. No dependencies were added. The working tree also retains the earlier uncommitted reader-polish changes.
+- **Not committed.** Runtime SQLite/JSON/static/health data and production files remain outside source control.
+
+### State on August 24, 2026 (Reader Revisit + Ranking Polish)
+
+- **Presentation** (`pipeline/present.py`, `config/categories.json`): compact
+  navigation labels now fit the desktop header; full category names remain on
+  cards and story pages. The homepage has a New/All control beside Latest
+  Briefing. Stories that remain at least 55% visible for 10 seconds are recorded
+  in local storage for three days and hidden on later visits in New mode; no
+  reading state leaves the browser.
+- **Ranking** (`pipeline/editorial.py`): active-story indexes now include
+  freshness-aware `homepage_rank_score` and `category_rank_score`. All is sorted
+  by global-impact rank; category filters re-sort by category-impact rank.
+- **Visual hierarchy**: All uses deterministic muted source tints, category
+  views use their category color, and tint strength incorporates rank and
+  distinct source count. Lead/secondary layout follows the active view's rank.
+- **Validation** (`pipeline/operations.py`): active-index ordering validation
+  recognizes homepage rank while retaining backward compatibility with older
+  indexes.
+- **Production**: published presentation v2 with 471 completed stories and 950
+  managed files. Homepage, active-story API, and a representative story returned
+  HTTP 200 and the homepage contains the new controls/ranking metadata.
+- **Verification**: `PYTHONPATH=. ./.venv/bin/pytest -q` → **264 passed**;
+  `ruff check .`, `compileall`, and `git diff --check` passed.
+- **Operational note**: the pre-existing live pipeline backlog currently has
+  127 active/stale events needing editorial work (101 without story artifacts).
+  The rebuilt index safely excludes missing artifacts; scheduled runs remain
+  responsible for completing that content backlog.
+- **Not committed.** No dependencies were added.
+
 ### State on August 24, 2026 (Milestone 5 Complete + Hourly Production Operations)
 
 - **Scope**: Completed the final Operations & Quality milestone, installed hourly production scheduling, fixed incremental replay churn and a live watchdog edge case, refreshed the dataset, and published a fully healthy 441-story site.

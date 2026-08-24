@@ -7,13 +7,13 @@ import uuid
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
 from pipeline.config import load_pipeline_config, load_source_policy
-from pipeline.llm import GeminiResult, create_gemini_client
+from pipeline.llm import GeminiEmptyResponseError, GeminiResult, create_gemini_client
 from pipeline.lock import PipelineLock
 from pipeline.paths import ACTIVE_STORIES_PATH, LOCK_PATH, PROJECT_ROOT, STORY_DIR
 from pipeline.state import StateDB
@@ -21,6 +21,8 @@ from pipeline.util import atomic_write_json, isoformat_z
 
 EDITORIAL_PROMPT_VERSION = "editorial-v2"
 EDITORIAL_FRAMING_PROMPT_VERSION = "editorial-framing-v1"
+EDITORIAL_COMPACT_PROMPT_VERSION = "editorial-v2-compact"
+EDITORIAL_FRAMING_COMPACT_PROMPT_VERSION = "editorial-framing-v1-compact"
 DEFAULT_ARTICLE_CHAR_LIMIT = 12_000
 DEFAULT_EVENT_CHAR_LIMIT = 60_000
 POLITICAL_CATEGORIES = frozenset({"politics", "us", "world"})
@@ -172,7 +174,12 @@ def generate_editorial_stories(
         "failed": 0,
         "forced": force,
         "model": client.model,
-        "prompt_versions": [EDITORIAL_PROMPT_VERSION, EDITORIAL_FRAMING_PROMPT_VERSION],
+        "prompt_versions": [
+            EDITORIAL_PROMPT_VERSION,
+            EDITORIAL_FRAMING_PROMPT_VERSION,
+            EDITORIAL_COMPACT_PROMPT_VERSION,
+            EDITORIAL_FRAMING_COMPACT_PROMPT_VERSION,
+        ],
         "usage": {"promptTokenCount": 0, "candidatesTokenCount": 0},
     }
     if progress:
@@ -361,25 +368,77 @@ def _load_editorial_event(
 
 def generate_story(event: EditorialEvent, *, client: JsonGenerator) -> dict[str, Any]:
     framing_eligible = _political_framing_eligible(event)
-    result = client.generate_json(
-        system_instruction=(
-            "You are the neutral editorial desk for a concise news product. Synthesize only the "
-            "provided reporting. Preserve uncertainty, attribute disputed claims, and never invent facts."
-        ),
+    selected_event = event
+    compact_retry = False
+    try:
+        result = _request_editorial_story(
+            event,
+            client=client,
+            framing_eligible=framing_eligible,
+        )
+    except GeminiEmptyResponseError:
+        selected_event = _compact_editorial_event(event)
+        compact_retry = True
+        result = _request_editorial_story(
+            selected_event,
+            client=client,
+            framing_eligible=framing_eligible,
+            compact=True,
+        )
+    validated = validate_editorial_response(result.payload, selected_event)
+    if compact_retry:
+        prompt_version = (
+            EDITORIAL_FRAMING_COMPACT_PROMPT_VERSION
+            if framing_eligible
+            else EDITORIAL_COMPACT_PROMPT_VERSION
+        )
+    else:
+        prompt_version = (
+            EDITORIAL_FRAMING_PROMPT_VERSION if framing_eligible else EDITORIAL_PROMPT_VERSION
+        )
+    return {
+        "payload": validated,
+        "model": result.model,
+        "prompt_version": prompt_version,
+        "usage": result.usage,
+    }
+
+
+def _request_editorial_story(
+    event: EditorialEvent,
+    *,
+    client: JsonGenerator,
+    framing_eligible: bool,
+    compact: bool = False,
+) -> GeminiResult:
+    system_instruction = (
+        "You are the neutral editorial desk for a concise news product. Synthesize only the "
+        "provided reporting. Preserve uncertainty, attribute disputed claims, and never invent facts."
+    )
+    if compact:
+        system_instruction += (
+            " Some reporting may discuss abuse or other sensitive events; summarize it clinically "
+            "without adding graphic detail."
+        )
+    return client.generate_json(
+        system_instruction=system_instruction,
         prompt=_build_editorial_prompt(event),
         response_schema=_editorial_response_schema(framing_decision=framing_eligible),
         max_output_tokens=8192,
         thinking_level="low",
     )
-    validated = validate_editorial_response(result.payload, event)
-    return {
-        "payload": validated,
-        "model": result.model,
-        "prompt_version": (
-            EDITORIAL_FRAMING_PROMPT_VERSION if framing_eligible else EDITORIAL_PROMPT_VERSION
-        ),
-        "usage": result.usage,
-    }
+
+
+def _compact_editorial_event(event: EditorialEvent) -> EditorialEvent:
+    articles = []
+    for article in event.articles:
+        compact_parts = [article.digest_summary or ""]
+        compact_parts.extend(article.digest_key_facts)
+        compact_content = "\n".join(part.strip() for part in compact_parts if part.strip())
+        if not compact_content:
+            compact_content = _bounded_text(article.content, 1_500)
+        articles.append(replace(article, content=compact_content))
+    return replace(event, articles=tuple(articles))
 
 
 def _build_editorial_prompt(event: EditorialEvent) -> str:
@@ -712,12 +771,50 @@ def _importance(event: EditorialEvent, payload: dict[str, Any], *, now: datetime
     }
 
 
+def _display_rank_scores(
+    importance: dict[str, Any], *, event_updated_at: str, now: datetime
+) -> dict[str, float]:
+    """Build view-specific ranks from durable editorial signals and current freshness."""
+    base_score = _safe_score(importance.get("score"))
+    components = (
+        importance.get("components") if isinstance(importance.get("components"), dict) else {}
+    )
+    global_score = _safe_score(components.get("stage2_global", base_score))
+    category_score = _safe_score(components.get("stage2_category", base_score))
+    editorial_score = _safe_score(components.get("editorial", base_score))
+    source_quality = _safe_score(components.get("source_quality", base_score))
+    source_count = _safe_score(components.get("source_count", base_score))
+    trust_and_coverage = (source_quality + source_count) / 2
+    age_hours = max(0.0, (now - _parse_datetime(event_updated_at)).total_seconds() / 3600)
+    freshness = max(0.15, 1.0 - (age_hours / 72.0))
+    homepage = (
+        global_score * 0.42
+        + category_score * 0.13
+        + editorial_score * 0.15
+        + trust_and_coverage * 0.10
+        + freshness * 0.20
+    )
+    category = (
+        global_score * 0.12
+        + category_score * 0.48
+        + editorial_score * 0.10
+        + trust_and_coverage * 0.10
+        + freshness * 0.20
+    )
+    return {
+        "homepage": round(max(0.0, min(1.0, homepage)), 4),
+        "category": round(max(0.0, min(1.0, category)), 4),
+        "freshness": round(freshness, 4),
+    }
+
+
 def write_active_stories_index(
     *,
     state: StateDB,
     story_dir: Path = STORY_DIR,
     output_path: Path = ACTIVE_STORIES_PATH,
 ) -> dict[str, Any]:
+    generated_at = datetime.now(UTC)
     rows = state.conn.execute(
         """
         SELECT event_id, status, created_at AS event_created_at, updated_at AS event_updated_at
@@ -740,12 +837,20 @@ def write_active_stories_index(
             if isinstance(source, dict) and source.get("source_name")
         }
         importance = story.get("importance") if isinstance(story.get("importance"), dict) else {}
+        display_rank = _display_rank_scores(
+            importance,
+            event_updated_at=row["event_updated_at"],
+            now=generated_at,
+        )
         stories.append(
             {
                 "story_id": story.get("story_id") or row["event_id"],
                 "category": story.get("category"),
                 "headline": story.get("headline"),
                 "importance_score": _safe_score(importance.get("score")),
+                "homepage_rank_score": display_rank["homepage"],
+                "category_rank_score": display_rank["category"],
+                "freshness_score": display_rank["freshness"],
                 "source_count": len(distinct_source_names),
                 "status": row["status"],
                 "event_created_at": row["event_created_at"],
@@ -754,9 +859,16 @@ def write_active_stories_index(
                 "updated_at": story.get("updated_at"),
             }
         )
-    stories.sort(key=lambda item: str(item["updated_at"] or ""), reverse=True)
-    stories.sort(key=lambda item: item["importance_score"], reverse=True)
-    atomic_write_json(output_path, {"generated_at": isoformat_z(), "stories": stories})
+    stories.sort(key=lambda item: str(item["event_updated_at"] or ""), reverse=True)
+    stories.sort(key=lambda item: item["homepage_rank_score"], reverse=True)
+    atomic_write_json(
+        output_path,
+        {
+            "generated_at": isoformat_z(generated_at),
+            "ranking_version": "display-ranking-v1",
+            "stories": stories,
+        },
+    )
     return {"active_index_stories": len(stories), "active_index_missing": missing}
 
 

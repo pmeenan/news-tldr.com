@@ -6,6 +6,7 @@ import json
 import shutil
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from pipeline.aggregate import (
 )
 from pipeline.collect import collect_once
 from pipeline.config import load_feeds, load_pipeline_config
-from pipeline.digest import digest_once
+from pipeline.digest import ARTICLE_DIGEST_PROMPT_VERSION, digest_once
 from pipeline.editorial import editorial_once
 from pipeline.lock import PipelineLock
 from pipeline.maintenance import maintenance_once
@@ -31,6 +32,7 @@ from pipeline.operations import (
 from pipeline.paths import ARTICLE_DIR, DATA_DIR, DB_PATH, FETCH_LOG_DIR, LOCK_PATH
 from pipeline.present import presentation_once
 from pipeline.state import StateDB, migrate
+from pipeline.util import isoformat_z
 
 
 def _assert_data_path(path: Path, data_dir: Path) -> None:
@@ -101,6 +103,74 @@ def _stderr_progress(message: str) -> None:
     print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
 
 
+def _pending_editorial_count() -> int:
+    with StateDB() as state:
+        row = state.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM events
+            WHERE status IN ('active', 'stale')
+              AND (last_editorial_at IS NULL OR updated_at > last_editorial_at)
+            """
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+
+def _recover_stale_pipeline_runs() -> int:
+    with StateDB() as state:
+        return state.fail_stale_running_pipeline_runs()
+
+
+def _pending_upstream_counts(*, max_article_rowid: int | None = None) -> dict[str, int]:
+    config = load_pipeline_config()
+    today_start = datetime.combine(datetime.now(UTC).date(), datetime.min.time(), tzinfo=UTC)
+    lookback_days = max(1, int(config.retention.get("staging_article_days", 1)))
+    range_start = isoformat_z(today_start - timedelta(days=lookback_days))
+    rowid_clause = " AND rowid <= ?" if max_article_rowid is not None else ""
+    with StateDB() as state:
+        digest_params: list[object] = [range_start, ARTICLE_DIGEST_PROMPT_VERSION]
+        aggregation_params: list[object] = [range_start]
+        if max_article_rowid is not None:
+            digest_params.append(max_article_rowid)
+            aggregation_params.append(max_article_rowid)
+        digest = state.conn.execute(
+            f"""
+            SELECT COUNT(*) FROM articles
+            WHERE published_at >= ?
+              AND is_filtered = 0
+              AND (
+                digest_status NOT IN ('completed', 'skipped')
+                OR digest_prompt_version IS NULL
+                OR digest_prompt_version != ?
+              )
+              {rowid_clause}
+            """,
+            digest_params,
+        ).fetchone()[0]
+        aggregation = state.conn.execute(
+            f"""
+            SELECT COUNT(*) FROM articles
+            WHERE published_at >= ?
+              AND is_filtered = 0
+              AND event_id IS NULL
+              AND digest_status = 'completed'
+              {rowid_clause}
+            """,
+            aggregation_params,
+        ).fetchone()[0]
+    return {"digest": int(digest), "aggregation": int(aggregation)}
+
+
+def _max_article_rowid() -> int:
+    with StateDB() as state:
+        row = state.conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM articles").fetchone()
+        return int(row[0]) if row else 0
+
+
+def _run_collection(progress) -> dict[str, int]:
+    return asyncio.run(collect_once(progress=progress, acquire_lock=False))
+
+
 def run_completed_pipeline(
     *,
     force: bool = False,
@@ -126,11 +196,120 @@ def run_completed_pipeline(
         if progress:
             progress("run: starting maintenance")
         migrate()
+        recovered_runs = _recover_stale_pipeline_runs()
+        if recovered_runs and progress:
+            progress(f"run: marked {recovered_runs} interrupted stage run(s) as failed")
         maintenance_stats = maintenance_once(progress=progress, acquire_lock=False)
 
-        if progress:
-            progress("run: starting collect")
-        collect_stats = asyncio.run(collect_once(progress=progress, acquire_lock=False))
+        backlog_article_rowid = _max_article_rowid()
+        initial_backlog = _pending_editorial_count()
+        upstream_backlog = _pending_upstream_counts(
+            max_article_rowid=backlog_article_rowid
+        )
+        prior_work_stages: dict[str, object] = {}
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="collection") as executor:
+            if progress:
+                progress("run: starting collection alongside backlog processing")
+            collection_future = executor.submit(_run_collection, progress)
+
+            if initial_backlog:
+                if progress:
+                    progress(
+                        f"run: draining {initial_backlog} pending editorial event(s) "
+                        "while collection runs"
+                    )
+                backlog_editorial_stats = editorial_once(
+                    force=False,
+                    progress=progress,
+                    acquire_lock=False,
+                )
+                remaining_backlog = _pending_editorial_count()
+                if progress:
+                    progress("run: publishing editorial backlog progress")
+                backlog_presentation_stats = presentation_once(
+                    publish=publish,
+                    progress=progress,
+                    acquire_lock=False,
+                )
+                if remaining_backlog:
+                    collect_stats = collection_future.result()
+                    if progress:
+                        progress(
+                            f"run: {remaining_backlog} editorial event(s) remain; "
+                            "collection completed but downstream work is deferred"
+                        )
+                    return {
+                        "force": force,
+                        "backlog_blocked": True,
+                        "pending_editorial": remaining_backlog,
+                        "stages": {
+                            "maintenance": maintenance_stats,
+                            "collect": collect_stats,
+                            "backlog_editorial": backlog_editorial_stats,
+                            "backlog_presentation": backlog_presentation_stats,
+                        },
+                    }
+
+            if upstream_backlog["digest"] or upstream_backlog["aggregation"]:
+                if progress:
+                    progress(
+                        "run: draining snapshotted upstream work while collection runs "
+                        f"(digest={upstream_backlog['digest']}, "
+                        f"aggregation={upstream_backlog['aggregation']}, "
+                        f"max_rowid={backlog_article_rowid})"
+                    )
+                prior_work_stages["prior_digest"] = digest_once(
+                    force=False,
+                    progress=progress,
+                    acquire_lock=False,
+                    max_article_rowid=backlog_article_rowid,
+                )
+                prior_work_stages["prior_aggregate"] = aggregate_once(
+                    force=False,
+                    progress=progress,
+                    acquire_lock=False,
+                    max_article_rowid=backlog_article_rowid,
+                )
+                prior_work_stages["prior_editorial"] = editorial_once(
+                    force=False,
+                    progress=progress,
+                    acquire_lock=False,
+                )
+                prior_work_stages["prior_presentation"] = presentation_once(
+                    publish=publish,
+                    progress=progress,
+                    acquire_lock=False,
+                )
+                remaining_upstream = _pending_upstream_counts(
+                    max_article_rowid=backlog_article_rowid
+                )
+                remaining_editorial = _pending_editorial_count()
+                if any(remaining_upstream.values()) or remaining_editorial:
+                    collect_stats = collection_future.result()
+                    if progress:
+                        progress(
+                            "run: snapshotted prior work remains; collection completed but "
+                            "downstream work is deferred "
+                            f"(digest={remaining_upstream['digest']}, "
+                            f"aggregation={remaining_upstream['aggregation']}, "
+                            f"editorial={remaining_editorial})"
+                        )
+                    return {
+                        "force": force,
+                        "backlog_blocked": True,
+                        "pending_digest": remaining_upstream["digest"],
+                        "pending_aggregation": remaining_upstream["aggregation"],
+                        "pending_editorial": remaining_editorial,
+                        "stages": {
+                            "maintenance": maintenance_stats,
+                            "collect": collect_stats,
+                            **prior_work_stages,
+                        },
+                    }
+
+            collect_stats = collection_future.result()
+            if progress:
+                progress("run: collection complete; starting downstream work")
 
         if progress:
             progress("run: starting digest")
@@ -156,17 +335,19 @@ def run_completed_pipeline(
             acquire_lock=False,
         )
 
-    return {
-        "force": force,
-        "stages": {
-            "maintenance": maintenance_stats,
-            "collect": collect_stats,
-            "digest": digest_stats,
-            "aggregate": aggregate_stats,
-            "editorial": editorial_stats,
-            "presentation": presentation_stats,
-        },
+    stages = {
+        "maintenance": maintenance_stats,
+        "collect": collect_stats,
+        "digest": digest_stats,
+        "aggregate": aggregate_stats,
+        "editorial": editorial_stats,
+        "presentation": presentation_stats,
     }
+    if initial_backlog:
+        stages["backlog_editorial"] = backlog_editorial_stats
+        stages["backlog_presentation"] = backlog_presentation_stats
+    stages.update(prior_work_stages)
+    return {"force": force, "stages": stages}
 
 
 def main() -> None:
@@ -338,6 +519,8 @@ def main() -> None:
         )
         print(json.dumps(stats, indent=2, sort_keys=True))
         if args.dry_run and not stats["preflight"]["validation"]["valid"]:
+            raise SystemExit(1)
+        if stats.get("backlog_blocked"):
             raise SystemExit(1)
     elif args.command == "collect":
         progress = _stderr_progress if args.verbose else None

@@ -774,6 +774,43 @@ def test_digest_articles_for_aggregation_persists_digest_and_usage(tmp_path) -> 
     assert dict(usage) == {"stage": "article_digest", "input_tokens": 100, "output_tokens": 30}
 
 
+def test_digest_articles_respect_snapshot_rowid(tmp_path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    state = StateDB(db_path)
+    for article_id in ("before", "after"):
+        article_path = tmp_path / f"{article_id}.json"
+        article = _article(
+            article_id,
+            summary="Useful summary with enough context.",
+            content="Important body text with facts and context. " * 80,
+        )
+        article_path.write_text(json.dumps(article), encoding="utf-8")
+        state.insert_article(article, article_path)
+        if article_id == "before":
+            snapshot_rowid = state.conn.execute(
+                "SELECT rowid FROM articles WHERE article_id = 'before'"
+            ).fetchone()[0]
+
+    stats = digest_articles_for_aggregation(
+        state=state,
+        run_id="snapshot-digest",
+        concurrency=1,
+        client=FakeJsonGenerator(),
+        max_article_rowid=snapshot_rowid,
+    )
+    rows = state.conn.execute(
+        "SELECT article_id, digest_status FROM articles ORDER BY article_id"
+    ).fetchall()
+    state.close()
+
+    assert stats["completed"] == 1
+    assert {row["article_id"]: row["digest_status"] for row in rows} == {
+        "after": "pending",
+        "before": "completed",
+    }
+
+
 def test_digest_articles_for_aggregation_skips_existing_digest(tmp_path) -> None:
     db_path = tmp_path / "pipeline.db"
     migrate(db_path)

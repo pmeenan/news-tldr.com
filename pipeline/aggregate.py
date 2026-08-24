@@ -35,6 +35,8 @@ DEDUPLICATION_PRESCREEN_ANCHOR_EVENTS = 6
 DEDUPLICATION_MAX_PASSES = 3
 DEFAULT_AGGREGATION_CATEGORY_BATCH_CONCURRENCY = 8
 DEFAULT_DEDUPLICATION_CONCURRENCY = 16
+DEFAULT_DEDUPLICATION_MAX_PAIRS_PER_RUN = 40
+DEFAULT_DEDUPLICATION_MAX_PASSES_PER_RUN = 1
 FORCE_RESET_AGGREGATION_STATUSES = (
     "assigned",
     "filtered_low_impact",
@@ -266,6 +268,7 @@ class DeduplicationPairDecision:
     confidence: float
     rationale: str
     usage: dict[str, Any]
+    model: str
 
 
 def load_unprocessed_articles(
@@ -338,21 +341,27 @@ def load_window_articles(
     min_category_impact: float | None = None,
     mark_filtered: bool = True,
     db: StateDB | None = None,
+    max_article_rowid: int | None = None,
 ) -> list[ArticleForAggregation]:
     _validate_iso_timestamp(window_start)
     _validate_iso_timestamp(window_end)
     close_db = db is None
     state = db or StateDB()
     try:
+        rowid_clause = " AND rowid <= ?" if max_article_rowid is not None else ""
+        params: list[Any] = [window_start, window_end]
+        if max_article_rowid is not None:
+            params.append(max_article_rowid)
         rows = state.conn.execute(
-            """
+            f"""
             SELECT article_id, source_id, source_name, headline, summary, published_at, article_path, event_id
             FROM articles
             WHERE published_at >= ? AND published_at < ?
               AND is_filtered = 0
+              {rowid_clause}
             ORDER BY published_at DESC, fetched_at DESC
             """,
-            (window_start, window_end),
+            params,
         ).fetchall()
         articles = [
             ArticleForAggregation(
@@ -442,16 +451,22 @@ def _completed_digest_article_time_bounds(
     state: StateDB,
     *,
     published_at_or_after: str,
+    max_article_rowid: int | None = None,
 ) -> tuple[str, str] | None:
+    rowid_clause = " AND rowid <= ?" if max_article_rowid is not None else ""
+    params: list[Any] = [published_at_or_after]
+    if max_article_rowid is not None:
+        params.append(max_article_rowid)
     row = state.conn.execute(
-        """
+        f"""
         SELECT MIN(published_at) AS min_published_at, MAX(published_at) AS max_published_at
         FROM articles
         WHERE published_at IS NOT NULL
           AND published_at >= ?
           AND digest_status = 'completed'
+          {rowid_clause}
         """,
-        (published_at_or_after,),
+        params,
     ).fetchone()
     if not row or not row["min_published_at"] or not row["max_published_at"]:
         return None
@@ -643,6 +658,7 @@ def plan_sliding_windows(
     rerun_latest_completed: bool = True,
     force: bool = False,
     sparse: bool = False,
+    max_article_rowid: int | None = None,
 ) -> list[AggregationWindow]:
     if window_hours <= 0:
         raise ValueError("window_hours must be positive")
@@ -665,7 +681,11 @@ def plan_sliding_windows(
         if sparse and not force:
             sparse_window_starts = {
                 _format_iso_timestamp(_floor_utc_interval(_parse_iso_timestamp(published_at), step_hours))
-                for published_at in state.unassigned_article_published_times(range_start, range_end)
+                for published_at in state.unassigned_article_published_times(
+                    range_start,
+                    range_end,
+                    max_article_rowid=max_article_rowid,
+                )
             }
             sparse_window_starts = {
                 window_start
@@ -685,7 +705,14 @@ def plan_sliding_windows(
                 return False
             if latest_completed is not None and (window.window_start, window.window_end) == latest_completed:
                 return False
-            return state.unassigned_article_count_in_window(window.window_start, window.window_end) == 0
+            return (
+                state.unassigned_article_count_in_window(
+                    window.window_start,
+                    window.window_end,
+                    max_article_rowid=max_article_rowid,
+                )
+                == 0
+            )
 
         windows: list[AggregationWindow] = []
         current = start_dt
@@ -873,6 +900,7 @@ def aggregate_once(
     progress: Callable[[str], None] | None = None,
     force: bool = False,
     acquire_lock: bool = True,
+    max_article_rowid: int | None = None,
 ) -> dict[str, Any]:
     if (range_start is None) != (range_end is None):
         raise ValueError("range_start and range_end must be provided together or both omitted")
@@ -889,6 +917,14 @@ def aggregate_once(
         config.aggregation.get("deduplication_concurrency"),
         DEFAULT_DEDUPLICATION_CONCURRENCY,
     )
+    deduplication_max_pairs = _positive_int_config(
+        config.aggregation.get("deduplication_max_pairs_per_run"),
+        DEFAULT_DEDUPLICATION_MAX_PAIRS_PER_RUN,
+    )
+    deduplication_max_passes = _positive_int_config(
+        config.aggregation.get("deduplication_max_passes_per_run"),
+        DEFAULT_DEDUPLICATION_MAX_PASSES_PER_RUN,
+    )
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"aggregation-{uuid.uuid4().hex}"
     state = StateDB()
@@ -896,7 +932,9 @@ def aggregate_once(
     generator = client or (None if dry_run else create_gemini_client("bulk"))
     owns_review_generator = review_client is None and client is None and not dry_run
     review_generator = review_client or (
-        generator if client is not None or dry_run else create_gemini_client("review")
+        generator
+        if client is not None or dry_run
+        else create_gemini_client("review", include_lite=True)
     )
     stats: dict[str, Any] = {
         "windows_planned": 0,
@@ -916,6 +954,8 @@ def aggregate_once(
         "window_step_hours": step_hours,
         "category_batch_concurrency": category_batch_concurrency,
         "deduplication_concurrency": deduplication_concurrency,
+        "deduplication_max_pairs_per_run": deduplication_max_pairs,
+        "deduplication_max_passes_per_run": deduplication_max_passes,
         "dry_run": dry_run,
         "force": force,
         "force_articles_reset": 0,
@@ -923,6 +963,7 @@ def aggregate_once(
         "force_events_trimmed": 0,
         "bulk_model": getattr(generator, "model", None),
         "review_model": getattr(review_generator, "model", None),
+        "max_article_rowid": max_article_rowid,
     }
     try:
         lock_context = PipelineLock(LOCK_PATH, lock_timeout, run_id=run_id) if acquire_lock else nullcontext()
@@ -951,13 +992,17 @@ def aggregate_once(
                         bounds = _completed_digest_article_time_bounds(
                             state,
                             published_at_or_after=_format_iso_timestamp(limit_dt),
+                            max_article_rowid=max_article_rowid,
                         )
                         if not bounds:
                             if progress:
                                 progress("aggregate: no completed digest articles in the retention window")
                             return stats
                     else:
-                        bounds = state.article_time_bounds(unassigned_only=True)
+                        bounds = state.article_time_bounds(
+                            unassigned_only=True,
+                            max_article_rowid=max_article_rowid,
+                        )
                         if not bounds:
                             return stats
 
@@ -986,6 +1031,7 @@ def aggregate_once(
                     db=state,
                     force=force,
                     sparse=not force,
+                    max_article_rowid=max_article_rowid,
                 )
                 if limit_windows is not None:
                     windows = windows[:limit_windows]
@@ -1030,6 +1076,7 @@ def aggregate_once(
                             min_category_impact=min_category_impact,
                             mark_filtered=not dry_run,
                             db=state,
+                            max_article_rowid=max_article_rowid,
                         )
                         if not articles:
                             if not dry_run:
@@ -1295,6 +1342,8 @@ def aggregate_once(
                             progress=progress,
                             run_id=run_id,
                             concurrency=deduplication_concurrency,
+                            max_pairs=deduplication_max_pairs,
+                            max_passes=deduplication_max_passes,
                         )
                     except Exception as exc:
                         if progress:
@@ -2975,6 +3024,7 @@ def _evaluate_deduplication_pair(
         confidence=confidence,
         rationale=str(rationale),
         usage=result.usage,
+        model=result.model,
     )
 
 
@@ -3092,7 +3142,7 @@ def _evaluate_and_apply_deduplication_candidates(
                     state.record_llm_usage(
                         run_id=run_id,
                         stage=usage_stage,
-                        model=client.model,
+                        model=decision.model,
                         prompt_version=prompt_version,
                         input_tokens=decision.usage.get("promptTokenCount"),
                         output_tokens=decision.usage.get("candidatesTokenCount"),
@@ -3100,7 +3150,24 @@ def _evaluate_and_apply_deduplication_candidates(
                 except Exception:
                     pass
 
-            if decision.should_merge and decision.confidence >= DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD:
+            lite_decision = decision.model.endswith("-lite")
+            if not lite_decision:
+                state.record_deduplication_review(
+                    event_a=e1["event_id"],
+                    event_b=e2["event_id"],
+                    event_a_updated_at=e1["updated_at"],
+                    event_b_updated_at=e2["updated_at"],
+                    should_merge=decision.should_merge,
+                    confidence=decision.confidence,
+                    rationale=decision.rationale,
+                    model=decision.model,
+                    prompt_version=prompt_version,
+                )
+            if (
+                decision.should_merge
+                and decision.confidence >= DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD
+                and not lite_decision
+            ):
                 if not state.event_exists(e1["event_id"]) or not state.event_exists(e2["event_id"]):
                     continue
 
@@ -3129,8 +3196,13 @@ def _evaluate_and_apply_deduplication_candidates(
                 event_articles_by_id.pop(loser_id, None)
                 merges_count += 1
             elif decision.should_merge and progress:
+                reason = (
+                    "deferred Flash-Lite merge for full-Flash review"
+                    if lite_decision
+                    else "skipped low-confidence merge"
+                )
                 progress(
-                    f"deduplicate: skipped low-confidence merge for {e1['event_id']} and {e2['event_id']} "
+                    f"deduplicate: {reason} for {e1['event_id']} and {e2['event_id']} "
                     f"(confidence: {decision.confidence:.2f})"
                 )
 
@@ -3510,8 +3582,10 @@ def deduplicate_active_events_llm(
     progress: Callable[[str], None] | None = None,
     run_id: str | None = None,
     concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
+    max_pairs: int | None = None,
+    max_passes: int = DEDUPLICATION_MAX_PASSES,
 ) -> None:
-    for pass_index in range(1, DEDUPLICATION_MAX_PASSES + 1):
+    for pass_index in range(1, max(1, max_passes) + 1):
         merges_count = _deduplicate_active_events_llm_pass(
             state=state,
             client=client,
@@ -3520,10 +3594,11 @@ def deduplicate_active_events_llm(
             progress=progress,
             run_id=run_id,
             concurrency=concurrency,
+            max_pairs=max_pairs,
         )
         if merges_count == 0:
             break
-        if progress and pass_index < DEDUPLICATION_MAX_PASSES:
+        if progress and pass_index < max(1, max_passes):
             progress(
                 f"deduplicate: pass {pass_index} merged {merges_count} event(s); "
                 "checking for newly exposed duplicates"
@@ -3539,6 +3614,7 @@ def _deduplicate_active_events_llm_pass(
     progress: Callable[[str], None] | None = None,
     run_id: str | None = None,
     concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
+    max_pairs: int | None = None,
 ) -> int:
     since = _recent_event_cutoff()
 
@@ -3682,7 +3758,23 @@ def _deduplicate_active_events_llm_pass(
         )
 
     candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for pair in sorted(candidate_pairs, key=lambda pair: tuple(sorted(pair))):
+    cached_count = 0
+    ordered_pairs = sorted(
+        candidate_pairs,
+        key=lambda pair: (
+            max(events_by_id[event_id]["updated_at"] for event_id in pair),
+            tuple(sorted(pair)),
+        ),
+        reverse=True,
+    )
+    adjudicator = review_client or client
+    is_second_pass_review = adjudicator is not client or adjudicator.model != client.model
+    prompt_version = (
+        DEDUPLICATION_REVIEW_PROMPT_VERSION
+        if is_second_pass_review
+        else "deduplication-v1"
+    )
+    for pair in ordered_pairs:
         ids = sorted(pair)
         if len(ids) != 2:
             continue
@@ -3690,10 +3782,29 @@ def _deduplicate_active_events_llm_pass(
         e2 = events_by_id.get(ids[1])
         if e1 is None or e2 is None:
             continue
+        if state.get_cached_deduplication_review(
+            event_a=e1["event_id"],
+            event_b=e2["event_id"],
+            event_a_updated_at=e1["updated_at"],
+            event_b_updated_at=e2["updated_at"],
+            prompt_version=prompt_version,
+        ):
+            cached_count += 1
+            continue
         candidates.append((e1, e2))
 
-    adjudicator = review_client or client
-    is_second_pass_review = adjudicator is not client or adjudicator.model != client.model
+    deferred_count = 0
+    if max_pairs is not None and len(candidates) > max_pairs:
+        deferred_count = len(candidates) - max_pairs
+        candidates = candidates[:max_pairs]
+    if progress and (cached_count or deferred_count):
+        progress(
+            f"deduplicate: review work new={len(candidates)}, cached={cached_count}, "
+            f"deferred={deferred_count}"
+        )
+    if not candidates:
+        return 0
+
     merges_count = _evaluate_and_apply_deduplication_candidates(
         candidates=candidates,
         state=state,
@@ -3703,11 +3814,7 @@ def _deduplicate_active_events_llm_pass(
         run_id=run_id,
         concurrency=concurrency,
         usage_stage="deduplication_review" if is_second_pass_review else "deduplication",
-        prompt_version=(
-            DEDUPLICATION_REVIEW_PROMPT_VERSION
-            if is_second_pass_review
-            else "deduplication-v1"
-        ),
+        prompt_version=prompt_version,
     )
 
     if progress and merges_count > 0:

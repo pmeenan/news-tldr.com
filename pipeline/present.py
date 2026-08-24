@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import os
@@ -27,7 +28,7 @@ from pipeline.paths import (
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v1"
+PRESENTATION_VERSION = "presentation-v2"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
@@ -44,15 +45,25 @@ SITE_CSS = """
   --accent-dark: #873026;
   --card: #fffdf8;
   --world: #285f72;
+  --world-rgb: 40, 95, 114;
   --us: #835c26;
+  --us-rgb: 131, 92, 38;
   --politics: #8a3d3d;
+  --politics-rgb: 138, 61, 61;
   --business: #51662d;
+  --business-rgb: 81, 102, 45;
   --technology: #564d91;
+  --technology-rgb: 86, 77, 145;
   --science: #326b62;
+  --science-rgb: 50, 107, 98;
   --health: #9a4f6f;
+  --health-rgb: 154, 79, 111;
   --environment: #477249;
+  --environment-rgb: 71, 114, 73;
   --automotive: #66584a;
+  --automotive-rgb: 102, 88, 74;
   --entertainment: #8b536f;
+  --entertainment-rgb: 139, 83, 111;
   color-scheme: light;
   font-family: Georgia, "Times New Roman", serif;
   background: var(--paper);
@@ -67,19 +78,59 @@ a { color: inherit; }
 .brand { text-decoration: none; font-size: clamp(2rem, 6vw, 4.4rem); line-height: .9; letter-spacing: -.065em; font-weight: 800; }
 .brand span { color: var(--accent); }
 .tagline { max-width: 30rem; margin: 0; color: var(--muted); font: 600 .78rem/1.4 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .1em; text-align: right; }
-.category-nav { max-width: 1180px; margin: 0 auto; padding: .65rem 1.25rem; display: flex; gap: .45rem; overflow-x: auto; scrollbar-width: thin; }
-.category-nav button, .category-nav a { border: 1px solid var(--line); border-radius: 999px; background: transparent; padding: .45rem .75rem; white-space: nowrap; color: var(--muted); text-decoration: none; font: 700 .72rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .06em; cursor: pointer; }
+.category-nav { max-width: 1180px; margin: 0 auto; padding: .65rem 1.25rem; display: flex; justify-content: center; gap: .35rem; overflow: visible; }
+.category-nav button, .category-nav a { border: 1px solid var(--line); border-radius: 999px; background: transparent; padding: .43rem .62rem; white-space: nowrap; color: var(--muted); text-decoration: none; font: 700 .69rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .035em; cursor: pointer; }
 .category-nav button:hover, .category-nav button[aria-pressed="true"], .category-nav a:hover { color: white; border-color: var(--ink); background: var(--ink); }
 main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
-.edition { display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; padding-bottom: .75rem; border-bottom: 3px double var(--ink); }
+.edition { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding-bottom: .75rem; border-bottom: 3px double var(--ink); }
+.edition-heading { display: flex; align-items: center; gap: .8rem; min-width: 0; }
 .edition h1 { margin: 0; font-size: 1rem; text-transform: uppercase; letter-spacing: .13em; }
 .edition p { margin: 0; color: var(--muted); font: .78rem/1.4 system-ui, sans-serif; }
+.view-switch { display: inline-flex; padding: .16rem; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.32); }
+.view-switch button { border: 0; border-radius: 999px; padding: .32rem .62rem; background: transparent; color: var(--muted); font: 750 .67rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .055em; cursor: pointer; }
+.view-switch button:hover { color: var(--ink); }
+.view-switch button[aria-pressed="true"] { color: white; background: var(--ink); }
 .story-grid { display: grid; grid-template-columns: repeat(12, 1fr); }
-.story-card { grid-column: span 4; padding: 1.5rem; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); background: rgba(255,253,248,.36); }
+.story-card { --card-tint: 100, 112, 106; --shade: .055; grid-column: span 4; padding: 1.5rem; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); background: linear-gradient(rgba(var(--card-tint), var(--shade)), rgba(var(--card-tint), var(--shade))), var(--card); transition: opacity .18s ease, background-color .18s ease; }
 .story-card:nth-child(3n) { border-right: 0; }
-.story-card.lead { grid-column: span 8; background: var(--card); }
-.story-card.secondary { grid-column: span 4; background: var(--paper-deep); }
+.story-card.lead { grid-column: span 8; --shade: .14; }
+.story-card.secondary { grid-column: span 4; --shade: .105; }
 .story-card[hidden] { display: none; }
+.source-tone-0 { --card-tint: 48, 94, 112; }
+.source-tone-1 { --card-tint: 127, 72, 62; }
+.source-tone-2 { --card-tint: 82, 105, 57; }
+.source-tone-3 { --card-tint: 91, 78, 132; }
+.source-tone-4 { --card-tint: 50, 111, 98; }
+.source-tone-5 { --card-tint: 143, 88, 64; }
+.source-tone-6 { --card-tint: 133, 76, 105; }
+.source-tone-7 { --card-tint: 92, 92, 86; }
+.shade-1 { --shade: .04; }
+.shade-2 { --shade: .065; }
+.shade-3 { --shade: .09; }
+.shade-4 { --shade: .12; }
+.shade-5 { --shade: .15; }
+.story-card.lead.shade-1, .story-card.lead.shade-2 { --shade: .11; }
+.story-card.secondary.shade-1 { --shade: .08; }
+.story-grid[data-active-category="world"] .story-card { --card-tint: var(--world-rgb); }
+.story-grid[data-active-category="us"] .story-card { --card-tint: var(--us-rgb); }
+.story-grid[data-active-category="politics"] .story-card { --card-tint: var(--politics-rgb); }
+.story-grid[data-active-category="business"] .story-card { --card-tint: var(--business-rgb); }
+.story-grid[data-active-category="technology"] .story-card { --card-tint: var(--technology-rgb); }
+.story-grid[data-active-category="science"] .story-card { --card-tint: var(--science-rgb); }
+.story-grid[data-active-category="health"] .story-card { --card-tint: var(--health-rgb); }
+.story-grid[data-active-category="environment"] .story-card { --card-tint: var(--environment-rgb); }
+.story-grid[data-active-category="automotive"] .story-card { --card-tint: var(--automotive-rgb); }
+.story-grid[data-active-category="entertainment"] .story-card { --card-tint: var(--entertainment-rgb); }
+.category-world .kicker { color: var(--world); }
+.category-us .kicker { color: var(--us); }
+.category-politics .kicker { color: var(--politics); }
+.category-business .kicker { color: var(--business); }
+.category-technology .kicker { color: var(--technology); }
+.category-science .kicker { color: var(--science); }
+.category-health .kicker { color: var(--health); }
+.category-environment .kicker { color: var(--environment); }
+.category-automotive .kicker { color: var(--automotive); }
+.category-entertainment .kicker { color: var(--entertainment); }
 .kicker { margin: 0 0 .6rem; color: var(--accent-dark); font: 800 .7rem/1.2 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .11em; }
 .story-card h2 { margin: 0 0 .7rem; font-size: clamp(1.25rem, 2.4vw, 1.85rem); line-height: 1.08; letter-spacing: -.025em; }
 .story-card.lead h2 { font-size: clamp(2rem, 4.3vw, 3.6rem); }
@@ -90,7 +141,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 .tldr-list li { margin: .35rem 0; line-height: 1.4; }
 .story-meta { display: flex; gap: .65rem; flex-wrap: wrap; color: var(--muted); font: 650 .72rem/1.3 system-ui, sans-serif; }
 .story-meta span + span::before { content: "•"; margin-right: .65rem; }
-.empty-state { padding: 4rem 1rem; text-align: center; color: var(--muted); }
+.empty-state { grid-column: 1 / -1; padding: 4rem 1rem; text-align: center; color: var(--muted); }
 .story-page { max-width: 880px; }
 .story-page .back { display: inline-block; margin-bottom: 1.5rem; color: var(--muted); font: 700 .8rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .08em; }
 .story-page h1 { margin: .3rem 0 1rem; font-size: clamp(2.35rem, 7vw, 5.2rem); line-height: .98; letter-spacing: -.045em; }
@@ -123,13 +174,15 @@ main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
   .tagline { margin-top: .8rem; text-align: left; }
   .story-card, .story-card.lead, .story-card.secondary { grid-column: span 12; border-right: 0; }
   .framing-grid { grid-template-columns: 1fr; }
+  .category-nav { justify-content: flex-start; overflow-x: auto; scrollbar-width: thin; }
 }
 @media (max-width: 520px) {
   main { padding-inline: .85rem; }
   .masthead, .category-nav { padding-inline: .85rem; }
   .story-card { padding: 1.25rem .4rem; }
-  .edition { display: block; }
-  .edition p { margin-top: .35rem; }
+  .edition { align-items: flex-start; }
+  .edition-heading { align-items: flex-start; flex-direction: column; gap: .55rem; }
+  .edition > p { max-width: 9.5rem; text-align: right; }
   .archive-list li { grid-template-columns: 1fr; gap: .2rem; }
   .site-footer div { display: block; }
 }
@@ -137,33 +190,143 @@ main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 
 
 SITE_JS = """
-const buttons = Array.from(document.querySelectorAll('[data-category-filter]'));
+const VIEWED_KEY = 'newsTldrViewedStoriesV1';
+const VIEW_MODE_KEY = 'newsTldrViewModeV1';
+const VIEWED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
+const VIEW_THRESHOLD_MS = 10 * 1000;
+const categoryButtons = Array.from(document.querySelectorAll('[data-category-filter]'));
+const viewButtons = Array.from(document.querySelectorAll('[data-view-filter]'));
 const cards = Array.from(document.querySelectorAll('[data-story-category]'));
 const count = document.querySelector('[data-visible-count]');
+const countLabel = document.querySelector('[data-count-label]');
+const grid = document.querySelector('[data-story-grid]');
+const emptyState = document.querySelector('[data-empty-state]');
+const timers = new Map();
 
-function applyFilter(category) {
-  let visible = 0;
-  for (const card of cards) {
-    const show = category === 'all' || card.dataset.storyCategory === category;
+function loadViewed() {
+  const now = Date.now();
+  let viewed = {};
+  try {
+    const parsed = JSON.parse(localStorage.getItem(VIEWED_KEY) || '{}');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) viewed = parsed;
+  } catch (_) {
+    viewed = {};
+  }
+  for (const [storyId, timestamp] of Object.entries(viewed)) {
+    if (!Number.isFinite(timestamp) || now - timestamp > VIEWED_RETENTION_MS) delete viewed[storyId];
+  }
+  try { localStorage.setItem(VIEWED_KEY, JSON.stringify(viewed)); } catch (_) {}
+  return viewed;
+}
+
+const viewed = loadViewed();
+const viewedBeforeLoad = new Set(Object.keys(viewed));
+const params = new URLSearchParams(location.search);
+let activeCategory = params.get('category') || 'all';
+if (!categoryButtons.some((button) => button.dataset.categoryFilter === activeCategory)) {
+  activeCategory = 'all';
+}
+let savedView = 'all';
+try { savedView = localStorage.getItem(VIEW_MODE_KEY) || 'all'; } catch (_) {}
+let activeView = params.get('view') || (viewedBeforeLoad.size ? savedView : 'all');
+if (!['new', 'all'].includes(activeView)) activeView = 'all';
+
+function cardRank(card, category) {
+  const value = category === 'all' ? card.dataset.rankAll : card.dataset.rankCategory;
+  const parsed = Number.parseFloat(value || '0');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function updateUrl() {
+  const next = new URL(location.href);
+  if (activeCategory === 'all') next.searchParams.delete('category');
+  else next.searchParams.set('category', activeCategory);
+  if (activeView === 'all') next.searchParams.delete('view');
+  else next.searchParams.set('view', activeView);
+  history.replaceState(null, '', `${next.pathname}${next.search}${next.hash}`);
+}
+
+function renderStories() {
+  const ordered = [...cards].sort((left, right) => {
+    const rankDifference = cardRank(right, activeCategory) - cardRank(left, activeCategory);
+    if (rankDifference) return rankDifference;
+    return (right.dataset.eventUpdated || '').localeCompare(left.dataset.eventUpdated || '');
+  });
+  for (const card of ordered) grid.insertBefore(card, emptyState);
+
+  const visibleCards = [];
+  for (const card of ordered) {
+    const matchesCategory = activeCategory === 'all' || card.dataset.storyCategory === activeCategory;
+    const isPreviouslyViewed = viewedBeforeLoad.has(card.dataset.storyId);
+    const show = matchesCategory && (activeView === 'all' || !isPreviouslyViewed);
     card.hidden = !show;
-    if (show) visible += 1;
+    card.classList.remove('lead', 'secondary');
+    if (show) visibleCards.push(card);
   }
-  for (const button of buttons) {
-    button.setAttribute('aria-pressed', String(button.dataset.categoryFilter === category));
+  if (visibleCards[0]) visibleCards[0].classList.add('lead');
+  if (visibleCards[1]) visibleCards[1].classList.add('secondary');
+  for (const button of categoryButtons) {
+    button.setAttribute('aria-pressed', String(button.dataset.categoryFilter === activeCategory));
   }
-  if (count) count.textContent = String(visible);
-  const next = category === 'all' ? location.pathname : `${location.pathname}?category=${encodeURIComponent(category)}`;
-  history.replaceState(null, '', next);
+  for (const button of viewButtons) {
+    button.setAttribute('aria-pressed', String(button.dataset.viewFilter === activeView));
+  }
+  grid.dataset.activeCategory = activeCategory;
+  if (count) count.textContent = String(visibleCards.length);
+  if (countLabel) countLabel.textContent = activeView === 'new' ? 'new stories' : 'stories';
+  if (emptyState) {
+    emptyState.hidden = visibleCards.length !== 0;
+    emptyState.textContent = activeView === 'new'
+      ? 'You’re caught up. Switch to All to revisit stories from the last three days.'
+      : 'No stories fall within the current news window.';
+  }
+  updateUrl();
 }
 
-for (const button of buttons) {
-  button.addEventListener('click', () => applyFilter(button.dataset.categoryFilter));
+for (const button of categoryButtons) {
+  button.addEventListener('click', () => {
+    activeCategory = button.dataset.categoryFilter;
+    renderStories();
+  });
 }
 
-const requested = new URLSearchParams(location.search).get('category');
-if (requested && buttons.some((button) => button.dataset.categoryFilter === requested)) {
-  applyFilter(requested);
+for (const button of viewButtons) {
+  button.addEventListener('click', () => {
+    activeView = button.dataset.viewFilter;
+    try { localStorage.setItem(VIEW_MODE_KEY, activeView); } catch (_) {}
+    renderStories();
+  });
 }
+
+function markViewed(card) {
+  timers.delete(card);
+  const storyId = card.dataset.storyId;
+  if (!storyId) return;
+  viewed[storyId] = Date.now();
+  try { localStorage.setItem(VIEWED_KEY, JSON.stringify(viewed)); } catch (_) {}
+}
+
+if ('IntersectionObserver' in window) {
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const card = entry.target;
+      if (entry.isIntersecting && entry.intersectionRatio >= 0.55 && !timers.has(card)) {
+        timers.set(card, window.setTimeout(() => markViewed(card), VIEW_THRESHOLD_MS));
+      } else if ((!entry.isIntersecting || entry.intersectionRatio < 0.55) && timers.has(card)) {
+        window.clearTimeout(timers.get(card));
+        timers.delete(card);
+      }
+    }
+  }, { threshold: [0.55] });
+  for (const card of cards) observer.observe(card);
+}
+
+window.addEventListener('pagehide', () => {
+  for (const timer of timers.values()) window.clearTimeout(timer);
+  timers.clear();
+});
+
+renderStories();
 """.strip()
 
 
@@ -436,7 +599,7 @@ def _render_home(
     for category in categories:
         buttons.append(
             '<button type="button" data-category-filter="{}" aria-pressed="false">{}</button>'.format(
-                _e(category["id"]), _e(category["name"])
+                _e(category["id"]), _e(category.get("short_name") or category["name"])
             )
         )
     cards = []
@@ -445,23 +608,41 @@ def _render_home(
         tldr = story.get("tldr") if isinstance(story.get("tldr"), list) else []
         bullets = "".join(f"<li>{_e(item)}</li>" for item in tldr[:2])
         row = story["_index"]
+        source_count = int(row.get("source_count") or len(story.get("sources") or []))
+        all_rank = _score(row.get("homepage_rank_score", row.get("importance_score")))
+        category_rank = _score(row.get("category_rank_score", row.get("importance_score")))
+        source_tone = _source_tone(story)
+        shade_level = _shade_level(
+            rank=max(all_rank, category_rank), source_count=source_count
+        )
         cards.append(
-            f'<article class="story-card{variant}" data-story-category="{_e(story["category"])}">'
+            f'<article class="story-card category-{_e(story["category"])} source-tone-{source_tone} '
+            f'shade-{shade_level}{variant}" data-story-id="{_e(story["story_id"])}" '
+            f'data-story-category="{_e(story["category"])}" data-rank-all="{all_rank:.4f}" '
+            f'data-rank-category="{category_rank:.4f}" '
+            f'data-event-updated="{_e(_event_time(story).isoformat())}">'
             f'<p class="kicker">{_e(category_names[story["category"]])}</p>'
             f'<h2><a href="/stories/{_e(story["story_id"])}/">{_e(story["headline"])}</a></h2>'
             f'<p class="dek">{_e(story["dek"])}</p>'
             f'<ul class="tldr-list">{bullets}</ul>'
             f'<div class="story-meta"><span>{_relative_time(_event_time(story), generated_at)}</span>'
-            f'<span>{int(row.get("source_count") or len(story.get("sources") or []))} sources</span></div>'
+            f'<span>{source_count} sources</span></div>'
             "</article>"
         )
-    if not cards:
-        cards.append('<p class="empty-state">No stories fall within the current news window.</p>')
+    empty_hidden = "" if not cards else " hidden"
+    cards.append(
+        f'<p class="empty-state" data-empty-state{empty_hidden}>'
+        "No stories fall within the current news window.</p>"
+    )
     content = (
-        '<div class="edition"><h1>Latest briefing</h1>'
-        f'<p><span data-visible-count>{len(stories)}</span> stories · Last {rolling_window_hours} hours · '
+        '<div class="edition"><div class="edition-heading"><h1>Latest briefing</h1>'
+        '<div class="view-switch" role="group" aria-label="Choose which stories to show">'
+        '<button type="button" data-view-filter="new" aria-pressed="false" '
+        'title="Hide stories seen for at least 10 seconds on earlier visits">New</button>'
+        '<button type="button" data-view-filter="all" aria-pressed="true">All</button></div></div>'
+        f'<p><span data-visible-count>{len(stories)}</span> <span data-count-label>stories</span> · Last {rolling_window_hours} hours · '
         f'Built {_display_datetime(generated_at)}</p></div>'
-        f'<section class="story-grid">{"".join(cards)}</section>'
+        f'<section class="story-grid" data-story-grid data-active-category="all">{"".join(cards)}</section>'
     )
     return _page(
         title="news-tldr.com — The news, distilled",
@@ -649,6 +830,41 @@ def _citations(article_ids: Any, source_lookup: dict[str, dict[str, Any]]) -> st
 
 def _public_story(story: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in story.items() if not key.startswith("_")}
+
+
+def _score(value: Any) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if score != score:
+        return 0.0
+    return max(0.0, min(1.0, score))
+
+
+def _source_tone(story: dict[str, Any]) -> int:
+    source_names = sorted(
+        {
+            str(source.get("source_name"))
+            for source in story.get("sources", [])
+            if isinstance(source, dict) and source.get("source_name")
+        }
+    )
+    source_key = "|".join(source_names) if source_names else str(story.get("story_id") or "news")
+    return hashlib.sha256(source_key.encode("utf-8")).digest()[0] % 8
+
+
+def _shade_level(*, rank: float, source_count: int) -> int:
+    strength = rank * 0.8 + min(1.0, max(0, source_count) / 5.0) * 0.2
+    if strength >= 0.84:
+        return 5
+    if strength >= 0.72:
+        return 4
+    if strength >= 0.60:
+        return 3
+    if strength >= 0.45:
+        return 2
+    return 1
 
 
 def _load_categories() -> list[dict[str, Any]]:

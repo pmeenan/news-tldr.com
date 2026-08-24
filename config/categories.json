@@ -4,60 +4,70 @@
     {
       "id": "world",
       "name": "World News",
+      "short_name": "World",
       "description": "International affairs and global events",
       "sort_order": 1
     },
     {
       "id": "us",
       "name": "US News",
+      "short_name": "U.S.",
       "description": "Domestic news within the United States",
       "sort_order": 2
     },
     {
       "id": "politics",
       "name": "Politics",
+      "short_name": "Politics",
       "description": "Government, elections, policy, and political analysis",
       "sort_order": 3
     },
     {
       "id": "business",
       "name": "Business & Finance",
+      "short_name": "Business",
       "description": "Markets, companies, economics, and trade",
       "sort_order": 4
     },
     {
       "id": "technology",
       "name": "Technology",
+      "short_name": "Tech",
       "description": "Software, hardware, internet, and digital industry",
       "sort_order": 5
     },
     {
       "id": "science",
       "name": "Science",
+      "short_name": "Science",
       "description": "Research, discoveries, and scientific developments",
       "sort_order": 6
     },
     {
       "id": "health",
       "name": "Health",
+      "short_name": "Health",
       "description": "Medicine, public health, and healthcare policy",
       "sort_order": 7
     },
     {
       "id": "environment",
       "name": "Environment & Climate",
+      "short_name": "Climate",
       "description": "Climate change, conservation, and environmental policy",
       "sort_order": 8
     },
     {
       "id": "automotive",
       "name": "Automotive",
+      "short_name": "Auto",
       "description": "Vehicles, EV industry, recalls, and transportation",
       "sort_order": 9
     },
     {
       "id": "entertainment",
       "name": "Entertainment",
+      "short_name": "Culture",
       "description": "Film, TV, music, gaming, and cultural events",
       "sort_order": 10
     }

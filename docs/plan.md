@@ -106,8 +106,10 @@ gantt
 > Hosted LLM decision: pipeline LLM stages use the Gemini Developer API with an
 > AI Studio key loaded from local `.env` as `GEMINI_API_KEY`. Bulk work uses
 > `gemini-3.5-flash-lite` (`GEMINI_BULK_MODEL`, with `GEMINI_MODEL` as a
-> fallback); selective article-filter and final deduplication adjudication use
-> `gemini-3.7-flash` (`GEMINI_REVIEW_MODEL`). May 24 local Ollama evaluation showed that local models
+> fallback); selective article-filter, editorial, and final deduplication adjudication use
+> an ordered `gemini-3.7-flash` → `gemini-3.6-flash` → `gemini-3.5-flash`
+> capacity fallback chain. Deduplication may use 3.5 Flash-Lite as a final
+> non-authoritative fallback, but Lite cannot approve a merge. May 24 local Ollama evaluation showed that local models
 > could produce valid small-batch structured output, but larger clustering
 > experiments were too slow for the pipeline's needs. Direct Gemini API smoke
 > tests succeeded, but hosted models remained the practical choice. August 24
@@ -191,6 +193,16 @@ gantt
 - [x] Add `health --verbose` monitoring for stale/failed stages, feed/article failures, stale running jobs, malformed artifacts, SQLite integrity, and live HTTPS output; scheduled failures exit nonzero for cron alerting and retain rotating logs plus `health.json`.
 - [x] Document how to add feeds, categories, and source policy metadata.
 - [x] Prevent sparse-window replays from refreshing unchanged event timestamps and triggering unnecessary hourly editorial regeneration.
+- [x] Add capacity-aware full-Flash fallbacks with per-model cooldown circuits; allow a deduplication-only Lite fallback that cannot authorize merges.
+- [x] Cache final deduplication reviews by event input versions and bound production review work to the newest 40 pairs and one pass per run.
+- [x] Snapshot the retained queue after maintenance and run collection concurrently with backlog processing; restrict prior digest/aggregation work to the snapshot boundary, checkpoint fetched articles even when backlog remains, and defer only their downstream admission.
+
+### [x] Post-launch Reader Polish
+
+- [x] Add concise category navigation labels that fit in one desktop row while preserving full category names elsewhere.
+- [x] Add freshness-aware homepage and category-specific display ranks, with category views re-sorted by vertical impact.
+- [x] Add a device-local New/All revisit control using a 10-second visibility threshold and three-day retention.
+- [x] Add restrained source/category tinting with depth informed by story rank and distinct source count.
 
 ## Backlog
 
