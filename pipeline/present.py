@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import html
 import json
 import os
@@ -23,15 +22,44 @@ from pipeline.paths import (
     CONFIG_DIR,
     DIST_DIR,
     LOCK_PATH,
+    SOCIAL_CARD_PATH,
     STORY_DIR,
 )
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v2"
+PRESENTATION_VERSION = "presentation-v3"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
+
+ROBOTS_TXT = """User-agent: Googlebot
+Disallow: /
+
+User-agent: Googlebot-News
+Disallow: /
+
+User-agent: bingbot
+Disallow: /
+
+User-agent: DuckDuckBot
+Disallow: /
+
+User-agent: Applebot
+Disallow: /
+
+User-agent: YandexBot
+Disallow: /
+
+User-agent: Baiduspider
+Disallow: /
+
+User-agent: PetalBot
+Disallow: /
+
+User-agent: *
+Allow: /
+"""
 
 
 SITE_CSS = """
@@ -44,26 +72,27 @@ SITE_CSS = """
   --accent: #c84938;
   --accent-dark: #873026;
   --card: #fffdf8;
-  --world: #285f72;
-  --world-rgb: 40, 95, 114;
-  --us: #835c26;
-  --us-rgb: 131, 92, 38;
-  --politics: #8a3d3d;
-  --politics-rgb: 138, 61, 61;
-  --business: #51662d;
-  --business-rgb: 81, 102, 45;
-  --technology: #564d91;
-  --technology-rgb: 86, 77, 145;
-  --science: #326b62;
-  --science-rgb: 50, 107, 98;
-  --health: #9a4f6f;
-  --health-rgb: 154, 79, 111;
-  --environment: #477249;
-  --environment-rgb: 71, 114, 73;
-  --automotive: #66584a;
-  --automotive-rgb: 102, 88, 74;
-  --entertainment: #8b536f;
-  --entertainment-rgb: 139, 83, 111;
+  --neutral-rgb: 164, 139, 101;
+  --world: #725a3c;
+  --world-rgb: 177, 151, 112;
+  --us: #684d31;
+  --us-rgb: 148, 116, 78;
+  --politics: #58602e;
+  --politics-rgb: 124, 132, 76;
+  --business: #626936;
+  --business-rgb: 145, 150, 91;
+  --technology: #525b5a;
+  --technology-rgb: 105, 114, 113;
+  --science: #5d6462;
+  --science-rgb: 132, 138, 136;
+  --health: #705985;
+  --health-rgb: 151, 128, 174;
+  --environment: #535e5b;
+  --environment-rgb: 117, 126, 123;
+  --automotive: #496f88;
+  --automotive-rgb: 114, 157, 184;
+  --entertainment: #925b35;
+  --entertainment-rgb: 202, 145, 96;
   color-scheme: light;
   font-family: Georgia, "Times New Roman", serif;
   background: var(--paper);
@@ -91,36 +120,27 @@ main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 .view-switch button:hover { color: var(--ink); }
 .view-switch button[aria-pressed="true"] { color: white; background: var(--ink); }
 .story-grid { display: grid; grid-template-columns: repeat(12, 1fr); }
-.story-card { --card-tint: 100, 112, 106; --shade: .055; grid-column: span 4; padding: 1.5rem; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); background: linear-gradient(rgba(var(--card-tint), var(--shade)), rgba(var(--card-tint), var(--shade))), var(--card); transition: opacity .18s ease, background-color .18s ease; }
+.story-card { --card-tint: var(--neutral-rgb); --shade: 0; grid-column: span 4; padding: 1.5rem; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); background: linear-gradient(rgba(var(--card-tint), var(--shade)), rgba(var(--card-tint), var(--shade))), var(--card); transition: opacity .18s ease, background-color .18s ease; }
 .story-card:nth-child(3n) { border-right: 0; }
-.story-card.lead { grid-column: span 8; --shade: .14; }
-.story-card.secondary { grid-column: span 4; --shade: .105; }
+.story-card.lead { grid-column: span 8; }
+.story-card.secondary { grid-column: span 4; }
 .story-card[hidden] { display: none; }
-.source-tone-0 { --card-tint: 48, 94, 112; }
-.source-tone-1 { --card-tint: 127, 72, 62; }
-.source-tone-2 { --card-tint: 82, 105, 57; }
-.source-tone-3 { --card-tint: 91, 78, 132; }
-.source-tone-4 { --card-tint: 50, 111, 98; }
-.source-tone-5 { --card-tint: 143, 88, 64; }
-.source-tone-6 { --card-tint: 133, 76, 105; }
-.source-tone-7 { --card-tint: 92, 92, 86; }
-.shade-1 { --shade: .04; }
-.shade-2 { --shade: .065; }
-.shade-3 { --shade: .09; }
-.shade-4 { --shade: .12; }
-.shade-5 { --shade: .15; }
-.story-card.lead.shade-1, .story-card.lead.shade-2 { --shade: .11; }
-.story-card.secondary.shade-1 { --shade: .08; }
-.story-grid[data-active-category="world"] .story-card { --card-tint: var(--world-rgb); }
-.story-grid[data-active-category="us"] .story-card { --card-tint: var(--us-rgb); }
-.story-grid[data-active-category="politics"] .story-card { --card-tint: var(--politics-rgb); }
-.story-grid[data-active-category="business"] .story-card { --card-tint: var(--business-rgb); }
-.story-grid[data-active-category="technology"] .story-card { --card-tint: var(--technology-rgb); }
-.story-grid[data-active-category="science"] .story-card { --card-tint: var(--science-rgb); }
-.story-grid[data-active-category="health"] .story-card { --card-tint: var(--health-rgb); }
-.story-grid[data-active-category="environment"] .story-card { --card-tint: var(--environment-rgb); }
-.story-grid[data-active-category="automotive"] .story-card { --card-tint: var(--automotive-rgb); }
-.story-grid[data-active-category="entertainment"] .story-card { --card-tint: var(--entertainment-rgb); }
+.shade-1 { --shade: 0; }
+.shade-2 { --shade: .04; }
+.shade-3 { --shade: .07; }
+.shade-4 { --shade: .10; }
+.shade-5 { --shade: .13; }
+.story-grid[data-active-category="all"] .category-world { --card-tint: var(--world-rgb); }
+.story-grid[data-active-category="all"] .category-us { --card-tint: var(--us-rgb); }
+.story-grid[data-active-category="all"] .category-politics { --card-tint: var(--politics-rgb); }
+.story-grid[data-active-category="all"] .category-business { --card-tint: var(--business-rgb); }
+.story-grid[data-active-category="all"] .category-technology { --card-tint: var(--technology-rgb); }
+.story-grid[data-active-category="all"] .category-science { --card-tint: var(--science-rgb); }
+.story-grid[data-active-category="all"] .category-health { --card-tint: var(--health-rgb); }
+.story-grid[data-active-category="all"] .category-environment { --card-tint: var(--environment-rgb); }
+.story-grid[data-active-category="all"] .category-automotive { --card-tint: var(--automotive-rgb); }
+.story-grid[data-active-category="all"] .category-entertainment { --card-tint: var(--entertainment-rgb); }
+.story-grid:not([data-active-category="all"]) .story-card { --card-tint: var(--neutral-rgb); }
 .category-world .kicker { color: var(--world); }
 .category-us .kicker { color: var(--us); }
 .category-politics .kicker { color: var(--politics); }
@@ -226,10 +246,11 @@ let activeCategory = params.get('category') || 'all';
 if (!categoryButtons.some((button) => button.dataset.categoryFilter === activeCategory)) {
   activeCategory = 'all';
 }
-let savedView = 'all';
-try { savedView = localStorage.getItem(VIEW_MODE_KEY) || 'all'; } catch (_) {}
-let activeView = params.get('view') || (viewedBeforeLoad.size ? savedView : 'all');
-if (!['new', 'all'].includes(activeView)) activeView = 'all';
+let savedView = 'new';
+try { savedView = localStorage.getItem(VIEW_MODE_KEY) || 'new'; } catch (_) {}
+let activeView = params.get('view') || savedView;
+if (!['new', 'all'].includes(activeView)) activeView = 'new';
+try { localStorage.setItem(VIEW_MODE_KEY, activeView); } catch (_) {}
 
 function cardRank(card, category) {
   const value = category === 'all' ? card.dataset.rankAll : card.dataset.rankCategory;
@@ -241,7 +262,7 @@ function updateUrl() {
   const next = new URL(location.href);
   if (activeCategory === 'all') next.searchParams.delete('category');
   else next.searchParams.set('category', activeCategory);
-  if (activeView === 'all') next.searchParams.delete('view');
+  if (activeView === 'new') next.searchParams.delete('view');
   else next.searchParams.set('view', activeView);
   history.replaceState(null, '', `${next.pathname}${next.search}${next.hash}`);
 }
@@ -547,6 +568,7 @@ def _write_site_files(
 ) -> None:
     _write_text(root / "assets" / "site.css", SITE_CSS + "\n")
     _write_text(root / "assets" / "site.js", SITE_JS + "\n")
+    _write_public_bytes(root / "assets" / "social-card.png", SOCIAL_CARD_PATH.read_bytes())
     _write_text(
         root / "index.html",
         _render_home(
@@ -563,7 +585,7 @@ def _write_site_files(
         _render_archive(stories, category_names=category_names, site_url=site_url),
     )
     _write_text(root / "404.html", _render_not_found(site_url))
-    _write_text(root / "robots.txt", f"User-agent: *\nAllow: /\nSitemap: {site_url}/sitemap.xml\n")
+    _write_text(root / "robots.txt", ROBOTS_TXT)
 
     sitemap_urls = [f"{site_url}/", f"{site_url}/archive/"]
     for story in stories:
@@ -611,12 +633,9 @@ def _render_home(
         source_count = int(row.get("source_count") or len(story.get("sources") or []))
         all_rank = _score(row.get("homepage_rank_score", row.get("importance_score")))
         category_rank = _score(row.get("category_rank_score", row.get("importance_score")))
-        source_tone = _source_tone(story)
-        shade_level = _shade_level(
-            rank=max(all_rank, category_rank), source_count=source_count
-        )
+        shade_level = _shade_level(source_count=source_count)
         cards.append(
-            f'<article class="story-card category-{_e(story["category"])} source-tone-{source_tone} '
+            f'<article class="story-card category-{_e(story["category"])} '
             f'shade-{shade_level}{variant}" data-story-id="{_e(story["story_id"])}" '
             f'data-story-category="{_e(story["category"])}" data-rank-all="{all_rank:.4f}" '
             f'data-rank-category="{category_rank:.4f}" '
@@ -637,11 +656,11 @@ def _render_home(
     content = (
         '<div class="edition"><div class="edition-heading"><h1>Latest briefing</h1>'
         '<div class="view-switch" role="group" aria-label="Choose which stories to show">'
-        '<button type="button" data-view-filter="new" aria-pressed="false" '
+        '<button type="button" data-view-filter="new" aria-pressed="true" '
         'title="Hide stories seen for at least 10 seconds on earlier visits">New</button>'
-        '<button type="button" data-view-filter="all" aria-pressed="true">All</button></div></div>'
-        f'<p><span data-visible-count>{len(stories)}</span> <span data-count-label>stories</span> · Last {rolling_window_hours} hours · '
-        f'Built {_display_datetime(generated_at)}</p></div>'
+        '<button type="button" data-view-filter="all" aria-pressed="false">All</button></div></div>'
+        f'<p><span data-visible-count>{len(stories)}</span> <span data-count-label>new stories</span> · Last {rolling_window_hours} hours · '
+        f'Updated {_display_datetime(generated_at)}</p></div>'
         f'<section class="story-grid" data-story-grid data-active-category="all">{"".join(cards)}</section>'
     )
     return _page(
@@ -651,6 +670,7 @@ def _render_home(
         nav="".join(buttons),
         content=content,
         script=True,
+        social_image=f"{site_url}/assets/social-card.png",
     )
 
 
@@ -734,6 +754,8 @@ def _render_story(
         canonical=f'{site_url}/stories/{story["story_id"]}/',
         nav='<a href="/">Latest</a><a href="/archive/">Archive</a>',
         content=content,
+        og_type="article",
+        social_image=f"{site_url}/assets/social-card.png",
     )
 
 
@@ -762,6 +784,7 @@ def _render_archive(
         canonical=f"{site_url}/archive/",
         nav='<a href="/">Latest</a><a href="/archive/">Archive</a>',
         content=content,
+        social_image=f"{site_url}/assets/social-card.png",
     )
 
 
@@ -775,6 +798,7 @@ def _render_not_found(site_url: str) -> str:
             '<div class="empty-state"><p class="kicker">404</p>'
             '<h1>That story is not on this page.</h1><p><a href="/">Return to the latest briefing</a></p></div>'
         ),
+        social_image=f"{site_url}/assets/social-card.png",
     )
 
 
@@ -786,20 +810,38 @@ def _page(
     nav: str,
     content: str,
     script: bool = False,
+    og_type: str = "website",
+    social_image: str | None = None,
 ) -> str:
     script_tag = '<script src="/assets/site.js" defer></script>' if script else ""
+    image_meta = ""
+    if social_image:
+        image_meta = (
+            f'<meta property="og:image" content="{_attr(social_image)}">'
+            f'<meta property="og:image:secure_url" content="{_attr(social_image)}">'
+            '<meta property="og:image:type" content="image/png">'
+            '<meta property="og:image:width" content="1200">'
+            '<meta property="og:image:height" content="630">'
+            '<meta property="og:image:alt" content="news-tldr.com — The news, distilled">'
+            f'<meta name="twitter:image" content="{_attr(social_image)}">'
+            '<meta name="twitter:image:alt" content="news-tldr.com — The news, distilled">'
+        )
     return (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'; '
         "script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; "
         "object-src 'none'; base-uri 'none'; form-action 'none'\">"
+        '<meta name="robots" content="noindex,follow,noarchive,max-image-preview:large">'
         f"<title>{_e(title)}</title><meta name=\"description\" content=\"{_attr(description)}\">"
         f'<link rel="canonical" href="{_attr(canonical)}">'
-        f'<meta property="og:type" content="website"><meta property="og:title" content="{_attr(title)}">'
+        f'<meta property="og:type" content="{_attr(og_type)}"><meta property="og:site_name" content="news-tldr.com">'
+        f'<meta property="og:title" content="{_attr(title)}">'
         f'<meta property="og:description" content="{_attr(description)}">'
         f'<meta property="og:url" content="{_attr(canonical)}">'
-        '<meta name="twitter:card" content="summary">'
+        f'{image_meta}<meta name="twitter:card" content="summary_large_image">'
+        f'<meta name="twitter:title" content="{_attr(title)}">'
+        f'<meta name="twitter:description" content="{_attr(description)}">'
         '<link rel="stylesheet" href="/assets/site.css">'
         f"{script_tag}</head><body><header class=\"site-header\"><div class=\"masthead\">"
         '<a class="brand" href="/">news<span>-tldr</span>.com</a>'
@@ -807,7 +849,8 @@ def _page(
         f'</div><nav class="category-nav" aria-label="Story categories">{nav}</nav></header>'
         f"<main>{content}</main><footer class=\"site-footer\"><div>"
         '<span>Automated, source-attributed news summaries. Verify important details with the linked reporting.</span>'
-        '<span><a href="/archive/">Archive</a> · <a href="/api/active-stories.json">JSON</a></span>'
+        '<span><a href="https://github.com/pmeenan/news-tldr.com" rel="noopener noreferrer">About</a> · '
+        '<a href="/archive/">Archive</a> · <a href="/api/active-stories.json">JSON</a></span>'
         "</div></footer></body></html>\n"
     )
 
@@ -842,27 +885,14 @@ def _score(value: Any) -> float:
     return max(0.0, min(1.0, score))
 
 
-def _source_tone(story: dict[str, Any]) -> int:
-    source_names = sorted(
-        {
-            str(source.get("source_name"))
-            for source in story.get("sources", [])
-            if isinstance(source, dict) and source.get("source_name")
-        }
-    )
-    source_key = "|".join(source_names) if source_names else str(story.get("story_id") or "news")
-    return hashlib.sha256(source_key.encode("utf-8")).digest()[0] % 8
-
-
-def _shade_level(*, rank: float, source_count: int) -> int:
-    strength = rank * 0.8 + min(1.0, max(0, source_count) / 5.0) * 0.2
-    if strength >= 0.84:
+def _shade_level(*, source_count: int) -> int:
+    if source_count >= 5:
         return 5
-    if strength >= 0.72:
+    if source_count == 4:
         return 4
-    if strength >= 0.60:
+    if source_count == 3:
         return 3
-    if strength >= 0.45:
+    if source_count == 2:
         return 2
     return 1
 

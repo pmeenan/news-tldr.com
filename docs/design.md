@@ -632,17 +632,29 @@ Responsibilities:
   labels and metadata.
 - A device-local New/All control supports repeat reading. An Intersection
   Observer records a story after at least 55% of its card remains visible for
-  10 seconds. Local storage retains those story IDs for three days. New hides
-  stories recorded before the current page visit, avoiding disruptive card
-  removal while someone is actively reading; All always restores the complete
-  rolling window. Reading history is never sent to the server.
+  10 seconds. Local storage retains those story IDs for three days. New is the
+  default, and the selected New/All preference is global across visits and
+  category sections. New hides stories recorded before the current page visit,
+  avoiding disruptive card removal while someone is actively reading; All
+  always restores the complete rolling window. Reading history is never sent
+  to the server.
 - Cards use restrained tinting for visual separation. The All view assigns a
-  deterministic muted tint from the story's source set; category views switch
-  to that category's theme color. Tint depth is a small combination of display
-  rank and distinct source count, so better-supported, higher-priority stories
-  carry more visual weight without reducing text contrast.
+  muted category-family tint: World/U.S. use browns, Politics/Business olives,
+  Technology/Science/Environment grays, Automotive blue, Health purple, and
+  Entertainment orange. Tint depth depends only on distinct source count, so a
+  one-source World story stays effectively white and better-supported coverage
+  moves toward tan. Lead/secondary layout does not alter color. Focused
+  category views use the original neutral white/tan scale, retaining only the
+  small category kicker accent.
 - Build individual story pages with TL;DR, key facts, uncertainties, source links, and political framing sections.
-- Build an active-story archive plus sitemap, robots, 404, and JSON API files. Historical pages for archived events remain a future enhancement.
+- Build an active-story archive plus sitemap, robots, 404, and JSON API files.
+  Every HTML page carries `noindex,follow,noarchive` metadata. `robots.txt`
+  disallows major search-index crawlers but leaves the wildcard policy allowed
+  so social preview agents can retrieve metadata and images. Home, archive,
+  404, and story pages include Open Graph/X metadata backed by the checked-in
+  1200×630 `site/assets/social-card.png`; story pages use their own headline and
+  dek and declare `og:type=article`. Historical pages for archived events remain
+  a future enhancement.
 - Render source links with paywall indicators and uncertainty notes.
 - Output fully static, cacheable HTML/CSS/JSON with no application runtime.
 - Apply a strict Content Security Policy. CSS and JavaScript are generated locally and loaded from the same origin, so there are no external assets requiring Subresource Integrity.

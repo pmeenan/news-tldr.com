@@ -111,7 +111,20 @@ def test_build_static_site_renders_current_stories_and_keeps_old_detail_pages(tm
     assert 'href="#"' in detail
     assert "javascript:alert" not in detail
     assert "Content-Security-Policy" in detail
+    assert '<meta name="robots" content="noindex,follow,noarchive,max-image-preview:large">' in detail
+    assert '<meta property="og:type" content="article">' in detail
+    assert (
+        '<meta property="og:title" content="Current &lt;script&gt;alert(1)&lt;/script&gt; '
+        'story — news-tldr.com">'
+    ) in detail
+    assert '<meta name="twitter:card" content="summary_large_image">' in detail
+    assert (
+        '<a href="https://github.com/pmeenan/news-tldr.com" '
+        'rel="noopener noreferrer">About</a>'
+    ) in home
+    assert "About</a> · <a href=\"/archive/\">Archive</a>" in detail
     assert (output_dir / "api" / "active-stories.json").exists()
+    assert (output_dir / "assets" / "social-card.png").is_file()
     assert (output_dir / "sitemap.xml").exists()
 
 
@@ -140,15 +153,49 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert '>Business</button>' in home
     assert '>Tech</button>' in home
     assert '>Climate</button>' in home
-    assert 'data-view-filter="new"' in home
-    assert 'data-view-filter="all"' in home
+    assert 'data-view-filter="new" aria-pressed="true"' in home
+    assert 'data-view-filter="all" aria-pressed="false"' in home
     assert 'data-rank-all="0.8200"' in home
     assert 'data-rank-category="0.9100"' in home
-    assert "source-tone-" in home
+    assert "source-tone-" not in home
     assert "shade-" in home
+    assert "Updated Aug 24, 2026 · 01:00 UTC" in home
+    assert "Built Aug 24" not in home
+    assert 'property="og:image" content="https://news-tldr.com/assets/social-card.png"' in home
+    assert "let savedView = 'new'" in script
+    assert "localStorage.setItem(VIEW_MODE_KEY, activeView)" in script
+    assert "if (activeView === 'new') next.searchParams.delete('view')" in script
     assert "VIEW_THRESHOLD_MS = 10 * 1000" in script
     assert "VIEWED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000" in script
     assert "IntersectionObserver" in script
+
+    css = (output_dir / "assets" / "site.css").read_text(encoding="utf-8")
+    assert '.story-grid[data-active-category="all"] .category-world' in css
+    assert '.story-grid[data-active-category="all"] .category-business' in css
+    assert '.story-grid[data-active-category="all"] .category-automotive' in css
+    assert '.story-grid:not([data-active-category="all"]) .story-card' in css
+    assert ".story-card.lead { grid-column: span 8; }" in css
+
+
+def test_robots_blocks_search_indexers_without_blocking_social_crawlers(tmp_path: Path) -> None:
+    story = _story("2026-08-24-robots", updated_at="2026-08-24T00:00:00Z")
+    _, story_dir, active_path = _write_published_fixture(tmp_path, [story])
+    output_dir = tmp_path / "dist"
+
+    build_static_site(
+        output_dir=output_dir,
+        story_dir=story_dir,
+        active_stories_path=active_path,
+        now=datetime(2026, 8, 24, 1, tzinfo=UTC),
+    )
+
+    robots = (output_dir / "robots.txt").read_text(encoding="utf-8")
+    assert "User-agent: Googlebot\nDisallow: /" in robots
+    assert "User-agent: bingbot\nDisallow: /" in robots
+    assert "User-agent: DuckDuckBot\nDisallow: /" in robots
+    assert "User-agent: *\nAllow: /" in robots
+    assert "User-agent: *\nDisallow: /" not in robots
+    assert "Sitemap:" not in robots
 
 
 def test_build_static_site_rejects_path_traversal_story_id(tmp_path: Path) -> None:

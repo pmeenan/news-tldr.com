@@ -196,10 +196,19 @@ unknown server files, and replaces `index.html` last so readers do not see a new
 homepage before its referenced pages and assets are present.
 
 The homepage ranks the All view by fresh global impact and re-ranks each category
-by fresh category impact. Its New/All control remembers stories that were at
-least half-visible for 10 seconds, retains that device-local history for three
-days, and hides previously seen stories on later visits when New is selected.
-No reading history leaves the browser.
+by fresh category impact. Its global New/All control defaults to New and saves
+the reader's choice in local storage across visits and category sections.
+Stories that are at least half-visible for 10 seconds are remembered for three
+days and hidden on later visits in New mode. No reading history leaves the
+browser. The combined view uses quiet category-family tints whose depth tracks
+source count; focused categories retain the neutral white/tan card treatment.
+
+Generated pages carry `noindex` metadata, and `robots.txt` blocks major search
+index crawlers while leaving ordinary/social-preview access allowed. The home,
+archive, and story pages publish complete Open Graph and X card metadata with a
+same-origin 1200×630 branded poster; story shares retain their own headline and
+description. The homepage freshness line labels the generated timestamp as
+`Updated`.
 
 ### Operations and Monitoring
 

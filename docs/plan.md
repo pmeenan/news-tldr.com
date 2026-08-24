@@ -203,6 +203,10 @@ gantt
 - [x] Add freshness-aware homepage and category-specific display ranks, with category views re-sorted by vertical impact.
 - [x] Add a device-local New/All revisit control using a 10-second visibility threshold and three-day retention.
 - [x] Add restrained source/category tinting with depth informed by story rank and distinct source count.
+- [x] Default the global New/All preference to New and persist the reader's choice across visits and category sections.
+- [x] Keep focused sections neutral while grouping combined-view colors into muted category families with source-count depth.
+- [x] Prevent search indexing without blocking social preview fetches; add noindex metadata and complete Open Graph/X cards with a branded poster.
+- [x] Label the homepage build timestamp as Updated.
 
 ## Backlog
 

@@ -616,6 +616,8 @@ def _validate_static_output(
         dist_dir / "api" / "active-stories.json",
         dist_dir / "assets" / "site.css",
         dist_dir / "assets" / "site.js",
+        dist_dir / "assets" / "social-card.png",
+        dist_dir / "robots.txt",
         dist_dir / "sitemap.xml",
     )
     for path in required:

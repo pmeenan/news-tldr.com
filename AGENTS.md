@@ -32,6 +32,20 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on August 24, 2026 (Global New View + Sharing/Indexing + Color Refinement)
+
+- **Reader preference**: New is now the default New/All mode. The global choice uses the existing `newsTldrViewModeV1` local-storage key, is honored across category sections and later visits, and is reflected in the URL only for the non-default All mode. Three-day/10-second viewed-story behavior is unchanged.
+- **Color system**: Removed source-hash colors and lead/secondary shade overrides that made one category appear inconsistent. The combined All view now groups muted tints by category family (World/U.S. browns, Politics/Business olives, Technology/Science/Environment grays, Automotive blue, Health purple, Entertainment orange). Shade depth depends only on distinct source count; focused categories return to the neutral white/tan scale while retaining kicker accents.
+- **Indexing and sharing**:
+  - Every generated HTML page includes `noindex,follow,noarchive` metadata. `robots.txt` disallows Google, Bing, DuckDuckGo, Apple, Yandex, Baidu, and Petal indexing crawlers while leaving `User-agent: *` allowed for social preview and ordinary access; the sitemap is no longer advertised in robots.
+  - Added checked-in `site/assets/social-card.png`, a generated 1200×630 branded news-tldr.com poster. Home/archive/404/story pages emit complete Open Graph and X large-card fields; story pages use their own headline/dek and `og:type=article`.
+  - Static validation now requires `robots.txt` and the social poster. Presentation version is `presentation-v3`.
+- **Freshness label**: The homepage edition line now says `Updated <build timestamp>` instead of `Built`.
+- **Production**: Presentation-only publish completed successfully with **596 stories** and **1,201 managed static files**. Live robots, homepage metadata/toggle state, a representative story card, and the poster returned expected content/HTTP 200. Health is `healthy` with 0 artifact errors.
+- **Verification**: `PYTHONPATH=. ./.venv/bin/pytest -q` → **276 passed**; `ruff check .`, `compileall`, `git diff --check`, `validate-data --verbose`, and `health --verbose` passed.
+- **Files touched for this work**: `pipeline/{present,paths,operations}.py`, `tests/{test_present,test_operations}.py`, `site/assets/social-card.png`, `README.md`, `docs/{design,plan}.md`, and this handoff. No dependencies were added.
+- **Not committed.** The working tree retains earlier uncommitted pipeline and reader-polish work; runtime/build/production output remains outside source control.
+
 ### State on August 24, 2026 (Capacity Fallbacks + Concurrent Backlog-First Scheduling)
 
 - **Scope**: Prevented hourly runs from growing an editorial backlog when Gemini 3.7 Flash is capacity-constrained, bounded repeated deduplication work, recovered the live queue, and parallelized collection with bounded backlog processing.

@@ -116,12 +116,17 @@ def _valid_fixture(tmp_path: Path) -> dict[str, Path]:
         "archive/index.html",
         "assets/site.css",
         "assets/site.js",
+        "assets/social-card.png",
+        "robots.txt",
         "sitemap.xml",
         f"stories/{event_id}/index.html",
     ):
         path = dist_dir / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("ok", encoding="utf-8")
+        if path.suffix == ".png":
+            path.write_bytes(b"png")
+        else:
+            path.write_text("ok", encoding="utf-8")
     _write_json(dist_dir / "api" / "active-stories.json", {"stories": []})
     _write_json(dist_dir / "api" / "stories" / f"{event_id}.json", story)
     migrate(db_path)
@@ -147,7 +152,7 @@ def test_validate_artifacts_accepts_complete_fixture(tmp_path: Path) -> None:
         "events": 1,
         "stories": 1,
         "active_index_stories": 1,
-        "static_files": 8,
+            "static_files": 10,
         "categories": 1,
     }
 
