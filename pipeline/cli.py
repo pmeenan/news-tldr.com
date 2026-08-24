@@ -22,6 +22,7 @@ from pipeline.editorial import editorial_once
 from pipeline.lock import PipelineLock
 from pipeline.maintenance import maintenance_once
 from pipeline.paths import ARTICLE_DIR, DATA_DIR, DB_PATH, FETCH_LOG_DIR, LOCK_PATH
+from pipeline.present import presentation_once
 from pipeline.state import StateDB, migrate
 
 
@@ -93,7 +94,12 @@ def _stderr_progress(message: str) -> None:
     print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
 
 
-def run_completed_pipeline(*, force: bool = False, progress=None) -> dict[str, object]:
+def run_completed_pipeline(
+    *,
+    force: bool = False,
+    publish: bool | None = None,
+    progress=None,
+) -> dict[str, object]:
     config = load_pipeline_config()
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"pipeline-run-{uuid.uuid4().hex}"
@@ -124,6 +130,15 @@ def run_completed_pipeline(*, force: bool = False, progress=None) -> dict[str, o
         migrate()
         editorial_stats = editorial_once(force=force, progress=progress, acquire_lock=False)
 
+        if progress:
+            progress("run: starting presentation and publish")
+        migrate()
+        presentation_stats = presentation_once(
+            publish=publish,
+            progress=progress,
+            acquire_lock=False,
+        )
+
     return {
         "force": force,
         "stages": {
@@ -132,6 +147,7 @@ def run_completed_pipeline(*, force: bool = False, progress=None) -> dict[str, o
             "digest": digest_stats,
             "aggregate": aggregate_stats,
             "editorial": editorial_stats,
+            "presentation": presentation_stats,
         },
     }
 
@@ -142,7 +158,7 @@ def main() -> None:
     sub.add_parser("init-db", help="Initialize or migrate the SQLite state database.")
     run_parser = sub.add_parser(
         "run",
-        help="Run completed pipeline stages: maintenance, collect, digest, aggregate, editorial.",
+        help="Run completed pipeline stages through presentation and publishing.",
     )
     run_parser.add_argument(
         "--force",
@@ -150,6 +166,11 @@ def main() -> None:
         help="Pass force mode through to stages that support it.",
     )
     run_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
+    run_parser.add_argument(
+        "--no-publish",
+        action="store_true",
+        help="Build the static site but do not copy it to the configured production directory.",
+    )
     collect_parser = sub.add_parser("collect", help="Run stage 1 data collection.")
     collect_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     aggregate_parser = sub.add_parser("aggregate", help="Run stage 2 story aggregation.")
@@ -193,6 +214,21 @@ def main() -> None:
         help="Regenerate stories even when events have not changed.",
     )
     editorial_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
+    presentation_parser = sub.add_parser(
+        "present",
+        help="Build the static site and publish it to the configured production directory.",
+    )
+    presentation_parser.add_argument(
+        "--build-only",
+        action="store_true",
+        help="Build dist/ without publishing it.",
+    )
+    presentation_parser.add_argument(
+        "--publish-dir",
+        type=Path,
+        help="Override the configured absolute production directory.",
+    )
+    presentation_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     maintenance_parser = sub.add_parser(
         "maintenance",
         help="Run retention cleanup, event lifecycle updates, and artifact reconciliation.",
@@ -243,7 +279,11 @@ def main() -> None:
         print("initialized data/state/pipeline.db")
     elif args.command == "run":
         progress = _stderr_progress if args.verbose else None
-        stats = run_completed_pipeline(force=args.force, progress=progress)
+        stats = run_completed_pipeline(
+            force=args.force,
+            publish=False if args.no_publish else None,
+            progress=progress,
+        )
         print(json.dumps(stats, indent=2, sort_keys=True))
     elif args.command == "collect":
         progress = _stderr_progress if args.verbose else None
@@ -295,6 +335,15 @@ def main() -> None:
             concurrency=args.concurrency,
             force=args.force,
             event_ids=args.event_ids,
+            progress=progress,
+        )
+        print(json.dumps(stats, indent=2, sort_keys=True))
+    elif args.command == "present":
+        progress = _stderr_progress if args.verbose else None
+        migrate()
+        stats = presentation_once(
+            publish=False if args.build_only else None,
+            publish_dir=args.publish_dir,
             progress=progress,
         )
         print(json.dumps(stats, indent=2, sort_keys=True))

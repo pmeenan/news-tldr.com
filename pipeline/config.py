@@ -33,6 +33,7 @@ class PipelineConfig:
     pipeline: dict[str, Any]
     digest: dict[str, Any] = field(default_factory=dict)
     editorial: dict[str, Any] = field(default_factory=dict)
+    presentation: dict[str, Any] = field(default_factory=dict)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -49,6 +50,7 @@ def load_pipeline_config(path: Path | None = None) -> PipelineConfig:
         pipeline=data.get("pipeline", {}),
         digest=data.get("digest", {}),
         editorial=data.get("editorial", {}),
+        presentation=data.get("presentation", {}),
     )
 
 

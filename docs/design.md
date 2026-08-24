@@ -14,9 +14,9 @@ news-tldr.com is a filesystem-backed RSS aggregator that collects source article
 ## Technology Stack
 
 - **Pipeline**: Python. Libraries: `feedparser`, `httpx` (HTTP/2-enabled collection client and pooled HTTP/1.1 Gemini client), `h2`, `trafilatura` (article extraction), `beautifulsoup4` (custom scrapers), hosted LLM API client (Gemini Developer API by default). SQLite is accessed through Python's standard-library `sqlite3` module.
-- **Presentation**: Astro (or similar frontend-focused SSG). Generates static HTML/CSS/JSON from published story artifacts.
+- **Presentation**: Dependency-free Python renderer in `pipeline/present.py`. Generates static HTML/CSS/JSON from published story artifacts.
 - **State**: SQLite database for pipeline state, incremental processing tracking, and fast lookups. JSON files remain the human-readable artifacts for each stage.
-- **Deployment**: The pipeline environment (including the SQLite database, staging files, and lock states) must **never** be web-accessible. The published SSG content in `dist/` is pushed to a separate web hosting location, which is a CDN-fronted static file server. The pipeline runs on a schedule (cron, GitHub Actions, or similar) strictly isolated from the public-facing site.
+- **Deployment**: The pipeline environment (including the SQLite database, staging files, and lock states) is never web-accessible. Only generated files from `dist/` are copied to the Nginx document root at `/var/www/news-tldr.com/`, which serves [news-tldr.com](https://news-tldr.com/). Scheduling remains isolated from the public-facing site.
 
 ## High-Level Architecture
 
@@ -32,6 +32,8 @@ graph TD
     Editorial --> Stories[data/published/stories/]
     Stories --> Present[4. Presentation Build]
     Present --> Site[dist/ — Static HTML/CSS/JSON]
+    Site --> Publish[/var/www/news-tldr.com/]
+    Publish --> Nginx[news-tldr.com]
 
     State[(data/state/pipeline.db)] -.-> Collect
     State -.-> Maintenance
@@ -67,8 +69,8 @@ data/
     stories/<event_id>.json  # Editorial story JSON, one per event.
     active-stories.json      # Index of currently active stories for the presentation layer.
 
-site/                        # Astro source and templates.
-dist/                        # Generated CDN-deployable output.
+pipeline/present.py          # Static renderer and production deployment logic.
+dist/                        # Ignored generated static output; only this tree is publishable.
 ```
 
 Article staging directories use the article's **publish date** (from the feed or page metadata). When publish date is missing or unparseable, fall back to **fetch date** and set a `publish_date_estimated: true` flag in the article JSON. When a usable lead image is found, it is stored next to the article JSON with the same base filename and an image extension such as `.jpg`, `.png`, `.webp`, or `.gif`.
@@ -603,16 +605,44 @@ Inputs:
 
 Responsibilities:
 
-- Build static pages from story JSON using Astro (or similar frontend-focused SSG). Treat all imported JSON content (headlines, summaries, extracted text) as untrusted; ensure Astro templates auto-escape this content and use `DOMPurify` (or Astro's native equivalent) if any raw HTML must be rendered.
+- Build static pages from story JSON with the standard-library renderer in `pipeline/present.py`. All JSON strings are treated as untrusted and HTML-escaped; external links are restricted to HTTP/HTTPS URLs and raw upstream HTML is never rendered.
 - The main page shows all active stories in a **rolling time window**, editorially ranked by importance. Category tabs (one per category from `config/categories.json`, plus an "All" default) filter the same ranked list client-side — they are not separate pages with independent layouts.
 - Build individual story pages with TL;DR, key facts, uncertainties, source links, and political framing sections.
-- Build archive pages or indexes for older stories.
+- Build an active-story archive plus sitemap, robots, 404, and JSON API files. Historical pages for archived events remain a future enhancement.
 - Render source links with paywall indicators and uncertainty notes.
-- Generate lightweight JSON API files for potential future client-side features.
-- Output must be fully static and CDN-cacheable with no server runtime.
-- The presentation layer must implement a strict Content Security Policy (CSP) (via `<meta>` tags or CDN headers) and use Subresource Integrity (SRI) for any external assets.
+- Output fully static, cacheable HTML/CSS/JSON with no application runtime.
+- Apply a strict Content Security Policy. CSS and JavaScript are generated locally and loaded from the same origin, so there are no external assets requiring Subresource Integrity.
 
-The presentation build runs after each pipeline run. It reads the current state of published stories and regenerates the site. Pages for stories that haven't changed can be cached or skipped (incremental builds) if the SSG supports it.
+### Stage 4 Implementation
+
+`./.venv/bin/python -m pipeline.cli present` builds the presentation and publishes
+it by default. `present --build-only` writes only `dist/`; `--publish-dir` accepts
+an absolute override for controlled deployments. The top-level `pipeline.cli run`
+invokes presentation after a successful editorial stage while retaining the
+shared pipeline lock. With `presentation.publish_enabled: true`, that step also
+publishes automatically; `run --no-publish` is the explicit build-only escape
+hatch.
+
+Presentation settings live in `config/pipeline.json`:
+
+- `site_url`: canonical public origin, currently `https://news-tldr.com`.
+- `rolling_window_hours`: homepage event freshness window, currently 72 hours.
+- `publish_enabled`: whether ordinary top-level runs deploy after building.
+- `publish_dir`: absolute production document root, currently `/var/www/news-tldr.com`.
+
+The renderer validates the active story index, story IDs, story/category parity,
+and source URLs before writing into a temporary sibling directory. It replaces
+`dist/` only after the complete build succeeds. The production deploy rejects
+relative, broad, symlinked, or source-equal destinations and rejects symlinks or
+path traversal in the generated tree. It copies generated assets and story pages
+before `index.html`, then records the exact managed path set in
+`.news-tldr-managed.json`. Later deploys remove only stale paths from that
+manifest and preserve unknown server-managed files. Public files are written
+with mode `0644`.
+
+The initial production publish on August 24, 2026 generated and deployed 874
+public files for 433 stories. The homepage, a representative story page, and
+`/api/active-stories.json` all returned HTTP 200 over HTTPS.
 
 ## Pipeline Operations
 
@@ -620,11 +650,11 @@ The presentation build runs after each pipeline run. It reads the current state 
 
 Pipeline commands that can run long enough to feel idle in an interactive shell must support `--verbose`. Verbose progress/status is written to stderr, while final machine-readable output remains on stdout. The collection command currently implements this contract with `./.venv/bin/python -m pipeline.cli collect --verbose`.
 
-The `clean-data` command removes local generated pipeline state for a fresh run: the SQLite database and sidecars, staged article files, event JSON, published JSON, and fetch logs by default. It requires `--yes`, refuses to run while `data/state/pipeline.lock` exists, and can keep fetch logs with `--keep-fetch-log` or override the lock guard with `--ignore-lock`.
+The `clean-data` command removes local generated pipeline state for a fresh run: the SQLite database and sidecars, staged article files, event JSON, published JSON, and fetch logs by default. It requires `--yes`, refuses to run while `data/state/pipeline.lock` exists, and can keep fetch logs with `--keep-fetch-log` or override the lock guard with `--ignore-lock`. It does not remove `dist/` or the production document root.
 
 ### Concurrency Control
 
-Only one pipeline run may execute at a time. Concurrency is controlled by a lock file at `data/state/pipeline.lock`. Individual stage commands acquire this lock for that stage. The combined `run` command acquires the same lock once for the entire collect → digest → aggregate sequence and calls the inner stage implementations without reacquiring it, so another scheduled run or manual stage command cannot slip between stages.
+Only one pipeline run may execute at a time. Concurrency is controlled by a lock file at `data/state/pipeline.lock`. Individual stage commands acquire this lock for that stage. The combined `run` command acquires the same lock once for maintenance → collect → digest → aggregate → editorial → presentation/publish and calls the inner stage implementations without reacquiring it, so another scheduled run or manual stage command cannot slip between stages.
 
 **Lock acquisition:**
 1. Create `pipeline.lock` atomically using exclusive creation (`O_CREAT | O_EXCL`) or an atomic lock directory. Do not use a separate check-then-create sequence.
@@ -742,4 +772,4 @@ The abstraction should support swapping backends without changing pipeline logic
 
 ## Open Design Questions
 
-- Which Astro plugins/integrations are needed for the initial site build?
+- Should archived events eventually retain permanent public story pages beyond the current active/stale archive?

@@ -29,6 +29,12 @@
     "article_char_limit": 12000,
     "event_char_limit": 60000
   },
+  "presentation": {
+    "site_url": "https://news-tldr.com",
+    "rolling_window_hours": 72,
+    "publish_enabled": true,
+    "publish_dir": "/var/www/news-tldr.com"
+  },
   "retention": {
     "staging_article_days": 3,
     "archived_event_days": 30

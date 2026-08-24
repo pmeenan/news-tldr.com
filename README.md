@@ -4,7 +4,7 @@ Source code for the RSS aggregator and summarizer at https://news-tldr.com.
 
 ## Overview
 
-news-tldr.com is a filesystem-backed RSS aggregator that parses web feeds, extracts article content, groups related coverage into durable topics/events, and uses AI/LLMs to generate concise neutral TL;DR summaries. The published site is intended to be static and CDN-cacheable.
+news-tldr.com is a filesystem-backed RSS aggregator that parses web feeds, extracts article content, groups related coverage into durable topics/events, and uses AI/LLMs to generate concise neutral TL;DR summaries. The published site is fully static and served at [news-tldr.com](https://news-tldr.com/).
 
 ## Key Features
 
@@ -12,7 +12,7 @@ news-tldr.com is a filesystem-backed RSS aggregator that parses web feeds, extra
 - **Lead Image Capture**: Download of supported article images as sidecar files next to staged article JSON.
 - **Filesystem Pipeline**: JSON artifacts and a SQLite state database connect collection, aggregation, editorial, and presentation stages without a server runtime.
 - **AI-Powered Summaries**: Automatic generation of brief, sourced summaries across multiple articles covering the same event.
-- **Static Presentation**: A clean reader interface generated from JSON and deployable without a server runtime.
+- **Static Presentation**: A dependency-free Python renderer builds the reader interface from editorial JSON and publishes it without a server runtime.
 
 ## Project Resources
 
@@ -71,10 +71,12 @@ Run stage 1 data collection:
 ./.venv/bin/python -m pipeline.cli collect
 ```
 
-Run the completed pipeline stages in order (`maintenance`, `collect`, `digest`,
-`aggregate`, then `editorial`). This holds the shared pipeline lock for the full duration of
-the run, so scheduled invocations do not interleave with each other or with
-individual stage commands:
+Run the complete pipeline in order (`maintenance`, `collect`, `digest`,
+`aggregate`, `editorial`, then `presentation`). Presentation builds `dist/` and,
+with the checked-in production configuration, publishes it to
+`/var/www/news-tldr.com/`. The command holds the shared pipeline lock for the
+full duration so scheduled invocations do not interleave with each other or
+with individual stage commands:
 ```bash
 ./.venv/bin/python -m pipeline.cli run --verbose
 ```
@@ -83,6 +85,12 @@ Force stages that support forced recomputation (`digest`, `aggregate`, and `edit
 running the completed pipeline:
 ```bash
 ./.venv/bin/python -m pipeline.cli run --verbose --force
+```
+
+Build the site during a full run without updating production:
+
+```bash
+./.venv/bin/python -m pipeline.cli run --verbose --no-publish
 ```
 
 Run the maintenance/retention stage on its own. It advances old events through
@@ -143,6 +151,27 @@ or repeat `--event-id <id>` to evaluate specific events:
 ```bash
 ./.venv/bin/python -m pipeline.cli editorial --verbose --limit 10
 ```
+
+Build and publish the static presentation without running upstream stages:
+
+```bash
+./.venv/bin/python -m pipeline.cli present --verbose
+```
+
+Use `--build-only` to preview `dist/` without publishing, or `--publish-dir`
+with an absolute path to override the configured destination:
+
+```bash
+./.venv/bin/python -m pipeline.cli present --verbose --build-only
+```
+
+Presentation defaults live under `presentation` in `config/pipeline.json`.
+`publish_enabled: true` makes every normal top-level `run` publish automatically;
+`site_url`, `rolling_window_hours`, and `publish_dir` control canonical URLs,
+homepage freshness, and the production root. Deployment copies only generated
+static files, removes only stale files recorded in its managed manifest, preserves
+unknown server files, and replaces `index.html` last so readers do not see a new
+homepage before its referenced pages and assets are present.
 
 Remove the local generated SQLite state, staged articles, event files, published files, and fetch logs:
 ```bash

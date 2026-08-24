@@ -5,17 +5,17 @@ This document tracks the phased buildout of the filesystem-backed RSS aggregator
 ## Current Direction
 
 - **Pipeline**: Python with `feedparser`, pooled `httpx` HTTP/1.1 clients for collection and Gemini calls, `trafilatura`, `beautifulsoup4`, standard-library `sqlite3`, and LLM client libraries.
-- **Presentation**: Astro (or similar frontend-focused SSG) for static site generation.
+- **Presentation**: Dependency-free Python static renderer in `pipeline/present.py`.
 - **State**: SQLite for pipeline state and incremental processing. JSON files for human-readable stage artifacts.
 - **No database server** or application runtime for the published site.
 - Filesystem JSON artifacts are the source of truth between stages.
-- Pipeline stages: maintenance/retention, data collection, story aggregation, editorial, presentation.
-- Data collection and story aggregation are implemented and refreshed through August 24, 2026; editorial and presentation are next.
+- Pipeline stages: maintenance/retention, data collection, article digestion, story aggregation, editorial, presentation, production publish.
+- All executable stages through production publish are implemented. The retained dataset, 433 editorial stories, and production presentation were refreshed through August 24, 2026; optional metadata/thread enhancements remain open.
 - Article digest generation is now its own runnable stage before story aggregation.
 - A maintenance stage now runs before collection in `pipeline run` to expire old pending work outside the configured staging horizon, restore prematurely expired in-horizon work, advance event lifecycle state, reconcile event artifacts, and compact old filtered/archived article JSON.
 - The configured source catalog has 69 enabled sources, including AP News and MotorTrend custom scrapers.
 - Neutrality, attribution, and auditability are first-class requirements.
-- Pipeline runs hourly. Stories evolve as new articles arrive across runs.
+- The pipeline supports hourly scheduling. Stories evolve as new articles arrive across runs, and every normal top-level run publishes the completed static build automatically.
 - Events are the primary grouping unit. Optional thread tags link related events over time.
 
 ## Milestones
@@ -31,7 +31,7 @@ gantt
     Story aggregation               : 4d
     Editorial summaries             : 4d
     section Presentation
-    Static site output              : 3d
+    Static site output              :done, 2026-08-24, 1d
     section Operations
     Pipeline ops and quality        : 2d
 ```
@@ -46,7 +46,7 @@ gantt
 - [x] Draft proposed JSON artifact layout and stage responsibilities.
 - [x] Create initial repository structure for `config/`, `data/`, `site/`, and `dist/`.
 - [x] Add `.gitignore` rules for generated/runtime directories.
-- [x] Choose implementation language: Python (pipeline) + Astro (presentation).
+- [x] Choose implementation language: Python for both the pipeline and dependency-free static presentation renderer.
 - [x] Externalize categories to `config/categories.json`.
 - [x] Define JSON sketches for article, event, and story artifacts.
 - [x] Design pipeline state model (SQLite), incremental processing, and concurrency control.
@@ -158,25 +158,28 @@ gantt
 - [x] Generate `data/published/active-stories.json` index for active and stale stories.
 - [x] Add tests for schema validation, citation coverage, filtered-article exclusion, framing extraction, incremental selection, persistence, and index generation.
 
-### [ ] Milestone 4: Presentation
+### [x] Milestone 4: Presentation
 
-- [ ] Scan dependencies using security tools, then set up Astro project in `site/` with build output to `dist/`.
-- [ ] Build main page with all active stories in a rolling time window, editorially ranked by importance.
-- [ ] Implement category tabs (one per `config/categories.json` entry + "All" default) as client-side filters on the main story list.
-- [ ] Build individual story pages with TL;DR, key facts, uncertainties, sources, and political framing, ensuring strict HTML escaping/sanitization for XSS prevention.
-- [ ] Render source links with paywall indicators.
-- [ ] Render political framing section (when present) with left/right perspective summaries and source links.
-- [ ] Build archive pages or JSON indexes for older stories.
-- [ ] Ensure output is fully static, CDN-cacheable, and requires no server runtime.
-- [ ] Ensure the pipeline environment and state database are strictly isolated and not pushed to the public web hosting location.
-- [ ] Add build verification for generated pages.
-- [ ] Update `.gitignore` for `node_modules/` and Astro build artifacts.
+- [x] Implement a dependency-free Python static renderer in `pipeline/present.py` with build output to ignored `dist/`; no new dependency scan was needed.
+- [x] Build the main page with all active stories in a configurable rolling window, editorially ranked by importance.
+- [x] Implement category tabs (one per `config/categories.json` entry + "All" default) as client-side filters on the main story list.
+- [x] Build individual story pages with TL;DR, key facts, uncertainties, sources, and political framing, with strict HTML escaping and URL allowlisting for XSS prevention.
+- [x] Render source links with paywall indicators.
+- [x] Render political framing (when present) with left/right perspective summaries and source links.
+- [x] Build an active-story archive, sitemap, robots file, 404 page, and lightweight JSON API indexes.
+- [x] Ensure output is fully static, cacheable, and requires no application runtime.
+- [x] Enforce a strict Content Security Policy and keep all CSS/JavaScript same-origin, with no external asset dependencies requiring SRI.
+- [x] Keep the pipeline environment and state database isolated; publish only managed files from `dist/` to the public web root.
+- [x] Add build, XSS/path validation, safe deployment, stale managed-file cleanup, and CLI integration tests.
+- [x] Keep generated `dist/` ignored by git.
+- [x] Publish the current 433-story site to `/var/www/news-tldr.com/` and verify the homepage, story pages, and JSON API over HTTPS.
 
 ### [ ] Milestone 5: Operations & Quality
 
 - [x] Document that long-running pipeline commands must support `--verbose` progress/status logging to stderr.
 - [x] Add a single command (`./.venv/bin/python -m pipeline.cli run`) to run the completed pipeline stages locally.
 - [x] Add a standalone `maintenance --verbose` stage and run it at the start of the completed pipeline.
+- [x] Run presentation after editorial and automatically publish successful builds to the configured production directory; support `run --no-publish` and `present --build-only` for safe previews.
 - [ ] Verify pipeline lock, watchdog timeout, and stale lock recovery work end-to-end.
 - [ ] Add prompt/version metadata to all LLM-generated artifacts.
 - [ ] Add JSON schema validation command for all artifact types.
@@ -197,4 +200,5 @@ gantt
 - Per-thread archive pages with event timelines.
 - Search index generated at build time.
 - Feed health dashboard generated as static HTML.
-- Incremental Astro builds (skip unchanged story pages).
+- Historical archived-event pages beyond the current active/stale story archive.
+- Incremental presentation builds (skip unchanged story pages).

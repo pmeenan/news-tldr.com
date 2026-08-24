@@ -32,6 +32,36 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on August 24, 2026 (Milestone 4 Presentation + Automatic Production Publishing)
+
+- **Scope**: Implemented the static presentation stage, integrated it after Editorial in the top-level pipeline, documented automatic publishing, and deployed the current 433-story site to [news-tldr.com](https://news-tldr.com/).
+- **Presentation implementation** (`pipeline/present.py`):
+  - Dependency-free Python renderer consumes `data/published/active-stories.json`, individual story JSON, category config, feed metadata, and source policy metadata.
+  - Builds a 72-hour editorially ranked homepage with client-side category filters; individual story pages with TL;DR, facts, citations, uncertainties, framing, sources, and paywall badges; an active-story archive; 404 page; robots file; sitemap; and public JSON API files.
+  - Treats editorial content as untrusted: HTML-escapes all strings, accepts only HTTP/HTTPS source URLs, rejects invalid/traversal story IDs, renders no raw upstream HTML, and emits a strict CSP with same-origin assets.
+  - Builds into a temporary sibling directory and replaces ignored `dist/` only after the complete build succeeds.
+- **Automatic publish integration**:
+  - `pipeline.cli run` now holds one lock across maintenance → collect → digest → aggregate → editorial → presentation/publish.
+  - `config/pipeline.json` enables production publishing by default with `site_url=https://news-tldr.com`, `rolling_window_hours=72`, and `publish_dir=/var/www/news-tldr.com`.
+  - `run --no-publish` builds without deploying. Standalone `present --verbose` builds and publishes; `present --build-only` previews `dist/`; `--publish-dir` accepts an absolute override.
+  - Deployment rejects unsafe/broad/relative/symlink destinations and source symlinks. It copies generated assets/pages before `index.html`, uses `.news-tldr-managed.json` to remove only previously managed stale paths, preserves unknown server files, and writes public files as `0644`.
+- **Production state**:
+  - Initial build: **874 generated files**, **433 story pages**, **433 stories in the homepage rolling window**.
+  - Published **874 managed files** plus the deployment manifest to `/var/www/news-tldr.com/`.
+  - HTTPS smoke checks returned **200** for the homepage, a representative story page, and `/api/active-stories.json`; all 875 production files are world-readable.
+- **Tests & verification**:
+  - New `tests/test_present.py` covers rolling-window/detail-page behavior, XSS escaping and URL rejection, CSP/API/sitemap generation, traversal rejection, safe destination validation, unknown-file preservation, stale managed-file cleanup, and public file permissions.
+  - Updated CLI tests cover pipeline ordering, presentation stats/progress, automatic publish defaults, and build-only behavior.
+  - Full suite: `PYTHONPATH=. ./.venv/bin/pytest -q` → **255 passed**.
+  - Linter: `./.venv/bin/ruff check .` → clean.
+  - Patch validation: `git diff --check` → clean.
+- **Files touched**: `pipeline/present.py`, `pipeline/{cli,config,paths}.py`, `config/pipeline.json`, `tests/{test_present,test_cli}.py`, `README.md`, `docs/{design,plan}.md`, and this handoff. `dist/` remains ignored; production output is outside the repository. No dependencies were added.
+- **Not committed.** Source changes from this presentation/publish pass remain in the working tree.
+- **Next steps**:
+  1. Configure the actual hourly scheduler for `./.venv/bin/python -m pipeline.cli run --verbose` when unattended runs are desired; automatic publishing is already part of that command.
+  2. Add monitoring/alerting for failed pipeline stages and production smoke checks.
+  3. Decide whether archived events should retain permanent public pages beyond the current active/stale archive.
+
 ### State on August 24, 2026 (Milestone 3 Editorial Complete)
 
 - **Scope**: Implemented the complete per-event editorial stage, integrated it into the top-level pipeline, evaluated it live with Gemini 3.7 Flash, and published the current 433-event active dataset.
