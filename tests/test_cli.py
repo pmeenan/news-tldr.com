@@ -174,7 +174,7 @@ def test_collect_without_verbose_keeps_stderr_quiet(monkeypatch, capsys):
     assert json.loads(captured.out) == {"feeds_seen": 1}
 
 
-def test_run_completed_pipeline_runs_collect_digest_and_aggregate(monkeypatch):
+def test_run_completed_pipeline_runs_collect_digest_aggregate_and_editorial(monkeypatch):
     calls = []
     lock_events = []
     progress_messages = []
@@ -213,11 +213,18 @@ def test_run_completed_pipeline_runs_collect_digest_and_aggregate(monkeypatch):
         progress("aggregate: fake progress")
         return {"windows_processed": 3}
 
+    def fake_editorial_once(*, force=False, progress=None, acquire_lock=True, **kwargs):
+        assert kwargs == {}
+        calls.append(("editorial", force, progress is not None, acquire_lock))
+        progress("editorial: fake progress")
+        return {"completed": 4}
+
     monkeypatch.setattr("pipeline.cli.PipelineLock", FakePipelineLock)
     monkeypatch.setattr("pipeline.cli.collect_once", fake_collect_once)
     monkeypatch.setattr("pipeline.cli.digest_once", fake_digest_once)
     monkeypatch.setattr("pipeline.cli.maintenance_once", fake_maintenance_once)
     monkeypatch.setattr("pipeline.cli.aggregate_once", fake_aggregate_once)
+    monkeypatch.setattr("pipeline.cli.editorial_once", fake_editorial_once)
     monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
 
     result = run_completed_pipeline(force=True, progress=progress_messages.append)
@@ -227,6 +234,7 @@ def test_run_completed_pipeline_runs_collect_digest_and_aggregate(monkeypatch):
         ("collect", True, False),
         ("digest", True, True, False),
         ("aggregate", True, True, False),
+        ("editorial", True, True, False),
     ]
     assert lock_events == [("init", "pipeline.lock", True), "enter", "exit"]
     assert progress_messages == [
@@ -239,6 +247,8 @@ def test_run_completed_pipeline_runs_collect_digest_and_aggregate(monkeypatch):
         "article digest: fake progress",
         "run: starting aggregate",
         "aggregate: fake progress",
+        "run: starting editorial",
+        "editorial: fake progress",
     ]
     assert result == {
         "force": True,
@@ -247,6 +257,7 @@ def test_run_completed_pipeline_runs_collect_digest_and_aggregate(monkeypatch):
             "collect": {"feeds_seen": 1},
             "digest": {"completed": 2},
             "aggregate": {"windows_processed": 3},
+            "editorial": {"completed": 4},
         },
     }
 
@@ -292,11 +303,20 @@ def test_run_command_writes_progress_and_combined_stats(monkeypatch, capsys):
         progress("aggregate: fake progress")
         return {"windows_processed": 3}
 
+    def fake_editorial_once(*, force=False, progress=None, acquire_lock=True, **kwargs):
+        assert kwargs == {}
+        assert force is True
+        assert progress is not None
+        assert acquire_lock is False
+        progress("editorial: fake progress")
+        return {"completed": 4}
+
     monkeypatch.setattr("pipeline.cli.PipelineLock", FakePipelineLock)
     monkeypatch.setattr("pipeline.cli.collect_once", fake_collect_once)
     monkeypatch.setattr("pipeline.cli.digest_once", fake_digest_once)
     monkeypatch.setattr("pipeline.cli.maintenance_once", fake_maintenance_once)
     monkeypatch.setattr("pipeline.cli.aggregate_once", fake_aggregate_once)
+    monkeypatch.setattr("pipeline.cli.editorial_once", fake_editorial_once)
     monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
     monkeypatch.setattr("sys.argv", ["news-tldr-pipeline", "run", "--verbose", "--force"])
 
@@ -310,6 +330,7 @@ def test_run_command_writes_progress_and_combined_stats(monkeypatch, capsys):
     assert "collect: fake progress" in captured.err
     assert "article digest: fake progress" in captured.err
     assert "aggregate: fake progress" in captured.err
+    assert "editorial: fake progress" in captured.err
     assert json.loads(captured.out) == {
         "force": True,
         "stages": {
@@ -317,8 +338,53 @@ def test_run_command_writes_progress_and_combined_stats(monkeypatch, capsys):
             "collect": {"feeds_seen": 1},
             "digest": {"completed": 2},
             "aggregate": {"windows_processed": 3},
+            "editorial": {"completed": 4},
         },
     }
+
+
+def test_editorial_verbose_passes_selection_and_writes_progress(monkeypatch, capsys):
+    def fake_editorial_once(
+        *,
+        limit=None,
+        concurrency=None,
+        force=False,
+        event_ids=None,
+        progress=None,
+    ):
+        assert limit == 2
+        assert concurrency == 3
+        assert force is True
+        assert event_ids == ["event-1", "event-2"]
+        assert progress is not None
+        progress("editorial: fake progress")
+        return {"completed": 2}
+
+    monkeypatch.setattr("pipeline.cli.editorial_once", fake_editorial_once)
+    monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "news-tldr-pipeline",
+            "editorial",
+            "--limit",
+            "2",
+            "--concurrency",
+            "3",
+            "--event-id",
+            "event-1",
+            "--event-id",
+            "event-2",
+            "--force",
+            "--verbose",
+        ],
+    )
+
+    main()
+
+    captured = capsys.readouterr()
+    assert "editorial: fake progress" in captured.err
+    assert json.loads(captured.out) == {"completed": 2}
 
 
 def test_aggregate_verbose_writes_progress_to_stderr(monkeypatch, capsys):

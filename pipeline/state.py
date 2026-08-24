@@ -664,6 +664,13 @@ class StateDB:
         with self.conn:
             self.conn.execute("DELETE FROM events WHERE event_id = ?", (event_id,))
 
+    def mark_event_editorial_completed(self, event_id: str, generated_at: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE events SET last_editorial_at = ? WHERE event_id = ?",
+                (generated_at, event_id),
+            )
+
     def reassign_event_articles(self, old_event_id: str, new_event_id: str) -> None:
         with self.conn:
             self.conn.execute(

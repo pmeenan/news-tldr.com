@@ -32,6 +32,42 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on August 24, 2026 (Milestone 3 Editorial Complete)
+
+- **Scope**: Implemented the complete per-event editorial stage, integrated it into the top-level pipeline, evaluated it live with Gemini 3.7 Flash, and published the current 433-event active dataset.
+- **Implementation** (`pipeline/editorial.py`):
+  - Incrementally selects active/stale events when `last_editorial_at` is null or older than `events.updated_at`; supports `--force`, `--limit`, repeatable `--event-id`, configurable concurrency, and bounded per-article/per-event context.
+  - Retrieves assigned articles with mandatory `is_filtered = 0`, loads full text or the best retained excerpt/digest fallback, and attaches source-policy bias/reliability metadata.
+  - Runs one structured-output `gemini-3.7-flash` call per event with low thinking. General prompt version is `editorial-v2`; the mixed-source political framing decision uses `editorial-framing-v1`.
+  - Validates headline/dek/TL;DR cardinality, numeric editorial score, all fact/uncertainty citations against the offered article IDs, and political perspective citations against the matching left/right source-policy labels.
+  - Writes `data/published/stories/<event_id>.json` atomically before advancing `events.last_editorial_at`; records LLM usage/errors under stage `editorial`. Per-event failures leave the prior artifact/checkpoint intact.
+  - Computes an auditable importance score from Stage 2 global/category newsworthiness, editorial judgment, freshness, reliability, and distinct source count.
+  - Regenerates `data/published/active-stories.json` from active/stale SQLite event state, excludes archived events, and sorts by importance.
+- **CLI/config integration**:
+  - Added `editorial --verbose [--force] [--limit N] [--concurrency N] [--event-id ID ...]`.
+  - `pipeline.cli run` now executes maintenance → collect → digest → aggregate → editorial under one lock.
+  - Added `editorial.concurrency=8`, `article_char_limit=12000`, and `event_char_limit=60000` to `config/pipeline.json`.
+- **Live evaluation**:
+  - Initial three-story evaluation covered a high-impact 11-article event, a politically eligible six-source event, and a singleton. Citations and uncertainty handling were strong; a sentence-case instruction was added as `editorial-v2` after headline title-case drift.
+  - The first full pass completed 386/433 and isolated 47 Gemini high-demand 503s. Incremental cleanup completed 41/47, then 6/6 at concurrency 1 without regenerating successful stories.
+  - An explicit framing-decision evaluation regenerated the five mixed-left/right eligible events. Two surfaced meaningful framing (Trump/Kim diplomacy and the Iryna Zarutska lawsuit); three correctly returned null, including a straight judicial ruling and nonpolitical disaster coverage.
+- **Final live state**:
+  - **433/433** active events have story JSON and non-null editorial checkpoints; `active-stories.json` contains **433** entries; no missing or orphan artifacts.
+  - Current story prompt metadata: **428** `editorial-v2`, **5** `editorial-framing-v1`, all on `gemini-3.7-flash`.
+  - Corpus audit found **0** citation, source-set, filtered-article, framing-side, metadata, parity, or index-ordering errors. SQLite `quick_check` is `ok`.
+  - Importance range: 0.2855–0.9675. Category counts exactly match the 433 active events.
+- **Tests & verification**:
+  - Added `tests/test_editorial.py` coverage for incremental/forced selection, archived exclusion, citation rejection, normalization, balanced framing validation, prompt gating, importance audit data, persistence/checkpoints/usage, filtered-article exclusion, and index behavior.
+  - Targeted editorial/CLI/state tests: **37 passed**.
+  - Full suite: `PYTHONPATH=. ./.venv/bin/pytest -q` → **249 passed**.
+  - Linter: `./.venv/bin/ruff check .` → clean.
+  - Patch validation: `git diff --check` → clean.
+- **Files touched**: `pipeline/editorial.py`, `pipeline/{cli,config,paths,state}.py`, `config/pipeline.json`, `tests/{test_editorial,test_cli}.py`, `README.md`, `docs/{design,plan}.md`, and this handoff. Published JSON and SQLite runtime state are ignored local data.
+- **Next steps**:
+  1. Begin Milestone 4 Presentation using `data/published/active-stories.json` and `data/published/stories/*.json` as the artifact contract.
+  2. Add prompt-version-aware automatic editorial refresh if future prompt migrations should not require `editorial --force`.
+  3. Consider a later cost/quality evaluation of 3.5 draft + selective 3.7 editorial review; current 3.7 output quality is good, but transient high-demand 503s required cleanup passes.
+
 ### State on August 24, 2026 (Gemini 3.5/3.7 Upgrade and Full Dataset Refresh)
 
 - **Scope**: Upgraded the hosted LLM stack, evaluated a selective stronger-model second pass, hardened live collection/retry behavior, aligned pipeline lookbacks with retention, and refreshed the complete retained dataset so Milestone 3 can start from current data.

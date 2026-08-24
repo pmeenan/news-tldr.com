@@ -550,6 +550,8 @@ When political framing is present:
       "headline": "Talks resume after overnight strikes",
       "importance_score": 0.82,
       "source_count": 5,
+      "event_created_at": "2026-05-24T12:45:00Z",
+      "event_updated_at": "2026-05-24T18:30:00Z",
       "created_at": "2026-05-24T15:00:00Z",
       "updated_at": "2026-05-24T19:00:00Z"
     }
@@ -557,7 +559,39 @@ When political framing is present:
 }
 ```
 
-The presentation layer reads this index to decide which stories to render and how to order them, then reads individual story JSON files for full content. The presentation layer owns the time window (e.g., "last 24 hours", "last 48 hours") and filtering logic.
+The presentation layer reads this index to decide which stories to render and how to order them, then reads individual story JSON files for full content. The presentation layer owns the time window (e.g., "last 24 hours", "last 48 hours") and filtering logic. Rolling news windows use `event_updated_at`; story `created_at`/`updated_at` describe editorial artifact generation and must not make an old event appear newly reported after a forced regeneration.
+
+### Stage 3 Implementation
+
+The editorial implementation lives in `pipeline/editorial.py` and is exposed by
+`./.venv/bin/python -m pipeline.cli editorial`. Normal runs select active or stale
+events whose `updated_at` is newer than `last_editorial_at`; `--force` regenerates
+unchanged stories, `--limit` bounds an evaluation batch, and repeatable
+`--event-id` arguments select exact events. The top-level `run` command invokes
+editorial after aggregation while retaining the shared pipeline lock.
+
+Each event is one `gemini-3.7-flash` structured-output call using prompt version
+`editorial-v2` and low thinking. Politically eligible mixed-source events use the
+explicit framing-decision variant `editorial-framing-v1`. Article context is bounded per article and per
+event by `config/pipeline.json`, while all source records remain available for
+citation. The article query always requires `is_filtered = 0`. Generated key
+facts and uncertainties must cite at least one article ID offered in that call;
+unknown IDs fail validation rather than reaching published JSON.
+
+Political framing is eligible only for `politics`, `us`, or `world` events that
+contain both a left/center-left and a right/center-right source according to
+`config/source-policy.json`. Those calls must return an explicit framing-presence
+decision; meaningful divergence is still required and the section may be omitted.
+Deterministic validation restricts each
+perspective's citations to the matching source-policy side.
+
+Importance is an auditable weighted score combining Stage 2 global (50%) and
+category (15%) newsworthiness, editorial judgment (15%), freshness (10%), source
+quality (5%), and distinct source count (5%). Components and audit signals are
+stored with the score. Story files are written atomically before the event's
+`last_editorial_at` checkpoint advances. Per-event failures are logged and remain
+eligible for the next incremental run. The active index includes story artifacts
+for both active and stale events, ranked by importance; archived events are omitted.
 
 ## Stage 4: Presentation
 

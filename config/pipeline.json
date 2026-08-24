@@ -24,6 +24,11 @@
     "filter_review_enabled": true,
     "filter_review_margin": 0.1
   },
+  "editorial": {
+    "concurrency": 8,
+    "article_char_limit": 12000,
+    "event_char_limit": 60000
+  },
   "retention": {
     "staging_article_days": 3,
     "archived_event_days": 30

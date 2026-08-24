@@ -18,6 +18,7 @@ from pipeline.aggregate import (
 from pipeline.collect import collect_once
 from pipeline.config import load_feeds, load_pipeline_config
 from pipeline.digest import digest_once
+from pipeline.editorial import editorial_once
 from pipeline.lock import PipelineLock
 from pipeline.maintenance import maintenance_once
 from pipeline.paths import ARTICLE_DIR, DATA_DIR, DB_PATH, FETCH_LOG_DIR, LOCK_PATH
@@ -118,6 +119,11 @@ def run_completed_pipeline(*, force: bool = False, progress=None) -> dict[str, o
         migrate()
         aggregate_stats = aggregate_once(force=force, progress=progress, acquire_lock=False)
 
+        if progress:
+            progress("run: starting editorial")
+        migrate()
+        editorial_stats = editorial_once(force=force, progress=progress, acquire_lock=False)
+
     return {
         "force": force,
         "stages": {
@@ -125,6 +131,7 @@ def run_completed_pipeline(*, force: bool = False, progress=None) -> dict[str, o
             "collect": collect_stats,
             "digest": digest_stats,
             "aggregate": aggregate_stats,
+            "editorial": editorial_stats,
         },
     }
 
@@ -133,7 +140,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="news-tldr-pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db", help="Initialize or migrate the SQLite state database.")
-    run_parser = sub.add_parser("run", help="Run completed pipeline stages: maintenance, collect, digest, aggregate.")
+    run_parser = sub.add_parser(
+        "run",
+        help="Run completed pipeline stages: maintenance, collect, digest, aggregate, editorial.",
+    )
     run_parser.add_argument(
         "--force",
         action="store_true",
@@ -168,6 +178,21 @@ def main() -> None:
         help="Regenerate digests even when an article already has the current digest prompt version.",
     )
     digest_stage_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
+    editorial_parser = sub.add_parser("editorial", help="Run stage 3 editorial story generation.")
+    editorial_parser.add_argument("--limit", type=int, help="Maximum number of events to publish.")
+    editorial_parser.add_argument("--concurrency", type=int, help="Number of parallel per-event LLM calls.")
+    editorial_parser.add_argument(
+        "--event-id",
+        action="append",
+        dest="event_ids",
+        help="Publish only this event ID; may be repeated.",
+    )
+    editorial_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate stories even when events have not changed.",
+    )
+    editorial_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     maintenance_parser = sub.add_parser(
         "maintenance",
         help="Run retention cleanup, event lifecycle updates, and artifact reconciliation.",
@@ -255,6 +280,21 @@ def main() -> None:
             limit=args.limit,
             concurrency=args.concurrency,
             force=args.force,
+            progress=progress,
+        )
+        print(json.dumps(stats, indent=2, sort_keys=True))
+    elif args.command == "editorial":
+        progress = _stderr_progress if args.verbose else None
+        if args.limit is not None and args.limit < 1:
+            parser.error("--limit must be at least 1")
+        if args.concurrency is not None and args.concurrency < 1:
+            parser.error("--concurrency must be at least 1")
+        migrate()
+        stats = editorial_once(
+            limit=args.limit,
+            concurrency=args.concurrency,
+            force=args.force,
+            event_ids=args.event_ids,
             progress=progress,
         )
         print(json.dumps(stats, indent=2, sort_keys=True))

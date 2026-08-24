@@ -146,17 +146,17 @@ gantt
 - [x] Add deterministic post-validation grouping guardrails: split weakly connected headline groups, only preserve `existing_event_id` on matching components, treat null-like existing-event values as absent, and evaluate duplicate event candidates using article-headline similarity.
 - [x] Parallelize aggregation LLM work safely: category batches within a window run concurrently, dedupe prescreen chunks and disjoint candidate-pair reviews run concurrently, and SQLite/event-file mutations remain serialized in deterministic order. Oversized dedupe prescreen batches repeat high-article-count anchor events across chunks, and `news_business` adds a parent-level cross-category prescreen so business/market reaction stories can still merge with the underlying world/U.S. event.
 
-### [ ] Milestone 3: Editorial
+### [x] Milestone 3: Editorial
 
-- [ ] Implement state database query for events with new articles since last editorial run.
-- [ ] Design per-event LLM prompt for neutral TL;DR generation with full article context.
-- [ ] Generate story JSON from event article groups (one LLM call per event).
-- [ ] Include source references for each key fact and uncertainty.
-- [ ] Implement political framing extraction for clearly political events (left/right perspectives with source attribution).
-- [ ] Refine story importance ranking using Stage 2 newsworthiness, source count, freshness, source quality, category, and editorial judgment.
-- [ ] Write/update story JSON files with `llm_metadata` (model, prompt version, timestamp, input references).
-- [ ] Generate `data/published/active-stories.json` index.
-- [ ] Add tests for schema validation, citation coverage, and framing extraction.
+- [x] Implement state database query for events with new articles since last editorial run.
+- [x] Design per-event LLM prompt for neutral TL;DR generation with bounded full-article context.
+- [x] Generate story JSON from event article groups (one Gemini 3.7 Flash call per event).
+- [x] Include validated source references for each key fact and uncertainty.
+- [x] Implement political framing extraction for clearly political events, gated on both meaningful divergence and left/right source-policy coverage.
+- [x] Refine story importance ranking using Stage 2 newsworthiness, source count, freshness, source quality, and editorial judgment.
+- [x] Write/update story JSON files with `llm_metadata` (model, prompt version, timestamp, event input version).
+- [x] Generate `data/published/active-stories.json` index for active and stale stories.
+- [x] Add tests for schema validation, citation coverage, filtered-article exclusion, framing extraction, incremental selection, persistence, and index generation.
 
 ### [ ] Milestone 4: Presentation
 

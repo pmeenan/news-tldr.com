@@ -72,14 +72,14 @@ Run stage 1 data collection:
 ```
 
 Run the completed pipeline stages in order (`maintenance`, `collect`, `digest`,
-then `aggregate`). This holds the shared pipeline lock for the full duration of
+`aggregate`, then `editorial`). This holds the shared pipeline lock for the full duration of
 the run, so scheduled invocations do not interleave with each other or with
 individual stage commands:
 ```bash
 ./.venv/bin/python -m pipeline.cli run --verbose
 ```
 
-Force stages that support forced recomputation (`digest` and `aggregate`) while
+Force stages that support forced recomputation (`digest`, `aggregate`, and `editorial`) while
 running the completed pipeline:
 ```bash
 ./.venv/bin/python -m pipeline.cli run --verbose --force
@@ -129,6 +129,19 @@ event assignments/filter decisions in the planned window coverage, and rerun
 those windows even if they were already marked completed:
 ```bash
 ./.venv/bin/python -m pipeline.cli aggregate --verbose --force
+```
+
+Run stage 3 editorial generation. Editorial uses one Gemini 3.7 Flash call per
+changed active/stale event, validates source citations, writes
+`data/published/stories/<event_id>.json`, and regenerates the active story index:
+```bash
+./.venv/bin/python -m pipeline.cli editorial --verbose
+```
+
+Use `--force` to regenerate unchanged stories, `--limit` for a controlled batch,
+or repeat `--event-id <id>` to evaluate specific events:
+```bash
+./.venv/bin/python -m pipeline.cli editorial --verbose --limit 10
 ```
 
 Remove the local generated SQLite state, staged articles, event files, published files, and fetch logs:
