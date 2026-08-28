@@ -576,6 +576,46 @@ def _validate_active_index(
         if previous_rank is not None and rank > previous_rank + 1e-9:
             report(path, "stories are not sorted by descending homepage rank")
         previous_rank = rank
+    curation = data.get("curation")
+    if curation is not None:
+        if not isinstance(curation, dict):
+            report(path, "curation must be an object")
+        else:
+            for field in ("prompt_version", "model", "generated_at"):
+                if not isinstance(curation.get(field), str) or not curation[field].strip():
+                    report(path, f"curation {field} must be a non-empty string")
+            top_news = curation.get("top_news")
+            if not isinstance(top_news, list):
+                report(path, "curation top_news must be a list")
+            else:
+                top_seen: set[str] = set()
+                for story_id in top_news:
+                    if not isinstance(story_id, str) or story_id not in seen:
+                        report(path, f"curation top_news references unknown story: {story_id}")
+                    elif story_id in top_seen:
+                        report(path, f"curation top_news repeats story: {story_id}")
+                    top_seen.add(str(story_id))
+            sections = curation.get("sections")
+            if not isinstance(sections, list):
+                report(path, "curation sections must be a list")
+            else:
+                assigned: set[str] = set()
+                for section in sections:
+                    if not isinstance(section, dict):
+                        report(path, "curation section rows must be objects")
+                        continue
+                    if not isinstance(section.get("title"), str) or not section["title"].strip():
+                        report(path, "curation section title must be a non-empty string")
+                    story_ids = section.get("story_ids")
+                    if not isinstance(story_ids, list) or len(story_ids) < 2:
+                        report(path, "curation section story_ids must contain at least two stories")
+                        continue
+                    for story_id in story_ids:
+                        if not isinstance(story_id, str) or story_id not in seen:
+                            report(path, f"curation section references unknown story: {story_id}")
+                        elif story_id in assigned:
+                            report(path, f"curation assigns story to multiple sections: {story_id}")
+                        assigned.add(str(story_id))
     return len(rows), seen
 
 

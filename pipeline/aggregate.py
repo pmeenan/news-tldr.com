@@ -3648,6 +3648,7 @@ def _deduplicate_active_events_llm_pass(
         article_headlines_by_event.setdefault(row["event_id"], []).append(row["headline"])
 
     candidate_pairs: set[frozenset[str]] = set()
+    candidate_priorities: dict[frozenset[str], int] = {}
     events_by_id = {event["event_id"]: event for event in events}
 
     # Heuristic candidates: slug match, title overlap, title cohesion,
@@ -3673,7 +3674,12 @@ def _deduplicate_active_events_llm_pass(
                     article_headlines_by_event,
                 )
             if slug_match or title_match or title_cohesion_match or headline_match:
-                candidate_pairs.add(frozenset((e1["event_id"], e2["event_id"])))
+                pair = frozenset((e1["event_id"], e2["event_id"]))
+                candidate_pairs.add(pair)
+                candidate_priorities[pair] = max(
+                    candidate_priorities.get(pair, 0),
+                    4 if slug_match or title_match else 3,
+                )
     heuristic_count = len(candidate_pairs)
 
     # Keyword-overlap candidates + LLM pre-screen are scoped to category-group
@@ -3704,6 +3710,7 @@ def _deduplicate_active_events_llm_pass(
             if pair not in candidate_pairs:
                 candidate_pairs.add(pair)
                 keyword_added += 1
+            candidate_priorities[pair] = max(candidate_priorities.get(pair, 0), 2)
         prescreen_specs.extend(
             _prescreen_chunk_specs_for_events(
                 batch_events,
@@ -3746,6 +3753,7 @@ def _deduplicate_active_events_llm_pass(
         if pair not in candidate_pairs:
             candidate_pairs.add(pair)
             prescreen_added += 1
+        candidate_priorities[pair] = max(candidate_priorities.get(pair, 0), 1)
 
     if not candidate_pairs:
         return 0
@@ -3759,13 +3767,10 @@ def _deduplicate_active_events_llm_pass(
 
     candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
     cached_count = 0
-    ordered_pairs = sorted(
+    ordered_pairs = _ordered_deduplication_candidate_pairs(
         candidate_pairs,
-        key=lambda pair: (
-            max(events_by_id[event_id]["updated_at"] for event_id in pair),
-            tuple(sorted(pair)),
-        ),
-        reverse=True,
+        candidate_priorities=candidate_priorities,
+        events_by_id=events_by_id,
     )
     adjudicator = review_client or client
     is_second_pass_review = adjudicator is not client or adjudicator.model != client.model
@@ -3820,3 +3825,20 @@ def _deduplicate_active_events_llm_pass(
     if progress and merges_count > 0:
         progress(f"deduplicate: completed merging {merges_count} event(s)")
     return merges_count
+
+
+def _ordered_deduplication_candidate_pairs(
+    candidate_pairs: Sequence[frozenset[str]],
+    *,
+    candidate_priorities: dict[frozenset[str], int],
+    events_by_id: dict[str, dict[str, Any]],
+) -> list[frozenset[str]]:
+    return sorted(
+        candidate_pairs,
+        key=lambda pair: (
+            candidate_priorities.get(pair, 0),
+            max(events_by_id[event_id]["updated_at"] for event_id in pair),
+            tuple(sorted(pair)),
+        ),
+        reverse=True,
+    )

@@ -9,7 +9,7 @@ news-tldr.com is a filesystem-backed RSS aggregator that parses web feeds, extra
 ## Key Features
 
 - **RSS/Atom Feed Parsing**: Periodic updates of subscribed sources.
-- **Lead Image Capture**: Download of supported article images as sidecar files next to staged article JSON.
+- **Text-Only Collection**: Article feeds and page text are retained without downloading publisher image assets.
 - **Filesystem Pipeline**: JSON artifacts and a SQLite state database connect collection, aggregation, editorial, and presentation stages without a server runtime.
 - **AI-Powered Summaries**: Automatic generation of brief, sourced summaries across multiple articles covering the same event.
 - **Static Presentation**: A dependency-free Python renderer builds the reader interface from editorial JSON and publishes it without a server runtime.
@@ -198,17 +198,36 @@ homepage before its referenced pages and assets are present.
 The homepage ranks the All view by fresh global impact and re-ranks each category
 by fresh category impact. Its global New/All control defaults to New and saves
 the reader's choice in local storage across visits and category sections.
-Stories that are at least half-visible for 10 seconds are remembered for three
-days and hidden on later visits in New mode. No reading history leaves the
-browser. The combined view uses quiet category-family tints whose depth tracks
-source count; focused categories retain the neutral white/tan card treatment.
+The category selector and Latest Briefing controls remain together in a sticky
+toolbar while stories scroll beneath them. Changing categories returns the
+reader to the top of the page, with reduced-motion preferences respected.
+An independent Sources control defaults to Top, showing only stories with at
+least two distinct sources; All restores every story in the rolling window.
+That preference is also device-local, and the non-default All state is reflected
+as `coverage=all` in the URL.
+Stories are marked read after their title remains visible for one second, retain
+a subtle read indicator, and are remembered for three days. New mode re-applies
+that local history whenever the reader changes category or view; a header action
+marks every currently visible story read. No reading history leaves the browser.
+An editorial curation pass selects up to 12 distinct Top News stories and groups
+related story cards under specific topic headings, leaving unmatched cards under
+Everything Else. On mobile, every section is collapsed to its heading by default;
+the heading toggles that section and an Expand All/Collapse All action controls
+the current set of sections. Top News remains visible within focused category
+views when a curated story belongs to that category. Topic sections are ordered
+by recent coverage breadth, normalized against the active source pool for each
+category, with a capped boost for multiple story angles from one publisher and
+an editorial-importance adjustment. The combined view uses quiet category-family
+tints whose depth tracks source count; focused categories retain the neutral
+white/tan card treatment.
 
 Generated pages carry `noindex` metadata, and `robots.txt` blocks major search
 index crawlers while leaving ordinary/social-preview access allowed. The home,
 archive, and story pages publish complete Open Graph and X card metadata with a
 same-origin 1200×630 branded poster; story shares retain their own headline and
-description. The homepage freshness line labels the generated timestamp as
-`Updated`.
+description. The homepage status line stays compact by showing the visible
+count and a client-calculated relative generation time that refreshes every
+minute.
 
 ### Operations and Monitoring
 

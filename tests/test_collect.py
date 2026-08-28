@@ -155,7 +155,9 @@ async def test_collects_feed_entry_to_article_json(tmp_path, monkeypatch):
     assert source_stats["feed_http_status"] == 200
     assert source_stats["entries_seen"] == 1
     assert source_stats["articles_written"] == 1
-    assert source_stats["images_skipped"] == 1
+    assert source_stats["images_fetched"] == 0
+    assert source_stats["images_skipped"] == 0
+    assert source_stats["images_failed"] == 0
     assert source_stats["error_count"] == 0
     assert article_dir.glob("*")
     assert list(article_dir.rglob("*.json"))
@@ -251,24 +253,6 @@ def test_extract_article_text_keeps_longer_feed_content(monkeypatch):
     assert mode is None
 
 
-def test_entry_image_candidates_from_media_and_html():
-    from pipeline.collect import _entry_image_candidates
-
-    entry = {
-        "media_thumbnail": [{"url": "https://example.test/thumb.jpg", "width": "300", "height": "200"}],
-        "media_content": [{"url": "https://example.test/full.jpg", "medium": "image", "width": "1200"}],
-        "summary": '<p><img src="/inline.png"></p>',
-    }
-
-    candidates = _entry_image_candidates(entry, "https://example.test/story")
-
-    assert [candidate["url"] for candidate in candidates] == [
-        "https://example.test/full.jpg",
-        "https://example.test/thumb.jpg",
-        "https://example.test/inline.png",
-    ]
-
-
 @pytest.mark.asyncio
 async def test_collect_bypasses_robots_for_configured_feed(tmp_path, monkeypatch):
     db_path = tmp_path / "pipeline.db"
@@ -311,7 +295,7 @@ async def test_collect_bypasses_robots_for_configured_feed(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_collects_feed_image_next_to_article_json(tmp_path, monkeypatch):
+async def test_collect_ignores_feed_image_without_downloading(tmp_path, monkeypatch):
     db_path = tmp_path / "pipeline.db"
     article_dir = tmp_path / "articles"
     log_dir = tmp_path / "fetch-log"
@@ -322,15 +306,17 @@ async def test_collects_feed_image_next_to_article_json(tmp_path, monkeypatch):
     async def fake_validate(url: str) -> ResolvedURL:
         return ResolvedURL(url=url, hostname=httpx.URL(url).host or "example.test", port=443, ips=("93.184.216.34",))
 
-    image_bytes = b"\xff\xd8\xfffixture-image"
+    image_requested = False
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal image_requested
         if request.url.path == "/robots.txt":
             return httpx.Response(404)
         if request.url.path == "/feed.xml":
             return httpx.Response(200, content=IMAGE_FEED_XML)
         if request.url.path == "/images/story.jpg":
-            return httpx.Response(200, content=image_bytes, headers={"content-type": "image/jpeg"})
+            image_requested = True
+            return httpx.Response(500)
         return httpx.Response(404)
 
     monkeypatch.setattr("pipeline.http_client.validate_url", fake_validate)
@@ -355,11 +341,12 @@ async def test_collects_feed_image_next_to_article_json(tmp_path, monkeypatch):
     article = json.loads(article_path.read_text(encoding="utf-8"))
 
     assert stats["articles_written"] == 1
-    assert stats["images_fetched"] == 1
-    assert image_path.read_bytes() == image_bytes
-    assert article["image"]["path"].endswith(f"{article_path.stem}.jpg")
-    assert article["image"]["url"] == "https://example.test/images/story.jpg"
-    assert "_image_candidates" not in article
+    assert stats["images_fetched"] == 0
+    assert stats["images_skipped"] == 0
+    assert stats["images_failed"] == 0
+    assert not image_requested
+    assert not image_path.exists()
+    assert "image" not in article
 
 
 @pytest.mark.asyncio
@@ -731,15 +718,11 @@ async def test_collect_unlinks_files_if_db_insert_fails(tmp_path, monkeypatch):
     async def fake_validate(url: str) -> ResolvedURL:
         return ResolvedURL(url=url, hostname=httpx.URL(url).host or "example.test", port=443, ips=("93.184.216.34",))
 
-    image_bytes = b"\xff\xd8\xfffixture-image"
-
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
             return httpx.Response(404)
         if request.url.path == "/feed.xml":
             return httpx.Response(200, content=IMAGE_FEED_XML)
-        if request.url.path == "/images/story.jpg":
-            return httpx.Response(200, content=image_bytes, headers={"content-type": "image/jpeg"})
         return httpx.Response(404)
 
     monkeypatch.setattr("pipeline.http_client.validate_url", fake_validate)
@@ -949,7 +932,7 @@ async def test_watchdog_reports_active_tasks_on_inactivity(monkeypatch):
     collector = Collector(None, None, [], run_id="test-run", progress=progress_messages.append)
 
     collector._register_task("feed:mock-feed")
-    collector._register_task("image:mock-feed:http://example.com/img.jpg")
+    collector._register_task("article:mock-feed:http://example.com/story")
 
     collector.last_activity_time = time.time() - 35
 
@@ -970,7 +953,7 @@ async def test_watchdog_reports_active_tasks_on_inactivity(monkeypatch):
 
     assert any("watchdog: no output for 30s. pending operations:" in msg for msg in progress_messages)
     assert any("feed:mock-feed" in msg for msg in progress_messages)
-    assert any("image:mock-feed:http://example.com/img.jpg" in msg for msg in progress_messages)
+    assert any("article:mock-feed:http://example.com/story" in msg for msg in progress_messages)
 
 
 @pytest.mark.asyncio
@@ -1049,185 +1032,6 @@ async def test_collect_skips_fetch_if_db_identity_matches(tmp_path, monkeypatch)
     assert stats["articles_skipped"] == 1
     assert stats["articles_written"] == 0
     assert not article_fetched
-
-
-def test_is_supported_image_url():
-    from pipeline.collect import _is_supported_image_url
-
-    assert _is_supported_image_url("https://example.test/img.jpg") is True
-    assert _is_supported_image_url("https://example.test/img.JPEG") is True
-    assert _is_supported_image_url("https://example.test/img.png?w=200") is True
-    assert _is_supported_image_url("https://example.test/dynamic-img") is True
-    assert _is_supported_image_url("https://example.test/vector.svg") is False
-    assert _is_supported_image_url("https://example.test/vector.svg?w=200") is False
-    assert _is_supported_image_url("https://example.test/favicon.ico") is False
-    assert _is_supported_image_url("https://example.test/doc.pdf") is False
-
-
-@pytest.mark.asyncio
-async def test_fetch_article_image_no_fallback_on_primary_failure(tmp_path, monkeypatch):
-    db_path = tmp_path / "pipeline.db"
-    migrate(db_path)
-
-    requested_urls = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requested_urls.append(str(request.url))
-        if "robots.txt" in request.url.path:
-            return httpx.Response(404)
-        if "fail.jpg" in request.url.path:
-            return httpx.Response(403)
-        if "success.jpg" in request.url.path:
-            return httpx.Response(200, content=b"\xff\xd8\xfffixture", headers={"content-type": "image/jpeg"})
-        return httpx.Response(404)
-
-    async def fake_validate(url: str) -> ResolvedURL:
-        return ResolvedURL(url=url, hostname="example.test", port=443, ips=("93.184.216.34",))
-
-    monkeypatch.setattr("pipeline.http_client.validate_url", fake_validate)
-
-    candidates = [
-        {"url": "https://example.test/fail.jpg", "source": "entry_image"},
-        {"url": "https://example.test/success.jpg", "source": "media_content"},
-    ]
-
-    article = {"source_id": "test-feed", "article_id": "test-art"}
-    article_path = tmp_path / "test-art.json"
-
-    async with PoliteHTTPClient(rate_limit_seconds=0, max_retries=0, transport=httpx.MockTransport(handler)) as client:
-        with StateDB(db_path) as state:
-            collector = Collector(state, client, [], run_id="test-run")
-            res = await collector._fetch_article_image(candidates, article, article_path)
-
-    assert res is None
-    assert "https://example.test/fail.jpg" in requested_urls
-    assert "https://example.test/success.jpg" not in requested_urls
-
-
-@pytest.mark.asyncio
-async def test_fetch_article_image_falls_back_on_non_primary_failure(tmp_path, monkeypatch):
-    db_path = tmp_path / "pipeline.db"
-    migrate(db_path)
-
-    requested_urls = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requested_urls.append(str(request.url))
-        if "robots.txt" in request.url.path:
-            return httpx.Response(404)
-        if "fail.jpg" in request.url.path:
-            return httpx.Response(403)
-        if "success.jpg" in request.url.path:
-            return httpx.Response(200, content=b"\xff\xd8\xfffixture", headers={"content-type": "image/jpeg"})
-        return httpx.Response(404)
-
-    async def fake_validate(url: str) -> ResolvedURL:
-        return ResolvedURL(url=url, hostname="example.test", port=443, ips=("93.184.216.34",))
-
-    monkeypatch.setattr("pipeline.http_client.validate_url", fake_validate)
-
-    candidates = [
-        {"url": "https://example.test/fail.jpg", "source": "html_img"},
-        {"url": "https://example.test/success.jpg", "source": "html_img"},
-    ]
-
-    article = {"source_id": "test-feed", "article_id": "test-art"}
-    article_path = tmp_path / "test-art.json"
-
-    async with PoliteHTTPClient(rate_limit_seconds=0, max_retries=0, transport=httpx.MockTransport(handler)) as client:
-        with StateDB(db_path) as state:
-            collector = Collector(state, client, [], run_id="test-run")
-            res = await collector._fetch_article_image(candidates, article, article_path)
-
-    assert res is not None
-    assert res["url"] == "https://example.test/success.jpg"
-    assert "https://example.test/fail.jpg" in requested_urls
-    assert "https://example.test/success.jpg" in requested_urls
-
-
-@pytest.mark.asyncio
-async def test_fetch_article_image_disables_origin_after_three_failures(tmp_path, monkeypatch):
-    db_path = tmp_path / "pipeline.db"
-    migrate(db_path)
-
-    requested_urls = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requested_urls.append(str(request.url))
-        if "robots.txt" in request.url.path:
-            return httpx.Response(404)
-        return httpx.Response(403)
-
-    async def fake_validate(url: str) -> ResolvedURL:
-        return ResolvedURL(url=url, hostname="example.test", port=443, ips=("93.184.216.34",))
-
-    monkeypatch.setattr("pipeline.http_client.validate_url", fake_validate)
-
-    article = {"source_id": "test-feed", "article_id": "test-art"}
-    article_path = tmp_path / "test-art.json"
-
-    async with PoliteHTTPClient(rate_limit_seconds=0, max_retries=0, transport=httpx.MockTransport(handler)) as client:
-        with StateDB(db_path) as state:
-            collector = Collector(state, client, [], run_id="test-run")
-
-            for image_url in (
-                "https://example.test/img1.jpg",
-                "https://example.test/img2.jpg",
-                "https://example.test/img3.jpg",
-            ):
-                await collector._fetch_article_image(
-                    [{"url": image_url, "source": "html_img"}],
-                    article,
-                    article_path,
-                )
-
-            assert "https://example.test" in collector.disabled_image_origins
-
-            await collector._fetch_article_image(
-                [{"url": "https://example.test/img4.jpg", "source": "html_img"}],
-                article,
-                article_path,
-            )
-
-    assert len(requested_urls) == 3
-    assert "https://example.test/img4.jpg" not in requested_urls
-
-
-def test_best_srcset_url_selects_widest_w_descriptor():
-    from pipeline.collect import _best_srcset_url
-
-    srcset = "small.jpg 320w, medium.jpg 640w, large.jpg 1280w"
-    assert _best_srcset_url(srcset) == "large.jpg"
-
-
-def test_best_srcset_url_selects_highest_density():
-    from pipeline.collect import _best_srcset_url
-
-    srcset = "img@1x.jpg 1x, img@2x.jpg 2x, img@3x.jpg 3x"
-    assert _best_srcset_url(srcset) == "img@3x.jpg"
-
-
-def test_best_srcset_url_handles_missing_descriptor():
-    from pipeline.collect import _best_srcset_url
-
-    assert _best_srcset_url("solo.jpg") == "solo.jpg"
-
-
-def test_best_srcset_url_handles_malformed_descriptor():
-    # Malformed descriptors fall back to score 0 silently; the last entry with
-    # score >= 0 wins because the comparison uses >=.
-    from pipeline.collect import _best_srcset_url
-
-    srcset = "first.jpg garbage, second.jpg also-bad"
-    assert _best_srcset_url(srcset) == "second.jpg"
-
-
-def test_best_srcset_url_returns_none_for_empty():
-    from pipeline.collect import _best_srcset_url
-
-    assert _best_srcset_url(None) is None
-    assert _best_srcset_url("") is None
-    assert _best_srcset_url("   ") is None
 
 
 def _insert_minimal_article(state: StateDB, **overrides) -> str:
@@ -1369,14 +1173,6 @@ def test_find_article_returns_none_when_no_match(tmp_path):
             )
             is None
         )
-
-
-def test_best_srcset_url_picks_w_over_smaller_x():
-    from pipeline.collect import _best_srcset_url
-
-    # 2x -> score 2000; 1500w -> score 1500. The x-descriptor wins.
-    srcset = "wide.jpg 1500w, retina.jpg 2x"
-    assert _best_srcset_url(srcset) == "retina.jpg"
 
 
 def _install_collect_once_fakes(

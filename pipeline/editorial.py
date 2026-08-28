@@ -23,8 +23,16 @@ EDITORIAL_PROMPT_VERSION = "editorial-v2"
 EDITORIAL_FRAMING_PROMPT_VERSION = "editorial-framing-v1"
 EDITORIAL_COMPACT_PROMPT_VERSION = "editorial-v2-compact"
 EDITORIAL_FRAMING_COMPACT_PROMPT_VERSION = "editorial-framing-v1-compact"
+HOMEPAGE_CURATION_PROMPT_VERSION = "homepage-curation-v4"
 DEFAULT_ARTICLE_CHAR_LIMIT = 12_000
 DEFAULT_EVENT_CHAR_LIMIT = 60_000
+DEFAULT_CURATION_TOP_STORIES = 12
+DEFAULT_CURATION_MAX_SECTIONS = 180
+DEFAULT_CURATION_MAX_SECTIONS_PER_CATEGORY = 12
+DEFAULT_CURATION_TOP_CANDIDATES = 150
+DEFAULT_CURATION_STORIES_PER_SECTION_CALL = 100
+CURATION_COVERAGE_WINDOW_HOURS = 24
+CURATION_EDITORIAL_WEIGHT = 10.0
 POLITICAL_CATEGORIES = frozenset({"politics", "us", "world"})
 LEFT_BIAS_LABELS = frozenset({"left", "center-left"})
 RIGHT_BIAS_LABELS = frozenset({"right", "center-right"})
@@ -129,6 +137,9 @@ def editorial_once(
                     state=state,
                     story_dir=story_dir,
                     output_path=active_stories_path,
+                    curation_client=generator,
+                    run_id=run_id,
+                    progress=progress,
                 )
                 stats.update(index_stats)
                 if stats.get("failed"):
@@ -813,8 +824,15 @@ def write_active_stories_index(
     state: StateDB,
     story_dir: Path = STORY_DIR,
     output_path: Path = ACTIVE_STORIES_PATH,
+    curation_client: JsonGenerator | None = None,
+    run_id: str | None = None,
+    progress: Callable[[str], None] | None = None,
+    generated_at: datetime | None = None,
 ) -> dict[str, Any]:
-    generated_at = datetime.now(UTC)
+    generated_at = generated_at or datetime.now(UTC)
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=UTC)
+    generated_at = generated_at.astimezone(UTC)
     rows = state.conn.execute(
         """
         SELECT event_id, status, created_at AS event_created_at, updated_at AS event_updated_at
@@ -824,18 +842,18 @@ def write_active_stories_index(
         """
     ).fetchall()
     stories: list[dict[str, Any]] = []
+    story_details: dict[str, dict[str, Any]] = {}
+    story_source_names: dict[str, set[str]] = {}
     missing = 0
     for row in rows:
         story = _read_json(story_dir / f"{row['event_id']}.json")
         if story is None:
             missing += 1
             continue
+        story_details[row["event_id"]] = story
         sources = story.get("sources") if isinstance(story.get("sources"), list) else []
-        distinct_source_names = {
-            str(source.get("source_name"))
-            for source in sources
-            if isinstance(source, dict) and source.get("source_name")
-        }
+        source_metrics, source_names = _source_coverage_metrics(sources)
+        story_source_names[row["event_id"]] = source_names
         importance = story.get("importance") if isinstance(story.get("importance"), dict) else {}
         display_rank = _display_rank_scores(
             importance,
@@ -851,7 +869,7 @@ def write_active_stories_index(
                 "homepage_rank_score": display_rank["homepage"],
                 "category_rank_score": display_rank["category"],
                 "freshness_score": display_rank["freshness"],
-                "source_count": len(distinct_source_names),
+                **source_metrics,
                 "status": row["status"],
                 "event_created_at": row["event_created_at"],
                 "event_updated_at": row["event_updated_at"],
@@ -859,17 +877,447 @@ def write_active_stories_index(
                 "updated_at": story.get("updated_at"),
             }
         )
+    rolling_window_hours = int(
+        load_pipeline_config().presentation.get("rolling_window_hours", 72)
+    )
+    coverage_cutoff = generated_at - timedelta(hours=max(1, rolling_window_hours))
+    category_source_pools: dict[str, set[str]] = {}
+    for story in stories:
+        if _parse_datetime(str(story.get("event_updated_at") or "")) < coverage_cutoff:
+            continue
+        category = str(story.get("category") or "other")
+        category_source_pools.setdefault(category, set()).update(
+            story_source_names.get(str(story["story_id"]), set())
+        )
+    for story in stories:
+        category = str(story.get("category") or "other")
+        pool_size = len(category_source_pools.get(category, set()))
+        source_count = int(story.get("source_count") or 0)
+        story["category_source_pool"] = pool_size
+        story["source_coverage_ratio"] = round(
+            min(1.0, source_count / pool_size) if pool_size else 0.0,
+            4,
+        )
     stories.sort(key=lambda item: str(item["event_updated_at"] or ""), reverse=True)
     stories.sort(key=lambda item: item["homepage_rank_score"], reverse=True)
+    curation_mode = "fallback"
+    try:
+        curation = generate_homepage_curation(
+            stories=stories,
+            story_details=story_details,
+            client=curation_client,
+            generated_at=generated_at,
+        )
+        curation_mode = "llm" if curation_client is not None else "fallback"
+        if curation_client is not None and run_id:
+            for usage_record in curation.get("usage_records") or []:
+                usage = usage_record.get("usage") or {}
+                state.record_llm_usage(
+                    run_id=run_id,
+                    stage="homepage_curation",
+                    model=str(usage_record.get("model") or curation_client.model),
+                    prompt_version=HOMEPAGE_CURATION_PROMPT_VERSION,
+                    input_tokens=usage.get("promptTokenCount"),
+                    output_tokens=usage.get("candidatesTokenCount"),
+                )
+            for index, error in enumerate(curation.get("errors") or [], start=1):
+                state.record_error(
+                    run_id,
+                    "homepage_curation",
+                    "batch",
+                    f"curation-{index}",
+                    None,
+                    RuntimeError(str(error)),
+                )
+                if progress:
+                    progress(f"editorial: homepage curation batch failed: {error}")
+    except Exception as exc:
+        curation = generate_homepage_curation(
+            stories=stories,
+            story_details=story_details,
+            client=None,
+            generated_at=generated_at,
+        )
+        if run_id:
+            state.record_error(run_id, "homepage_curation", "index", "active-stories", None, exc)
+        if progress:
+            progress(f"editorial: homepage curation fell back to ranked stories: {exc}")
+    public_curation = {
+        key: value
+        for key, value in curation.items()
+        if key not in {"errors", "usage", "usage_records"}
+    }
     atomic_write_json(
         output_path,
         {
             "generated_at": isoformat_z(generated_at),
-            "ranking_version": "display-ranking-v1",
+            "ranking_version": "display-ranking-v2",
+            "curation": public_curation,
             "stories": stories,
         },
     )
-    return {"active_index_stories": len(stories), "active_index_missing": missing}
+    return {
+        "active_index_stories": len(stories),
+        "active_index_missing": missing,
+        "curation_mode": curation_mode,
+        "curation_sections": len(public_curation.get("sections") or []),
+        "curation_top_news": len(public_curation.get("top_news") or []),
+    }
+
+
+def generate_homepage_curation(
+    *,
+    stories: Sequence[dict[str, Any]],
+    story_details: dict[str, dict[str, Any]],
+    client: JsonGenerator | None,
+    generated_at: datetime,
+    rolling_window_hours: int | None = None,
+) -> dict[str, Any]:
+    if rolling_window_hours is None:
+        config = load_pipeline_config()
+        rolling_window_hours = int(config.presentation.get("rolling_window_hours", 72))
+    cutoff = generated_at - timedelta(hours=max(1, rolling_window_hours))
+    current = [
+        story
+        for story in stories
+        if _parse_datetime(str(story.get("event_updated_at") or "")) >= cutoff
+    ]
+    fallback_candidates = sorted(
+        current,
+        key=lambda story: _homepage_coverage_priority(story, generated_at=generated_at),
+        reverse=True,
+    )
+    target_top_count = min(DEFAULT_CURATION_TOP_STORIES, len(current))
+    fallback_top = [
+        str(story["story_id"]) for story in fallback_candidates[:target_top_count]
+    ]
+    if client is None or not current:
+        return {
+            "prompt_version": HOMEPAGE_CURATION_PROMPT_VERSION,
+            "model": "deterministic-ranking-fallback",
+            "generated_at": isoformat_z(generated_at),
+            "input_story_count": len(current),
+            "top_news": fallback_top,
+            "sections": [],
+        }
+
+    context: list[dict[str, Any]] = []
+    for story in current:
+        story_id = str(story["story_id"])
+        detail = story_details.get(story_id) or {}
+        age_hours = max(
+            0.0,
+            (generated_at - _parse_datetime(str(story.get("event_updated_at") or ""))).total_seconds()
+            / 3600,
+        )
+        context.append(
+            {
+                "id": story_id,
+                "category": story.get("category"),
+                "headline": story.get("headline"),
+                "dek": detail.get("dek"),
+                "homepage_rank": story.get("homepage_rank_score"),
+                "category_rank": story.get("category_rank_score"),
+                "source_count": story.get("source_count"),
+                "source_article_count": story.get("source_article_count"),
+                "multi_angle_source_count": story.get("multi_angle_source_count"),
+                "source_coverage_score": story.get("source_coverage_score"),
+                "category_source_pool": story.get("category_source_pool"),
+                "source_coverage_ratio": story.get("source_coverage_ratio"),
+                "coverage_priority": _homepage_coverage_priority(
+                    story,
+                    generated_at=generated_at,
+                ),
+                "hours_old": round(age_hours, 1),
+            }
+        )
+    errors: list[str] = []
+    usage_records: list[dict[str, Any]] = []
+    models: set[str] = set()
+    raw_top_news: list[str] = []
+    try:
+        top_result = client.generate_json(
+            system_instruction=(
+                "You are a senior news homepage editor organizing a concise rolling briefing."
+            ),
+            prompt=_build_top_news_curation_prompt(
+                context[:DEFAULT_CURATION_TOP_CANDIDATES],
+                target_top_count=target_top_count,
+            ),
+            response_schema=_top_news_curation_response_schema(),
+            max_output_tokens=2_000,
+            thinking_level="low",
+        )
+        models.add(top_result.model)
+        usage_records.append({"model": top_result.model, "usage": top_result.usage})
+        if isinstance(top_result.payload.get("top_news"), list):
+            raw_top_news = top_result.payload["top_news"]
+    except Exception as exc:
+        errors.append(f"top-news: {exc}")
+
+    contexts_by_category: dict[str, list[dict[str, Any]]] = {}
+    for story in context:
+        contexts_by_category.setdefault(str(story.get("category") or "other"), []).append(story)
+
+    section_specs: list[tuple[str, int, list[dict[str, Any]]]] = []
+    for category in sorted(contexts_by_category):
+        category_stories = contexts_by_category[category]
+        for start in range(0, len(category_stories), DEFAULT_CURATION_STORIES_PER_SECTION_CALL):
+            section_specs.append(
+                (
+                    category,
+                    start // DEFAULT_CURATION_STORIES_PER_SECTION_CALL + 1,
+                    category_stories[
+                        start : start + DEFAULT_CURATION_STORIES_PER_SECTION_CALL
+                    ],
+                )
+            )
+    section_results: list[GeminiResult | None] = [None] * len(section_specs)
+    worker_count = min(2, len(section_specs))
+    if worker_count <= 1:
+        for index, (category, chunk, chunk_stories) in enumerate(section_specs):
+            try:
+                section_results[index] = _generate_category_sections(
+                    client=client,
+                    category=category,
+                    stories=chunk_stories,
+                )
+            except Exception as exc:
+                errors.append(f"{category}-{chunk}: {exc}")
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(
+                    _generate_category_sections,
+                    client=client,
+                    category=category,
+                    stories=chunk_stories,
+                ): index
+                for index, (category, _chunk, chunk_stories) in enumerate(section_specs)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    section_results[index] = future.result()
+                except Exception as exc:
+                    category, chunk, _stories = section_specs[index]
+                    errors.append(f"{category}-{chunk}: {exc}")
+
+    raw_sections: list[dict[str, Any]] = []
+    for result in section_results:
+        if result is None:
+            continue
+        models.add(result.model)
+        usage_records.append({"model": result.model, "usage": result.usage})
+        sections = result.payload.get("sections")
+        if isinstance(sections, list):
+            raw_sections.extend(sections[:DEFAULT_CURATION_MAX_SECTIONS_PER_CATEGORY])
+    normalized = _validate_homepage_curation(
+        {"top_news": raw_top_news, "sections": raw_sections},
+        valid_story_ids={str(story["story_id"]) for story in current},
+        fallback_top=fallback_top,
+        target_top_count=target_top_count,
+    )
+    return {
+        "prompt_version": HOMEPAGE_CURATION_PROMPT_VERSION,
+        "model": ",".join(sorted(models)) or "deterministic-ranking-fallback",
+        "generated_at": isoformat_z(generated_at),
+        "input_story_count": len(current),
+        "calls": len(usage_records),
+        "partial_failures": len(errors),
+        **normalized,
+        "errors": errors,
+        "usage_records": usage_records,
+    }
+
+
+def _build_top_news_curation_prompt(
+    stories: Sequence[dict[str, Any]],
+    *,
+    target_top_count: int,
+) -> str:
+    return (
+        "Choose the Top News cards for a rolling news homepage.\n\n"
+        f"Top News: choose exactly {target_top_count} story IDs representing the most important "
+        "distinct underlying subjects. Favor high-impact developments from the last 12-24 hours, "
+        "while retaining an older item only when it remains clearly consequential. Do not choose "
+        "two cards about the same underlying event. Rank public consequence first: major wars, "
+        "diplomacy, national security, public health, governance, disasters, and major cultural "
+        "events can outrank routine product, market, campaign, or celebrity-cycle updates. Use "
+        "coverage_priority as corroboration and a tie-breaker, not as a substitute for editorial "
+        "judgment. It normalizes source breadth for category feed availability and gives only a "
+        "capped smaller boost to multiple angles from one publisher. Do not let categories with "
+        "larger feed inventories dominate merely because they can accumulate more raw sources. "
+        "Order the IDs by editorial importance.\n\n"
+        "Return only the requested JSON. Candidate story cards:\n"
+        + json.dumps(stories, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def _build_category_sections_prompt(
+    category: str,
+    stories: Sequence[dict[str, Any]],
+) -> str:
+    return (
+        f"Organize these {category} story cards into useful topic sections for a rolling news "
+        "homepage. Group cards only when at least two distinct stories belong under a useful, "
+        "specific ongoing subject such as 'Ukraine War', 'Canada/US Relations', or 'New Car "
+        "Releases'. Use concise 2-5 word headings, order sections by current news value, and put "
+        "each story in at most one section. Related but distinct developments can share a section; "
+        "cards covering the exact same event should still be treated as one subject, not used to "
+        "manufacture a grouping. "
+        "Do not create generic category headings, force weak relationships, or include singleton "
+        "sections. Leave stories that do not fit a meaningful group unassigned; the site will place "
+        "them under Everything Else. Coverage fields are normalized for category feed availability; "
+        "use them as supporting evidence when deciding which useful groups to retain. Return at most "
+        f"{DEFAULT_CURATION_MAX_SECTIONS_PER_CATEGORY} sections.\n\n"
+        "Return only the requested JSON. Story cards:\n"
+        + json.dumps(stories, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def _top_news_curation_response_schema() -> dict[str, Any]:
+    return {
+        "type": "OBJECT",
+        "properties": {"top_news": {"type": "ARRAY", "items": {"type": "STRING"}}},
+        "required": ["top_news"],
+    }
+
+
+def _category_sections_response_schema() -> dict[str, Any]:
+    return {
+        "type": "OBJECT",
+        "properties": {
+            "sections": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "title": {"type": "STRING"},
+                        "story_ids": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    },
+                    "required": ["title", "story_ids"],
+                },
+            },
+        },
+        "required": ["sections"],
+    }
+
+
+def _generate_category_sections(
+    *,
+    client: JsonGenerator,
+    category: str,
+    stories: Sequence[dict[str, Any]],
+) -> GeminiResult:
+    return client.generate_json(
+        system_instruction=(
+            "You are a senior news homepage editor grouping related but distinct story cards."
+        ),
+        prompt=_build_category_sections_prompt(category, stories),
+        response_schema=_category_sections_response_schema(),
+        max_output_tokens=8_000,
+        thinking_level="low",
+    )
+
+
+def _validate_homepage_curation(
+    payload: dict[str, Any],
+    *,
+    valid_story_ids: set[str],
+    fallback_top: Sequence[str],
+    target_top_count: int,
+) -> dict[str, Any]:
+    raw_top = payload.get("top_news") if isinstance(payload, dict) else []
+    top_news: list[str] = []
+    for story_id in raw_top if isinstance(raw_top, list) else []:
+        if isinstance(story_id, str) and story_id in valid_story_ids and story_id not in top_news:
+            top_news.append(story_id)
+        if len(top_news) >= target_top_count:
+            break
+    for story_id in fallback_top:
+        if len(top_news) >= target_top_count:
+            break
+        if story_id not in top_news:
+            top_news.append(story_id)
+
+    sections: list[dict[str, Any]] = []
+    assigned: set[str] = set()
+    raw_sections = payload.get("sections") if isinstance(payload, dict) else []
+    for raw_section in raw_sections if isinstance(raw_sections, list) else []:
+        if len(sections) >= DEFAULT_CURATION_MAX_SECTIONS or not isinstance(raw_section, dict):
+            break
+        title = " ".join(str(raw_section.get("title") or "").split()).strip(" .:-")[:60]
+        if not title:
+            continue
+        raw_ids = raw_section.get("story_ids")
+        story_ids: list[str] = []
+        for story_id in raw_ids if isinstance(raw_ids, list) else []:
+            if (
+                isinstance(story_id, str)
+                and story_id in valid_story_ids
+                and story_id not in assigned
+                and story_id not in story_ids
+            ):
+                story_ids.append(story_id)
+        if len(story_ids) < 2:
+            continue
+        assigned.update(story_ids)
+        sections.append({"title": title, "story_ids": story_ids})
+    return {"top_news": top_news, "sections": sections}
+
+
+def _source_coverage_metrics(
+    sources: Sequence[dict[str, Any]],
+) -> tuple[dict[str, Any], set[str]]:
+    articles_by_source: dict[str, set[str]] = {}
+    for index, source in enumerate(sources):
+        if not isinstance(source, dict) or not source.get("source_name"):
+            continue
+        source_name = str(source["source_name"])
+        article_key = str(
+            source.get("article_id") or source.get("url") or f"source-entry-{index}"
+        )
+        articles_by_source.setdefault(source_name, set()).add(article_key)
+    angle_count = sum(
+        min(max(len(article_ids) - 1, 0), 2)
+        for article_ids in articles_by_source.values()
+    )
+    source_names = set(articles_by_source)
+    return (
+        {
+            "source_count": len(source_names),
+            "source_article_count": sum(len(value) for value in articles_by_source.values()),
+            "multi_angle_source_count": sum(
+                1 for value in articles_by_source.values() if len(value) > 1
+            ),
+            "source_coverage_score": round(len(source_names) + 0.5 * angle_count, 2),
+        },
+        source_names,
+    )
+
+
+def _homepage_coverage_priority(
+    story: dict[str, Any],
+    *,
+    generated_at: datetime,
+) -> float:
+    event_updated_at = _parse_datetime(str(story.get("event_updated_at") or ""))
+    age_hours = max(0.0, (generated_at - event_updated_at).total_seconds() / 3600)
+    editorial_rank = _safe_score(
+        story.get("homepage_rank_score", story.get("importance_score"))
+    )
+    editorial = CURATION_EDITORIAL_WEIGHT * editorial_rank**3
+    if age_hours > CURATION_COVERAGE_WINDOW_HOURS:
+        return round(editorial, 4)
+    coverage = max(0.0, float(story.get("source_coverage_score") or 0.0))
+    coverage_ratio = max(
+        0.0,
+        min(1.0, float(story.get("source_coverage_ratio") or 0.0)),
+    )
+    absolute_coverage = 2.0 * math.log2(1.0 + coverage)
+    normalized_coverage = 4.0 * math.sqrt(coverage_ratio)
+    return round(absolute_coverage + normalized_coverage + editorial, 4)
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:

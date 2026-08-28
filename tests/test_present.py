@@ -134,8 +134,10 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     story = _story("2026-08-24-polish", updated_at="2026-08-24T00:00:00Z")
     _, story_dir, active_path = _write_published_fixture(tmp_path, [story])
     payload = json.loads(active_path.read_text(encoding="utf-8"))
+    payload["stories"][0]["source_coverage_score"] = 3.5
+    payload["stories"][0]["source_coverage_ratio"] = 0.4
     payload["stories"][0].update(
-        {"homepage_rank_score": 0.82, "category_rank_score": 0.91}
+        {"homepage_rank_score": 0.82, "category_rank_score": 0.91, "source_count": 2}
     )
     active_path.write_text(json.dumps(payload), encoding="utf-8")
     output_dir = tmp_path / "dist"
@@ -155,26 +157,120 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert '>Climate</button>' in home
     assert 'data-view-filter="new" aria-pressed="true"' in home
     assert 'data-view-filter="all" aria-pressed="false"' in home
+    assert 'data-coverage-filter="top" aria-pressed="true"' in home
+    assert 'data-coverage-filter="all" aria-pressed="false"' in home
+    assert 'data-source-count="2"' in home
+    assert '<span data-count-label>new</span> · <time data-site-updated' in home
+    assert 'data-generated-at="2026-08-24T01:00:00Z"' in home
+    assert 'datetime="2026-08-24T01:00:00Z">Updated 1m ago</time>' in home
     assert 'data-rank-all="0.8200"' in home
     assert 'data-rank-category="0.9100"' in home
     assert "source-tone-" not in home
     assert "shade-" in home
-    assert "Updated Aug 24, 2026 · 01:00 UTC" in home
-    assert "Built Aug 24" not in home
+    assert "Updated Aug 24, 2026 · 01:00 UTC" not in home
+    assert "Last 72 hours" not in home
+    assert "· 72h ·" not in home
     assert 'property="og:image" content="https://news-tldr.com/assets/social-card.png"' in home
     assert "let savedView = 'new'" in script
     assert "localStorage.setItem(VIEW_MODE_KEY, activeView)" in script
     assert "if (activeView === 'new') next.searchParams.delete('view')" in script
-    assert "VIEW_THRESHOLD_MS = 10 * 1000" in script
+    assert "let savedCoverage = 'top'" in script
+    assert "localStorage.setItem(COVERAGE_MODE_KEY, activeCoverage)" in script
+    assert "if (activeCoverage === 'top') next.searchParams.delete('coverage')" in script
+    assert "cardSourceCount(card) >= MIN_TOP_SOURCE_COUNT" in script
+    assert "MIN_TOP_SOURCE_COUNT = 2" in script
+    assert "VIEW_THRESHOLD_MS = 1 * 1000" in script
     assert "VIEWED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000" in script
     assert "IntersectionObserver" in script
+    assert "Boolean(viewed[card.dataset.storyId])" in script
+    assert "activeCoverage === 'top' ? 'top' : 'stories'" in script
+    assert "function relativeUpdatedLabel(timestamp)" in script
+    assert "window.setInterval(updateSiteFreshness, 60 * 1000)" in script
+    assert "viewedBeforeLoad" not in script
+    assert "createStorySection('Top News'" in script
+    assert "createStorySection('Everything Else'" in script
+    assert "cardCoveragePriority" in script
+    assert "COVERAGE_WINDOW_MS = 24 * 60 * 60 * 1000" in script
+    assert "const topNews = visibleCards" in script
+    assert "window.matchMedia('(max-width: 820px)')" in script
+    assert "expandedSectionKeys" in script
+    assert "toggleSectionsButton.textContent = allExpanded ? 'Collapse all' : 'Expand all'" in script
+    assert "grid.hidden = !expanded" in script
+    assert "if (activeView === 'new') renderStories();" in script
+    assert "data-mark-view-read" in home
+    assert "Mark read" in home
+    assert "Mark all visible stories as read" in home
+    assert "Mark view read" not in home
+    assert "data-toggle-sections" in home
+    assert "Expand all" in home
+    assert "data-story-title" in home
+    assert 'class="read-indicator"' in home
+    assert "data-source-coverage=" in home
+    assert "data-source-share=" in home
+    assert 'data-source-coverage="3.5000"' in home
+    assert 'data-source-share="0.4000"' in home
+    assert '<div class="reader-toolbar"><nav class="category-nav"' in home
+    assert home.index('<div class="reader-toolbar">') < home.index('Latest briefing')
+    assert home.index('Latest briefing') < home.index('<main class="home-main">')
+    assert "if (nextCategory === activeCategory) return;" in script
+    assert "window.scrollTo({ top: 0, behavior: reducedMotion ? 'auto' : 'smooth' })" in script
 
     css = (output_dir / "assets" / "site.css").read_text(encoding="utf-8")
-    assert '.story-grid[data-active-category="all"] .category-world' in css
-    assert '.story-grid[data-active-category="all"] .category-business' in css
-    assert '.story-grid[data-active-category="all"] .category-automotive' in css
-    assert '.story-grid:not([data-active-category="all"]) .story-card' in css
+    assert ".reader-toolbar { position: sticky; top: 0; z-index: 20; background: var(--paper); }" in css
+    assert ".reader-toolbar:not(:has(.edition)) { border-bottom: 1px solid var(--ink); }" in css
+    assert ".home-main { padding-top: 0; }" in css
+    assert "@media (prefers-reduced-motion: reduce)" in css
+    assert "html { scroll-behavior: auto; }" in css
+    assert '.story-sections[data-active-category="all"] .category-world' in css
+    assert '.story-sections[data-active-category="all"] .category-business' in css
+    assert '.story-sections[data-active-category="all"] .category-automotive' in css
+    assert '.story-sections:not([data-active-category="all"]) .story-card' in css
     assert ".story-card.lead { grid-column: span 8; }" in css
+    assert "letter-spacing: normal;" in css
+    assert "letter-spacing: -.025em;" not in css
+    assert ".story-card.is-read .read-indicator" in css
+    assert ".edition > p { white-space: nowrap; }" in css
+    assert '.section-toggle[aria-expanded="true"]::after' in css
+    assert ".story-grid[hidden] { display: none; }" in css
+
+
+def test_home_renders_curation_metadata_for_top_news_and_topic_sections(tmp_path: Path) -> None:
+    stories = [
+        _story(
+            f"2026-08-24-story-{index}",
+            updated_at="2026-08-24T00:00:00Z",
+            headline=f"Story {index}",
+        )
+        for index in range(1, 4)
+    ]
+    _, story_dir, active_path = _write_published_fixture(tmp_path, stories)
+    payload = json.loads(active_path.read_text(encoding="utf-8"))
+    payload["curation"] = {
+        "prompt_version": "homepage-curation-v1",
+        "model": "gemini-3.7-flash",
+        "top_news": [stories[1]["story_id"]],
+        "sections": [
+            {
+                "title": "Ukraine War",
+                "story_ids": [stories[0]["story_id"], stories[1]["story_id"]],
+            }
+        ],
+    }
+    active_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    output_dir = tmp_path / "dist"
+    build_static_site(
+        output_dir=output_dir,
+        story_dir=story_dir,
+        active_stories_path=active_path,
+        now=datetime(2026, 8, 24, 1, tzinfo=UTC),
+    )
+
+    home = (output_dir / "index.html").read_text(encoding="utf-8")
+    assert f'data-story-id="{stories[1]["story_id"]}"' in home
+    assert 'data-top-order="0"' in home
+    assert 'data-topic-title="Ukraine War"' in home
+    assert 'data-topic-order="0"' in home
 
 
 def test_robots_blocks_search_indexers_without_blocking_social_crawlers(tmp_path: Path) -> None:

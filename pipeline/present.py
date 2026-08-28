@@ -28,7 +28,7 @@ from pipeline.paths import (
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v3"
+PRESENTATION_VERSION = "presentation-v13"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
@@ -102,24 +102,46 @@ SITE_CSS = """
 html { scroll-behavior: smooth; }
 body { margin: 0; background: var(--paper); }
 a { color: inherit; }
-.site-header { border-top: 7px solid var(--accent); border-bottom: 1px solid var(--ink); }
+.site-header { border-top: 7px solid var(--accent); }
 .masthead { max-width: 1180px; margin: 0 auto; padding: 1.25rem 1.25rem 1rem; display: flex; gap: 2rem; align-items: end; justify-content: space-between; }
 .brand { text-decoration: none; font-size: clamp(2rem, 6vw, 4.4rem); line-height: .9; letter-spacing: -.065em; font-weight: 800; }
 .brand span { color: var(--accent); }
 .tagline { max-width: 30rem; margin: 0; color: var(--muted); font: 600 .78rem/1.4 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .1em; text-align: right; }
+.reader-toolbar { position: sticky; top: 0; z-index: 20; background: var(--paper); }
+.reader-toolbar:not(:has(.edition)) { border-bottom: 1px solid var(--ink); }
 .category-nav { max-width: 1180px; margin: 0 auto; padding: .65rem 1.25rem; display: flex; justify-content: center; gap: .35rem; overflow: visible; }
 .category-nav button, .category-nav a { border: 1px solid var(--line); border-radius: 999px; background: transparent; padding: .43rem .62rem; white-space: nowrap; color: var(--muted); text-decoration: none; font: 700 .69rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .035em; cursor: pointer; }
 .category-nav button:hover, .category-nav button[aria-pressed="true"], .category-nav a:hover { color: white; border-color: var(--ink); background: var(--ink); }
 main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
-.edition { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding-bottom: .75rem; border-bottom: 3px double var(--ink); }
+.home-main { padding-top: 0; }
+.edition { max-width: 1180px; margin: 0 auto; padding: .15rem 1.25rem .75rem; display: flex; justify-content: space-between; gap: 1rem; align-items: center; border-top: 1px solid var(--line); border-bottom: 3px double var(--ink); }
 .edition-heading { display: flex; align-items: center; gap: .8rem; min-width: 0; }
 .edition h1 { margin: 0; font-size: 1rem; text-transform: uppercase; letter-spacing: .13em; }
 .edition p { margin: 0; color: var(--muted); font: .78rem/1.4 system-ui, sans-serif; }
+.edition-actions { display: flex; align-items: center; gap: .45rem; }
+.filter-control { display: inline-flex; align-items: center; gap: .3rem; }
+.filter-label { color: var(--muted); font: 750 .58rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; }
 .view-switch { display: inline-flex; padding: .16rem; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.32); }
 .view-switch button { border: 0; border-radius: 999px; padding: .32rem .62rem; background: transparent; color: var(--muted); font: 750 .67rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .055em; cursor: pointer; }
 .view-switch button:hover { color: var(--ink); }
 .view-switch button[aria-pressed="true"] { color: white; background: var(--ink); }
+.mark-view-read { border: 1px solid var(--line); border-radius: 999px; padding: .42rem .65rem; background: transparent; color: var(--muted); font: 750 .67rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .035em; cursor: pointer; }
+.mark-view-read:hover { color: var(--ink); border-color: var(--ink); }
+.story-sections { padding-top: .25rem; }
+.section-actions { display: none; }
+.section-actions[hidden] { display: none; }
+.toggle-sections { border: 0; border-bottom: 1px solid var(--line); padding: .35rem .1rem; background: transparent; color: var(--muted); font: 750 .68rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; cursor: pointer; }
+.toggle-sections:hover { color: var(--ink); border-color: var(--ink); }
+.story-section { margin-top: 1.65rem; }
+.story-section + .story-section { margin-top: 2.5rem; }
+.section-heading { display: flex; align-items: baseline; gap: .8rem; margin: 0; padding: 0 0 .55rem; border-bottom: 1px solid var(--ink); font: 800 clamp(1.15rem, 2vw, 1.5rem)/1.1 Georgia, "Times New Roman", serif; letter-spacing: -.015em; }
+.section-heading::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+.section-toggle { appearance: none; display: flex; align-items: baseline; gap: .55rem; border: 0; padding: 0; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; text-align: left; }
+.section-toggle:disabled { opacity: 1; color: inherit; }
+.section-count { display: none; }
+.story-section-top .section-heading { color: var(--accent-dark); }
 .story-grid { display: grid; grid-template-columns: repeat(12, 1fr); }
+.story-grid[hidden] { display: none; }
 .story-card { --card-tint: var(--neutral-rgb); --shade: 0; grid-column: span 4; padding: 1.5rem; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); background: linear-gradient(rgba(var(--card-tint), var(--shade)), rgba(var(--card-tint), var(--shade))), var(--card); transition: opacity .18s ease, background-color .18s ease; }
 .story-card:nth-child(3n) { border-right: 0; }
 .story-card.lead { grid-column: span 8; }
@@ -130,17 +152,17 @@ main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 .shade-3 { --shade: .07; }
 .shade-4 { --shade: .10; }
 .shade-5 { --shade: .13; }
-.story-grid[data-active-category="all"] .category-world { --card-tint: var(--world-rgb); }
-.story-grid[data-active-category="all"] .category-us { --card-tint: var(--us-rgb); }
-.story-grid[data-active-category="all"] .category-politics { --card-tint: var(--politics-rgb); }
-.story-grid[data-active-category="all"] .category-business { --card-tint: var(--business-rgb); }
-.story-grid[data-active-category="all"] .category-technology { --card-tint: var(--technology-rgb); }
-.story-grid[data-active-category="all"] .category-science { --card-tint: var(--science-rgb); }
-.story-grid[data-active-category="all"] .category-health { --card-tint: var(--health-rgb); }
-.story-grid[data-active-category="all"] .category-environment { --card-tint: var(--environment-rgb); }
-.story-grid[data-active-category="all"] .category-automotive { --card-tint: var(--automotive-rgb); }
-.story-grid[data-active-category="all"] .category-entertainment { --card-tint: var(--entertainment-rgb); }
-.story-grid:not([data-active-category="all"]) .story-card { --card-tint: var(--neutral-rgb); }
+.story-sections[data-active-category="all"] .category-world { --card-tint: var(--world-rgb); }
+.story-sections[data-active-category="all"] .category-us { --card-tint: var(--us-rgb); }
+.story-sections[data-active-category="all"] .category-politics { --card-tint: var(--politics-rgb); }
+.story-sections[data-active-category="all"] .category-business { --card-tint: var(--business-rgb); }
+.story-sections[data-active-category="all"] .category-technology { --card-tint: var(--technology-rgb); }
+.story-sections[data-active-category="all"] .category-science { --card-tint: var(--science-rgb); }
+.story-sections[data-active-category="all"] .category-health { --card-tint: var(--health-rgb); }
+.story-sections[data-active-category="all"] .category-environment { --card-tint: var(--environment-rgb); }
+.story-sections[data-active-category="all"] .category-automotive { --card-tint: var(--automotive-rgb); }
+.story-sections[data-active-category="all"] .category-entertainment { --card-tint: var(--entertainment-rgb); }
+.story-sections:not([data-active-category="all"]) .story-card { --card-tint: var(--neutral-rgb); }
 .category-world .kicker { color: var(--world); }
 .category-us .kicker { color: var(--us); }
 .category-politics .kicker { color: var(--politics); }
@@ -152,7 +174,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 .category-automotive .kicker { color: var(--automotive); }
 .category-entertainment .kicker { color: var(--entertainment); }
 .kicker { margin: 0 0 .6rem; color: var(--accent-dark); font: 800 .7rem/1.2 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .11em; }
-.story-card h2 { margin: 0 0 .7rem; font-size: clamp(1.25rem, 2.4vw, 1.85rem); line-height: 1.08; letter-spacing: -.025em; }
+.story-card h2 { margin: 0 0 .7rem; font-size: clamp(1.25rem, 2.4vw, 1.85rem); line-height: 1.08; letter-spacing: normal; }
 .story-card.lead h2 { font-size: clamp(2rem, 4.3vw, 3.6rem); }
 .story-card h2 a { text-decoration: none; }
 .story-card h2 a:hover { color: var(--accent-dark); }
@@ -161,7 +183,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 .tldr-list li { margin: .35rem 0; line-height: 1.4; }
 .story-meta { display: flex; gap: .65rem; flex-wrap: wrap; color: var(--muted); font: 650 .72rem/1.3 system-ui, sans-serif; }
 .story-meta span + span::before { content: "•"; margin-right: .65rem; }
-.empty-state { grid-column: 1 / -1; padding: 4rem 1rem; text-align: center; color: var(--muted); }
+.read-indicator { opacity: 0; transition: opacity .18s ease; }
+.story-card.is-read .read-indicator { opacity: .72; }
+.empty-state { padding: 4rem 1rem; text-align: center; color: var(--muted); }
 .story-page { max-width: 880px; }
 .story-page .back { display: inline-block; margin-bottom: 1.5rem; color: var(--muted); font: 700 .8rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .08em; }
 .story-page h1 { margin: .3rem 0 1rem; font-size: clamp(2.35rem, 7vw, 5.2rem); line-height: .98; letter-spacing: -.045em; }
@@ -189,12 +213,26 @@ main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 .site-footer { border-top: 1px solid var(--ink); padding: 1.2rem; color: var(--muted); font: .75rem/1.5 system-ui, sans-serif; }
 .site-footer div { max-width: 1180px; margin: auto; display: flex; justify-content: space-between; gap: 1rem; }
 .site-footer a { text-underline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
 @media (max-width: 820px) {
   .masthead { display: block; }
   .tagline { margin-top: .8rem; text-align: left; }
+  .section-actions { display: flex; justify-content: flex-end; padding-top: .7rem; }
+  .story-section, .story-section + .story-section { margin-top: .8rem; }
+  .section-heading { display: block; padding: 0; }
+  .section-heading::after { display: none; }
+  .section-toggle { align-items: center; width: 100%; padding: .75rem .15rem; cursor: pointer; }
+  .section-toggle::after { content: "+"; flex: 0 0 auto; min-width: 1rem; color: var(--muted); font: 500 1.25rem/1 system-ui, sans-serif; text-align: center; }
+  .section-toggle[aria-expanded="true"]::after { content: "−"; }
+  .section-count { display: inline; flex: 0 0 auto; margin-left: auto; color: var(--muted); font: 750 .65rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
   .story-card, .story-card.lead, .story-card.secondary { grid-column: span 12; border-right: 0; }
   .framing-grid { grid-template-columns: 1fr; }
   .category-nav { justify-content: flex-start; overflow-x: auto; scrollbar-width: thin; }
+}
+@media (min-width: 821px) {
+  .edition > p { white-space: nowrap; }
 }
 @media (max-width: 520px) {
   main { padding-inline: .85rem; }
@@ -202,6 +240,8 @@ main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
   .story-card { padding: 1.25rem .4rem; }
   .edition { align-items: flex-start; }
   .edition-heading { align-items: flex-start; flex-direction: column; gap: .55rem; }
+  .edition-actions { align-items: flex-start; flex-wrap: wrap; }
+  .mark-view-read { width: 2rem; overflow: hidden; white-space: nowrap; padding-inline: .52rem; }
   .edition > p { max-width: 9.5rem; text-align: right; }
   .archive-list li { grid-template-columns: 1fr; gap: .2rem; }
   .site-footer div { display: block; }
@@ -212,16 +252,28 @@ main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 SITE_JS = """
 const VIEWED_KEY = 'newsTldrViewedStoriesV1';
 const VIEW_MODE_KEY = 'newsTldrViewModeV1';
+const COVERAGE_MODE_KEY = 'newsTldrCoverageModeV1';
 const VIEWED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
-const VIEW_THRESHOLD_MS = 10 * 1000;
+const VIEW_THRESHOLD_MS = 1 * 1000;
+const MIN_TOP_SOURCE_COUNT = 2;
+const COVERAGE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const EDITORIAL_PRIORITY_WEIGHT = 10;
 const categoryButtons = Array.from(document.querySelectorAll('[data-category-filter]'));
 const viewButtons = Array.from(document.querySelectorAll('[data-view-filter]'));
+const coverageButtons = Array.from(document.querySelectorAll('[data-coverage-filter]'));
 const cards = Array.from(document.querySelectorAll('[data-story-category]'));
 const count = document.querySelector('[data-visible-count]');
 const countLabel = document.querySelector('[data-count-label]');
-const grid = document.querySelector('[data-story-grid]');
+const siteUpdated = document.querySelector('[data-site-updated]');
+const sectionRoot = document.querySelector('[data-story-sections]');
 const emptyState = document.querySelector('[data-empty-state]');
+const markViewReadButton = document.querySelector('[data-mark-view-read]');
+const toggleSectionsButton = document.querySelector('[data-toggle-sections]');
+const mobileSections = window.matchMedia('(max-width: 820px)');
+const expandedSectionKeys = new Set();
 const timers = new Map();
+let visibleCards = [];
+let sectionSequence = 0;
 
 function loadViewed() {
   const now = Date.now();
@@ -240,7 +292,6 @@ function loadViewed() {
 }
 
 const viewed = loadViewed();
-const viewedBeforeLoad = new Set(Object.keys(viewed));
 const params = new URLSearchParams(location.search);
 let activeCategory = params.get('category') || 'all';
 if (!categoryButtons.some((button) => button.dataset.categoryFilter === activeCategory)) {
@@ -251,11 +302,48 @@ try { savedView = localStorage.getItem(VIEW_MODE_KEY) || 'new'; } catch (_) {}
 let activeView = params.get('view') || savedView;
 if (!['new', 'all'].includes(activeView)) activeView = 'new';
 try { localStorage.setItem(VIEW_MODE_KEY, activeView); } catch (_) {}
+let savedCoverage = 'top';
+try { savedCoverage = localStorage.getItem(COVERAGE_MODE_KEY) || 'top'; } catch (_) {}
+let activeCoverage = params.get('coverage') || savedCoverage;
+if (!['top', 'all'].includes(activeCoverage)) activeCoverage = 'top';
+try { localStorage.setItem(COVERAGE_MODE_KEY, activeCoverage); } catch (_) {}
 
 function cardRank(card, category) {
   const value = category === 'all' ? card.dataset.rankAll : card.dataset.rankCategory;
   const parsed = Number.parseFloat(value || '0');
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function cardSourceCount(card) {
+  const parsed = Number.parseInt(card.dataset.sourceCount || '0', 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function relativeUpdatedLabel(timestamp) {
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 3600) return `Updated ${Math.max(1, Math.floor(seconds / 60))}m ago`;
+  if (seconds < 86400) return `Updated ${Math.floor(seconds / 3600)}h ago`;
+  return `Updated ${Math.floor(seconds / 86400)}d ago`;
+}
+
+function updateSiteFreshness() {
+  if (!siteUpdated) return;
+  const timestamp = Date.parse(siteUpdated.dataset.generatedAt || '');
+  if (Number.isFinite(timestamp)) siteUpdated.textContent = relativeUpdatedLabel(timestamp);
+}
+
+function cardCoveragePriority(card, category) {
+  const updatedAt = Date.parse(card.dataset.eventUpdated || '');
+  const editorial = EDITORIAL_PRIORITY_WEIGHT * Math.pow(cardRank(card, category), 3);
+  if (!Number.isFinite(updatedAt) || Date.now() - updatedAt > COVERAGE_WINDOW_MS) {
+    return editorial;
+  }
+  const coverage = Math.max(0, Number.parseFloat(card.dataset.sourceCoverage || '0'));
+  const sourceShare = Math.max(
+    0,
+    Math.min(1, Number.parseFloat(card.dataset.sourceShare || '0'))
+  );
+  return 2 * Math.log2(1 + coverage) + 4 * Math.sqrt(sourceShare) + editorial;
 }
 
 function updateUrl() {
@@ -264,6 +352,8 @@ function updateUrl() {
   else next.searchParams.set('category', activeCategory);
   if (activeView === 'new') next.searchParams.delete('view');
   else next.searchParams.set('view', activeView);
+  if (activeCoverage === 'top') next.searchParams.delete('coverage');
+  else next.searchParams.set('coverage', activeCoverage);
   history.replaceState(null, '', `${next.pathname}${next.search}${next.hash}`);
 }
 
@@ -273,41 +363,180 @@ function renderStories() {
     if (rankDifference) return rankDifference;
     return (right.dataset.eventUpdated || '').localeCompare(left.dataset.eventUpdated || '');
   });
-  for (const card of ordered) grid.insertBefore(card, emptyState);
-
-  const visibleCards = [];
+  visibleCards = [];
+  let categoryStoryCount = 0;
+  let coverageStoryCount = 0;
   for (const card of ordered) {
     const matchesCategory = activeCategory === 'all' || card.dataset.storyCategory === activeCategory;
-    const isPreviouslyViewed = viewedBeforeLoad.has(card.dataset.storyId);
-    const show = matchesCategory && (activeView === 'all' || !isPreviouslyViewed);
+    const matchesCoverage = activeCoverage === 'all'
+      || cardSourceCount(card) >= MIN_TOP_SOURCE_COUNT;
+    const isRead = Boolean(viewed[card.dataset.storyId]);
+    if (matchesCategory) categoryStoryCount += 1;
+    if (matchesCategory && matchesCoverage) coverageStoryCount += 1;
+    const show = matchesCategory && matchesCoverage && (activeView === 'all' || !isRead);
     card.hidden = !show;
+    card.classList.toggle('is-read', isRead);
     card.classList.remove('lead', 'secondary');
     if (show) visibleCards.push(card);
   }
   if (visibleCards[0]) visibleCards[0].classList.add('lead');
   if (visibleCards[1]) visibleCards[1].classList.add('secondary');
+
+  const topNews = visibleCards
+    .filter((card) => card.dataset.topOrder !== '')
+    .sort((left, right) => Number(left.dataset.topOrder) - Number(right.dataset.topOrder));
+  const topIds = new Set(topNews.map((card) => card.dataset.storyId));
+  const sectionCandidates = visibleCards.filter((card) => !topIds.has(card.dataset.storyId));
+  const topicGroups = new Map();
+  const everythingElse = [];
+  for (const card of sectionCandidates) {
+    const title = card.dataset.topicTitle || '';
+    if (!title) {
+      everythingElse.push(card);
+      continue;
+    }
+    if (!topicGroups.has(title)) topicGroups.set(title, []);
+    topicGroups.get(title).push(card);
+  }
+  const sortedTopicGroups = Array.from(topicGroups.entries()).sort((left, right) => {
+    const rightPriority = Math.max(
+      ...right[1].map((card) => cardCoveragePriority(card, activeCategory))
+    );
+    const leftPriority = Math.max(
+      ...left[1].map((card) => cardCoveragePriority(card, activeCategory))
+    );
+    if (rightPriority !== leftPriority) return rightPriority - leftPriority;
+    const rightRank = Math.max(...right[1].map((card) => cardRank(card, activeCategory)));
+    const leftRank = Math.max(...left[1].map((card) => cardRank(card, activeCategory)));
+    if (rightRank !== leftRank) return rightRank - leftRank;
+    return Number(left[1][0].dataset.topicOrder || 0) - Number(right[1][0].dataset.topicOrder || 0);
+  });
+
+  const fragment = document.createDocumentFragment();
+  if (topNews.length) fragment.appendChild(createStorySection('Top News', topNews, true));
+  for (const [title, sectionCards] of sortedTopicGroups) {
+    fragment.appendChild(createStorySection(title, sectionCards, false));
+  }
+  if (everythingElse.length) {
+    fragment.appendChild(createStorySection('Everything Else', everythingElse, false));
+  }
+  sectionRoot.replaceChildren(fragment);
+  updateSectionBulkControl();
   for (const button of categoryButtons) {
     button.setAttribute('aria-pressed', String(button.dataset.categoryFilter === activeCategory));
   }
   for (const button of viewButtons) {
     button.setAttribute('aria-pressed', String(button.dataset.viewFilter === activeView));
   }
-  grid.dataset.activeCategory = activeCategory;
+  for (const button of coverageButtons) {
+    button.setAttribute(
+      'aria-pressed', String(button.dataset.coverageFilter === activeCoverage)
+    );
+  }
+  sectionRoot.dataset.activeCategory = activeCategory;
   if (count) count.textContent = String(visibleCards.length);
-  if (countLabel) countLabel.textContent = activeView === 'new' ? 'new stories' : 'stories';
+  if (countLabel) {
+    countLabel.textContent = activeView === 'new'
+      ? 'new'
+      : activeCoverage === 'top' ? 'top' : 'stories';
+  }
   if (emptyState) {
     emptyState.hidden = visibleCards.length !== 0;
-    emptyState.textContent = activeView === 'new'
-      ? 'You’re caught up. Switch to All to revisit stories from the last three days.'
-      : 'No stories fall within the current news window.';
+    if (activeView === 'new' && coverageStoryCount > 0) {
+      emptyState.textContent =
+        'You’re caught up. Switch the history filter to All to revisit recent stories.';
+    } else if (activeCoverage === 'top' && categoryStoryCount > 0) {
+      emptyState.textContent =
+        'No multi-source stories match this view. Switch the source filter to All for every story.';
+    } else {
+      emptyState.textContent = 'No stories fall within the current news window.';
+    }
   }
   updateUrl();
 }
 
+function createStorySection(title, sectionCards, topSection) {
+  const sectionKey = `${activeCategory}::${title}`;
+  const section = document.createElement('section');
+  section.className = topSection ? 'story-section story-section-top' : 'story-section';
+  const heading = document.createElement('h2');
+  heading.className = 'section-heading';
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'section-toggle';
+  toggle.dataset.sectionToggle = '';
+  toggle.dataset.sectionKey = sectionKey;
+  const titleLabel = document.createElement('span');
+  titleLabel.className = 'section-title';
+  titleLabel.textContent = title;
+  const sectionCount = document.createElement('span');
+  sectionCount.className = 'section-count';
+  sectionCount.textContent = `${sectionCards.length} ${sectionCards.length === 1 ? 'story' : 'stories'}`;
+  const grid = document.createElement('div');
+  grid.className = 'story-grid';
+  grid.id = `story-section-${++sectionSequence}`;
+  toggle.setAttribute('aria-controls', grid.id);
+  const expanded = !mobileSections.matches || expandedSectionKeys.has(sectionKey);
+  toggle.disabled = !mobileSections.matches;
+  toggle.setAttribute('aria-expanded', String(expanded));
+  grid.hidden = !expanded;
+  toggle.addEventListener('click', () => {
+    if (!mobileSections.matches) return;
+    setSectionExpanded(toggle, grid, toggle.getAttribute('aria-expanded') !== 'true');
+    updateSectionBulkControl();
+  });
+  for (const card of sectionCards) {
+    card.hidden = false;
+    grid.appendChild(card);
+  }
+  toggle.append(titleLabel, sectionCount);
+  heading.appendChild(toggle);
+  section.append(heading, grid);
+  return section;
+}
+
+function setSectionExpanded(toggle, grid, expanded) {
+  const sectionKey = toggle.dataset.sectionKey;
+  toggle.setAttribute('aria-expanded', String(expanded));
+  grid.hidden = !expanded;
+  if (expanded) expandedSectionKeys.add(sectionKey);
+  else expandedSectionKeys.delete(sectionKey);
+}
+
+function updateSectionBulkControl() {
+  if (!toggleSectionsButton) return;
+  const toggles = Array.from(sectionRoot.querySelectorAll('[data-section-toggle]'));
+  toggleSectionsButton.hidden = !mobileSections.matches || toggles.length === 0;
+  const allExpanded = toggles.length > 0
+    && toggles.every((toggle) => toggle.getAttribute('aria-expanded') === 'true');
+  toggleSectionsButton.setAttribute('aria-expanded', String(allExpanded));
+  toggleSectionsButton.textContent = allExpanded ? 'Collapse all' : 'Expand all';
+}
+
+if (toggleSectionsButton) {
+  toggleSectionsButton.addEventListener('click', () => {
+    const toggles = Array.from(sectionRoot.querySelectorAll('[data-section-toggle]'));
+    const shouldExpand = !toggles.every(
+      (toggle) => toggle.getAttribute('aria-expanded') === 'true'
+    );
+    for (const toggle of toggles) {
+      const grid = document.getElementById(toggle.getAttribute('aria-controls'));
+      if (grid) setSectionExpanded(toggle, grid, shouldExpand);
+    }
+    updateSectionBulkControl();
+  });
+}
+
+mobileSections.addEventListener('change', renderStories);
+
 for (const button of categoryButtons) {
   button.addEventListener('click', () => {
-    activeCategory = button.dataset.categoryFilter;
+    const nextCategory = button.dataset.categoryFilter;
+    if (nextCategory === activeCategory) return;
+    activeCategory = nextCategory;
     renderStories();
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    window.scrollTo({ top: 0, behavior: reducedMotion ? 'auto' : 'smooth' });
   });
 }
 
@@ -319,27 +548,48 @@ for (const button of viewButtons) {
   });
 }
 
+for (const button of coverageButtons) {
+  button.addEventListener('click', () => {
+    activeCoverage = button.dataset.coverageFilter;
+    try { localStorage.setItem(COVERAGE_MODE_KEY, activeCoverage); } catch (_) {}
+    renderStories();
+  });
+}
+
 function markViewed(card) {
-  timers.delete(card);
   const storyId = card.dataset.storyId;
   if (!storyId) return;
   viewed[storyId] = Date.now();
+  card.classList.add('is-read');
   try { localStorage.setItem(VIEWED_KEY, JSON.stringify(viewed)); } catch (_) {}
+}
+
+if (markViewReadButton) {
+  markViewReadButton.addEventListener('click', () => {
+    for (const card of visibleCards) markViewed(card);
+    markViewReadButton.title = `${visibleCards.length} stories marked read in this view`;
+    if (activeView === 'new') renderStories();
+  });
 }
 
 if ('IntersectionObserver' in window) {
   const observer = new IntersectionObserver((entries) => {
     for (const entry of entries) {
-      const card = entry.target;
-      if (entry.isIntersecting && entry.intersectionRatio >= 0.55 && !timers.has(card)) {
-        timers.set(card, window.setTimeout(() => markViewed(card), VIEW_THRESHOLD_MS));
-      } else if ((!entry.isIntersecting || entry.intersectionRatio < 0.55) && timers.has(card)) {
-        window.clearTimeout(timers.get(card));
-        timers.delete(card);
+      const title = entry.target;
+      const card = title.closest('[data-story-id]');
+      if (!card || viewed[card.dataset.storyId]) continue;
+      if (entry.isIntersecting && entry.intersectionRatio >= 0.6 && !timers.has(title)) {
+        timers.set(title, window.setTimeout(() => {
+          timers.delete(title);
+          markViewed(card);
+        }, VIEW_THRESHOLD_MS));
+      } else if ((!entry.isIntersecting || entry.intersectionRatio < 0.6) && timers.has(title)) {
+        window.clearTimeout(timers.get(title));
+        timers.delete(title);
       }
     }
-  }, { threshold: [0.55] });
-  for (const card of cards) observer.observe(card);
+  }, { threshold: [0.6] });
+  for (const title of document.querySelectorAll('[data-story-title]')) observer.observe(title);
 }
 
 window.addEventListener('pagehide', () => {
@@ -347,6 +597,8 @@ window.addEventListener('pagehide', () => {
   timers.clear();
 });
 
+updateSiteFreshness();
+window.setInterval(updateSiteFreshness, 60 * 1000);
 renderStories();
 """.strip()
 
@@ -578,6 +830,7 @@ def _write_site_files(
             site_url=site_url,
             generated_at=generated_at,
             rolling_window_hours=rolling_window_hours,
+            active_index=active_index,
         ),
     )
     _write_text(
@@ -614,6 +867,7 @@ def _render_home(
     site_url: str,
     generated_at: datetime,
     rolling_window_hours: int,
+    active_index: dict[str, Any],
 ) -> str:
     buttons = [
         '<button type="button" data-category-filter="all" aria-pressed="true">All</button>'
@@ -624,6 +878,22 @@ def _render_home(
                 _e(category["id"]), _e(category.get("short_name") or category["name"])
             )
         )
+    curation = active_index.get("curation") if isinstance(active_index.get("curation"), dict) else {}
+    top_news = curation.get("top_news") if isinstance(curation.get("top_news"), list) else []
+    top_order = {str(story_id): index for index, story_id in enumerate(top_news)}
+    topic_by_story: dict[str, tuple[str, int]] = {}
+    sections = curation.get("sections") if isinstance(curation.get("sections"), list) else []
+    for section_order, section in enumerate(sections):
+        if not isinstance(section, dict):
+            continue
+        title = " ".join(str(section.get("title") or "").split())
+        story_ids = section.get("story_ids")
+        if not title or not isinstance(story_ids, list):
+            continue
+        for story_id in story_ids:
+            if isinstance(story_id, str) and story_id not in topic_by_story:
+                topic_by_story[story_id] = (title, section_order)
+
     cards = []
     for index, story in enumerate(stories):
         variant = " lead" if index == 0 else " secondary" if index == 1 else ""
@@ -631,37 +901,71 @@ def _render_home(
         bullets = "".join(f"<li>{_e(item)}</li>" for item in tldr[:2])
         row = story["_index"]
         source_count = int(row.get("source_count") or len(story.get("sources") or []))
+        source_coverage = _nonnegative_number(
+            row.get("source_coverage_score", source_count)
+        )
+        source_share = _score(row.get("source_coverage_ratio"))
         all_rank = _score(row.get("homepage_rank_score", row.get("importance_score")))
         category_rank = _score(row.get("category_rank_score", row.get("importance_score")))
         shade_level = _shade_level(source_count=source_count)
+        story_id = str(story["story_id"])
+        topic_title, topic_order = topic_by_story.get(story_id, ("", 0))
+        story_top_order = top_order.get(story_id)
         cards.append(
             f'<article class="story-card category-{_e(story["category"])} '
-            f'shade-{shade_level}{variant}" data-story-id="{_e(story["story_id"])}" '
+            f'shade-{shade_level}{variant}" data-story-id="{_e(story_id)}" '
             f'data-story-category="{_e(story["category"])}" data-rank-all="{all_rank:.4f}" '
             f'data-rank-category="{category_rank:.4f}" '
+            f'data-source-count="{source_count}" '
+            f'data-source-coverage="{source_coverage:.4f}" '
+            f'data-source-share="{source_share:.4f}" '
+            f'data-top-order="{story_top_order if story_top_order is not None else ""}" '
+            f'data-topic-title="{_e(topic_title)}" data-topic-order="{topic_order}" '
             f'data-event-updated="{_e(_event_time(story).isoformat())}">'
             f'<p class="kicker">{_e(category_names[story["category"]])}</p>'
-            f'<h2><a href="/stories/{_e(story["story_id"])}/">{_e(story["headline"])}</a></h2>'
+            f'<h2 data-story-title><a href="/stories/{_e(story_id)}/">{_e(story["headline"])}</a></h2>'
             f'<p class="dek">{_e(story["dek"])}</p>'
             f'<ul class="tldr-list">{bullets}</ul>'
             f'<div class="story-meta"><span>{_relative_time(_event_time(story), generated_at)}</span>'
-            f'<span>{source_count} sources</span></div>'
+            f'<span>{source_count} sources</span><span class="read-indicator" aria-hidden="true">✓ Read</span></div>'
             "</article>"
         )
+    default_top_count = sum(
+        1
+        for story in stories
+        if int(story["_index"].get("source_count") or len(story.get("sources") or [])) >= 2
+    )
     empty_hidden = "" if not cards else " hidden"
-    cards.append(
-        f'<p class="empty-state" data-empty-state{empty_hidden}>'
-        "No stories fall within the current news window.</p>"
+    toolbar = (
+        '<div class="edition"><div class="edition-heading"><h1>Latest briefing</h1><div class="edition-actions">'
+        '<div class="filter-control"><span class="filter-label">History</span>'
+        '<div class="view-switch" role="group" aria-label="Choose read-history filter">'
+        '<button type="button" data-view-filter="new" aria-pressed="true" '
+        'title="Hide stories whose titles have been visible for at least one second">New</button>'
+        '<button type="button" data-view-filter="all" aria-pressed="false" '
+        'title="Show new and previously read stories">All</button></div></div>'
+        '<div class="filter-control"><span class="filter-label">Sources</span>'
+        '<div class="view-switch" role="group" aria-label="Choose source coverage filter">'
+        '<button type="button" data-coverage-filter="top" aria-pressed="true" '
+        'title="Only show stories covered by multiple sources">Top</button>'
+        '<button type="button" data-coverage-filter="all" aria-pressed="false" '
+        'title="Show stories regardless of source count">All</button></div></div>'
+        '<button type="button" class="mark-view-read" data-mark-view-read '
+        'aria-label="Mark all visible stories as read" title="Mark visible stories read">'
+        '✓ <span>Mark read</span></button></div></div>'
+        f'<p><span data-visible-count>{default_top_count}</span> '
+        f'<span data-count-label>new</span> · '
+        f'<time data-site-updated data-generated-at="{_e(isoformat_z(generated_at))}" '
+        f'datetime="{_e(isoformat_z(generated_at))}">Updated 1m ago</time></p></div>'
     )
     content = (
-        '<div class="edition"><div class="edition-heading"><h1>Latest briefing</h1>'
-        '<div class="view-switch" role="group" aria-label="Choose which stories to show">'
-        '<button type="button" data-view-filter="new" aria-pressed="true" '
-        'title="Hide stories seen for at least 10 seconds on earlier visits">New</button>'
-        '<button type="button" data-view-filter="all" aria-pressed="false">All</button></div></div>'
-        f'<p><span data-visible-count>{len(stories)}</span> <span data-count-label>new stories</span> · Last {rolling_window_hours} hours · '
-        f'Updated {_display_datetime(generated_at)}</p></div>'
-        f'<section class="story-grid" data-story-grid data-active-category="all">{"".join(cards)}</section>'
+        '<div class="section-actions" hidden>'
+        '<button type="button" class="toggle-sections" data-toggle-sections '
+        'aria-expanded="false">Expand all</button></div>'
+        f'<div class="story-sections" data-story-sections data-active-category="all">'
+        f'<section class="story-section"><div class="story-grid">{"".join(cards)}</div></section></div>'
+        f'<p class="empty-state" data-empty-state{empty_hidden}>'
+        "No stories fall within the current news window.</p>"
     )
     return _page(
         title="news-tldr.com — The news, distilled",
@@ -670,6 +974,7 @@ def _render_home(
         nav="".join(buttons),
         content=content,
         script=True,
+        toolbar=toolbar,
         social_image=f"{site_url}/assets/social-card.png",
     )
 
@@ -810,6 +1115,7 @@ def _page(
     nav: str,
     content: str,
     script: bool = False,
+    toolbar: str = "",
     og_type: str = "website",
     social_image: str | None = None,
 ) -> str:
@@ -826,6 +1132,7 @@ def _page(
             f'<meta name="twitter:image" content="{_attr(social_image)}">'
             '<meta name="twitter:image:alt" content="news-tldr.com — The news, distilled">'
         )
+    main_class = ' class="home-main"' if toolbar else ""
     return (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -846,8 +1153,9 @@ def _page(
         f"{script_tag}</head><body><header class=\"site-header\"><div class=\"masthead\">"
         '<a class="brand" href="/">news<span>-tldr</span>.com</a>'
         '<p class="tagline">The important facts, the open questions, and the sources — without the churn.</p>'
-        f'</div><nav class="category-nav" aria-label="Story categories">{nav}</nav></header>'
-        f"<main>{content}</main><footer class=\"site-footer\"><div>"
+        f'</div></header><div class="reader-toolbar"><nav class="category-nav" '
+        f'aria-label="Story categories">{nav}</nav>{toolbar}</div>'
+        f"<main{main_class}>{content}</main><footer class=\"site-footer\"><div>"
         '<span>Automated, source-attributed news summaries. Verify important details with the linked reporting.</span>'
         '<span><a href="https://github.com/pmeenan/news-tldr.com" rel="noopener noreferrer">About</a> · '
         '<a href="/archive/">Archive</a> · <a href="/api/active-stories.json">JSON</a></span>'
@@ -883,6 +1191,16 @@ def _score(value: Any) -> float:
     if score != score:
         return 0.0
     return max(0.0, min(1.0, score))
+
+
+def _nonnegative_number(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if number != number:
+        return 0.0
+    return max(0.0, number)
 
 
 def _shade_level(*, source_count: int) -> int:

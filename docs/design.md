@@ -61,7 +61,7 @@ data/
     pipeline.db              # SQLite: article index, event mappings, run history, lock state.
     pipeline.lock            # Lock file with timestamp for concurrency control.
   staging/
-    articles/YYYY/MM/DD/     # One JSON per collected article plus optional same-stem image sidecar.
+    articles/YYYY/MM/DD/     # One JSON per collected article.
     fetch-log/YYYY-MM-DD.jsonl
   events/
     <event_id>.json          # One file per durable event with article list and metadata.
@@ -73,7 +73,7 @@ pipeline/present.py          # Static renderer and production deployment logic.
 dist/                        # Ignored generated static output; only this tree is publishable.
 ```
 
-Article staging directories use the article's **publish date** (from the feed or page metadata). When publish date is missing or unparseable, fall back to **fetch date** and set a `publish_date_estimated: true` flag in the article JSON. When a usable lead image is found, it is stored next to the article JSON with the same base filename and an image extension such as `.jpg`, `.png`, `.webp`, or `.gif`.
+Article staging directories use the article's **publish date** (from the feed or page metadata). When publish date is missing or unparseable, fall back to **fetch date** and set a `publish_date_estimated: true` flag in the article JSON. Collection is text-only and does not download publisher images. Historical same-stem image sidecars may remain in existing staging data; cleanup continues to recognize them when deleting their corresponding historical article artifacts.
 
 Each stage owns clear input and output directories. Stages write new files atomically (write to a temp file, then rename), never mutate upstream artifacts, and record enough metadata to explain later decisions.
 
@@ -120,9 +120,8 @@ Responsibilities:
 
 - Fetch each feed with conditional headers (`If-Modified-Since`, `ETag`) where supported. The pipeline bypasses robots.txt checks for feed URLs configured by the operator but strictly enforces robots.txt for all article page fetches.
 - Parse publication time, updated time, headline, summary, feed content, GUID, canonical URL, author/byline, tags, and source metadata. Configure the XML parser (`feedparser` / `lxml`) to disable external entity expansion and DTD processing to protect against XXE injection and XML bomb DoS attacks.
-- Extract lead-image candidates from feed media tags, enclosures, inline feed HTML, custom scraper card metadata, and article-page Open Graph/Twitter metadata when the article page is fetched.
 - Fetch full article text when feed content is incomplete, using HTTP GET with readability-style extraction (`trafilatura` or similar). Feed content is deemed incomplete if it is less than 600 characters, equal to the summary, or not substantially longer than the summary (less than or equal to `len(summary) + 200` characters). Extraction should favor recall for full article coverage, fall back through alternate extractor modes, and keep the existing feed text when page extraction does not improve on it.
-- Fetch one supported lead image per article when candidates are available, store it as a same-stem sidecar next to the article JSON, and record image metadata in the article JSON. Supported image formats are JPEG, PNG, WebP, and GIF.
+- Ignore image metadata and media enclosures in feeds, scraper results, and article pages; do not issue image requests or store image metadata in article JSON.
 - Detect likely paywalls and store a `paywall` flag with supporting signals.
 - Normalize text enough for downstream processing while preserving raw source fields.
 - Store one JSON file per collected source article.
@@ -143,7 +142,7 @@ The collection implementation lives in the `pipeline` Python package:
 
 Collection writes article JSON under `data/staging/articles/YYYY/MM/DD/` and appends run logs to `data/staging/fetch-log/YYYY-MM-DD.jsonl`. The SQLite database stores only state/index fields plus JSON metadata needed by later stages; full extracted article text remains in the staging JSON.
 
-Collection also records durable per-source run accounting in `source_run_stats`, one row per `run_id` and `source_id`. These rows track feed status, feed HTTP status, entries seen, articles written, synced existing articles, old/duplicate skips, article failures, image fetch outcomes, and collection error counts. Articles store `collection_run_id`, allowing source-health analysis to join collection behavior to later digest and aggregation outcomes (`is_filtered`, `aggregation_status`, `event_id`) without parsing fetch-log JSONL.
+Collection also records durable per-source run accounting in `source_run_stats`, one row per `run_id` and `source_id`. These rows track feed status, feed HTTP status, entries seen, articles written, synced existing articles, old/duplicate skips, article failures, and collection error counts. Legacy image outcome columns remain in the schema for historical compatibility and stay zero for new runs. Articles store `collection_run_id`, allowing source-health analysis to join collection behavior to later digest and aggregation outcomes (`is_filtered`, `aggregation_status`, `event_id`) without parsing fetch-log JSONL.
 
 The HTTP client sends a desktop Windows Chrome user-agent plus common browser navigation headers (`Accept`, `Accept-Language`, `Sec-Fetch-*`, cache headers, and `Upgrade-Insecure-Requests`) while retaining RSS/Atom/XML-compatible accept values. It does not use a headless browser, login cookies, or paywall bypass behavior.
 
@@ -157,17 +156,13 @@ The HTTP client sends a desktop Windows Chrome user-agent plus common browser na
 - **Concurrency**: Fetch feeds and articles concurrently. Defaults are set high (100 for feeds, 1000 for articles) so all domains run in parallel without a blocking global bottleneck, while the async per-domain lock handles rate-limiting.
 - **SSRF Protection**: Only fetch `http` and `https` URLs. Resolve each hostname before requesting it and block loopback, private, link-local, multicast, reserved, and documentation IP ranges for both IPv4 and IPv6, including metadata-service addresses such as `169.254.169.254`. Re-run the same validation for every redirect target and abort redirect chains that change to a blocked scheme, host, port, or resolved IP.
 - **Response Size Cap**: Stream response bodies and reject any response whose `Content-Length` header or actual decoded byte count exceeds the configured cap (default 25 MiB). The cap defends against OOM from oversized feeds and gzip-bomb decompression. To prevent decompression errors, the client removes stale decompression headers (`Content-Encoding`, original `Content-Length`, `Transfer-Encoding`) before constructing the returned `httpx.Response`; `httpx` may then set a fresh decoded `Content-Length`.
-- **Image Fallback Strategy**: If explicit primary lead image metadata is present, general body images (`html_img`) are discarded. If the chosen primary lead image fails to fetch or is blocked (e.g. by robots.txt), the collector does not fall back to other candidate images.
-- **Origin Circuit Breaker**: If image fetches from a specific scheme + host origin experience 3 consecutive failures (due to HTTP status >= 400, connection errors, timeouts, or robots.txt blocks), the origin is disabled for the rest of the collection pass, and subsequent image requests to it are skipped.
-
-
 ### Feed Config
 
 Entries in `config/feeds.json` include: `source_id`, `source_name`, `feed_url`, optional `site_url`, default category, content/paywall hints, and fetch behavior overrides. Sources can be staged with `"enabled": false`.
 
 The current source catalog contains 69 enabled sources, including the AP News and MotorTrend custom scrapers. `config/source-policy.json` is kept aligned with `config/feeds.json` by `source_id` so editorial stages can resolve source metadata without guessing.
 
-Custom scraper entries use `"feed_type": "scraper"` and a `fetch.scraper_module` value such as `pipeline.scrapers.ap` or `pipeline.scrapers.motortrend`. Scraper module names are restricted to the `pipeline.scrapers.*` namespace at load time. Scrapers must verify that resolved entry URLs stay on the configured `site_url` host and match an anchored article-path pattern so off-site links and unrelated paths are not enqueued. Each candidate anchor must also look like a headline link — either nested inside an `<article>` / `h1`–`h6` ancestor or itself wrapping a heading element — so subscribe/sign-in/site-chrome anchors that happen to share the article path prefix are filtered out. Scrapers return feed-like entries and may include an `image_url` discovered from listing-card markup, but they do not download image bytes themselves. Image downloads are centralized in the collector so RSS feeds and scrapers share the same safety checks, content-type validation, size limits, and sidecar write behavior.
+Custom scraper entries use `"feed_type": "scraper"` and a `fetch.scraper_module` value such as `pipeline.scrapers.ap` or `pipeline.scrapers.motortrend`. Scraper module names are restricted to the `pipeline.scrapers.*` namespace at load time. Scrapers must verify that resolved entry URLs stay on the configured `site_url` host and match an anchored article-path pattern so off-site links and unrelated paths are not enqueued. Each candidate anchor must also look like a headline link — either nested inside an `<article>` / `h1`–`h6` ancestor or itself wrapping a heading element — so subscribe/sign-in/site-chrome anchors that happen to share the article path prefix are filtered out. Scrapers return feed-like entries; any legacy `image_url` field they provide is ignored by the collector.
 
 ### Article JSON Sketch
 
@@ -210,15 +205,6 @@ Custom scraper entries use `"feed_type": "scraper"` and a `fetch.scraper_module`
   },
   "content_type": "news | opinion | analysis | review | unknown",
   "language": "en",
-  "image": {
-    "url": "https://example.com/image.jpg",
-    "path": "data/staging/articles/2026/05/24/sha256-of-canonical-url.jpg",
-    "content_type": "image/jpeg",
-    "bytes": 12345,
-    "source": "media_content",
-    "width": 1200,
-    "height": 800
-  },
   "collection": {
     "feed_url": "https://example.com/rss",
     "run_id": "collection-20260601T120000Z-abc12345",
@@ -349,7 +335,7 @@ Post-aggregation deduplication collects candidate event pairs from four compleme
 1. **Slug / title heuristics** — base-slug equality, title-word overlap (`_titles_similar`), and highly similar individual article headlines (catches reprints with different lead facts).
 2. **Keyword-overlap gate** (`_keyword_overlap_candidates`) — within a single category-group batch, pairs events that share at least 2 distinctive event-level keywords after stripping a global static stopword list and a per-batch *dynamic* hot-keyword stopword list (`_dynamic_keyword_stopwords`). The dynamic list flags any keyword appearing in ≥20% of the batch's events AND in ≥4 events (an absolute floor that prevents tiny batches from stopwording distinctive entities like "ferrari" that only appear in the 2 candidate duplicates).
 3. **LLM pre-screen gate** (`_llm_prescreen_candidates`) — loose-recall LLM calls over category-group batches (`politics_gov`, `news_business_{us,world,business}`, `sci_tech`, `leisure`), sending each event's id, title, top-6 filtered keywords, and top-3 article headlines. The model is instructed to err on the side of inclusion; false positives are filtered by the strict per-pair merge call. Each call is bounded to `DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH = 40` events and chunked when batches exceed that. For oversized batches, the top high-article-count anchor events are repeated into every prescreen chunk so large ongoing stories can still be compared with later singleton updates that would otherwise land in a different chunk. `news_business` also gets an additional parent-level cross-category prescreen because market, business, U.S., and world framings often describe the same underlying event from different verticals. All prescreen chunks across all category-group batches share one worker pool up to `aggregation.deduplication_concurrency` (default: 16). Prompt version: `deduplication-prescreen-v1`. Token usage and errors are recorded under stage `deduplication_prescreen`.
-4. **Per-pair merge LLM** — for every unique candidate pair from the union of (1)–(3), the existing `_build_event_merge_prompt` call decides `should_merge` with confidence ≥ `DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD` (0.8). This is the single source of truth for actually merging; over-merging risk lives here only. Candidate-pair reviews run concurrently in rounds of disjoint event IDs, then accepted merges are applied serially in deterministic order so one merge cannot race another merge touching the same event. Full-Flash decisions are cached against both event `updated_at` values and the prompt version, so unchanged negative pairs are not paid for or retried every hour. Reviews prioritize the newest changed events and are bounded to 40 new pairs and one merge pass per production run. A changed event invalidates its cached pair decisions automatically.
+4. **Per-pair merge LLM** — for every unique candidate pair from the union of (1)–(3), the existing `_build_event_merge_prompt` call decides `should_merge` with confidence ≥ `DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD` (0.8). This is the single source of truth for actually merging; over-merging risk lives here only. Candidate-pair reviews run concurrently in rounds of disjoint event IDs, then accepted merges are applied serially in deterministic order so one merge cannot race another merge touching the same event. Full-Flash decisions are cached against both event `updated_at` values and the prompt version, so unchanged negative pairs are not paid for or retried every hour. The bounded 40-pair queue orders exact/base-slug and strong title/headline candidates before keyword-overlap candidates, which in turn precede broad LLM-prescreen candidates; recency breaks ties within each confidence tier. This prevents obvious same-headline splits from being crowded out by a burst of newer loose-recall candidates. A changed event invalidates its cached pair decisions automatically.
 
 Over-merging protection comes from the strict per-pair call; recall comes from the diversity of candidate gates. Adding a new gate cannot weaken the merge decision — at worst it adds extra per-pair LLM calls that return `should_merge=false`.
 
@@ -573,6 +559,22 @@ When political framing is present:
 
 The presentation layer reads this index to decide which stories to render and how to order them, then reads individual story JSON files for full content. The presentation layer owns the time window (e.g., "last 24 hours", "last 48 hours") and filtering logic. Rolling news windows use `event_updated_at`; story `created_at`/`updated_at` describe editorial artifact generation and must not make an old event appear newly reported after a forced regeneration.
 
+The index also carries a validated `curation` object generated once per editorial
+run from the rolling-window story headlines, deks, ranks, source counts, and
+event ages. Prompt version `homepage-curation-v4` selects up to 12 distinct Top
+News story IDs from a compact global high-rank candidate set, favoring
+consequential developments from the last 12–24 hours. Topic grouping runs in
+bounded per-category chunks so a large 72-hour corpus cannot exhaust one model
+response before covering later categories; those results are merged into one
+ordered list of specific multi-story topic sections. A story may
+belong to at most one topic section; unmatched stories are intentionally left
+for the presentation layer's Everything Else section. The curation artifact
+stores model/prompt/timestamp provenance and LLM usage is recorded under
+`homepage_curation`. A failed category chunk is recorded and omitted without
+discarding successful chunks; a pass-wide failure falls back to the ranked Top
+News list with no forced topic groups. Editorial generation and publishing
+therefore remain available during model failures.
+
 The index also carries presentation ranks refreshed whenever Editorial rebuilds
 the index. `homepage_rank_score` weights global impact most heavily, while
 `category_rank_score` weights the event's category impact most heavily. Both
@@ -629,15 +631,48 @@ Responsibilities:
 - The main page shows all active stories in a **rolling time window**, editorially ranked by importance. Category tabs (one per category from `config/categories.json`, plus an "All" default) filter the same ranked list client-side — they are not separate pages with independent layouts.
 - Category navigation uses the optional concise `short_name` from category
   config so all sections fit in one desktop row; full names remain in story
-  labels and metadata.
+  labels and metadata. The category row and Latest Briefing controls share one
+  sticky toolbar so their relative height needs no fixed positioning offset.
+  Changing the selected category scrolls to the page top and respects the
+  browser's reduced-motion preference.
 - A device-local New/All control supports repeat reading. An Intersection
-  Observer records a story after at least 55% of its card remains visible for
-  10 seconds. Local storage retains those story IDs for three days. New is the
-  default, and the selected New/All preference is global across visits and
-  category sections. New hides stories recorded before the current page visit,
-  avoiding disruptive card removal while someone is actively reading; All
-  always restores the complete rolling window. Reading history is never sent
-  to the server.
+  Observer records a story after its title remains at least 60% visible for one
+  second. Local storage retains those story IDs for three days and cards show a
+  subtle read indicator. New is the default, and the selected New/All preference
+  is global across visits and category sections. Cards remain in place while the
+  reader scans the current view; category and New/All changes re-apply the live
+  read set so newly read cards disappear from the next New view. A header action
+  marks every currently visible card read. All always restores the complete
+  rolling window. Reading history is never sent to the server.
+- An independent device-local Top/All source-coverage control composes with the
+  category and New/All filters. Top is the default and requires at least two
+  distinct sources according to the active story index's `source_count`; All
+  restores single-source stories without changing their editorial rank. The
+  preference uses `newsTldrCoverageModeV1`, remains global across category views
+  and later visits, and appears in the URL only as the non-default
+  `coverage=all` state.
+- The compact homepage status line combines the visible count with a semantic
+  build-time `<time>` element. Same-origin JavaScript converts its ISO timestamp
+  to the card-style `Updated Xm/h/d ago` label and refreshes it once per minute,
+  so a static page still communicates its current age without a server runtime.
+- The homepage renders the curated Top News list first in the All view, then
+  multi-story topic sections, then Everything Else. Top News cards are removed
+  from their repeated topic position in All but keep their topic assignment in
+  focused category views. Empty sections disappear after category/read filtering,
+  and topic groups are ordered by the strongest remaining story rank for the
+  selected view. At mobile widths, all rendered sections begin collapsed behind
+  accessible heading buttons with story counts. Readers can toggle one section or
+  use the view-level Expand All/Collapse All control; desktop sections remain expanded.
+  Curated Top News stories remain in Top News when a focused category is selected.
+  Other topic sections are ordered by the strongest story-level coverage signal
+  updated within 24 hours. That signal combines logarithmic independent-source
+  breadth, the story's share of the active 72-hour source pool for its category,
+  and a half-weight capped credit for up to two additional angles per publisher;
+  a cubic transform of the existing editorial display rank supplies a bounded
+  judgment allowance that stays small for routine coverage and becomes material
+  only for stories already assessed as highly consequential.
+  This prevents feed-rich categories from winning on raw counts alone while still
+  distinguishing broad independent coverage from repeated same-site follow-ups.
 - Cards use restrained tinting for visual separation. The All view assigns a
   muted category-family tint: World/U.S. use browns, Politics/Business olives,
   Technology/Science/Environment grays, Automotive blue, Health purple, and

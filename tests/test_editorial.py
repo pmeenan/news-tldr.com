@@ -14,9 +14,12 @@ from pipeline.editorial import (
     EditorialEvent,
     _build_editorial_prompt,
     _display_rank_scores,
+    _homepage_coverage_priority,
+    _validate_homepage_curation,
     build_story_payload,
     editorial_candidate_rows,
     generate_editorial_stories,
+    generate_homepage_curation,
     generate_story,
     validate_editorial_response,
     write_active_stories_index,
@@ -396,13 +399,117 @@ def test_active_index_includes_only_current_events_with_story_files(tmp_path: Pa
             state=state,
             story_dir=story_dir,
             output_path=output_path,
+            generated_at=datetime(2026, 8, 24, 2, tzinfo=UTC),
         )
 
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert [story["story_id"] for story in payload["stories"]] == ["event-2", "event-1"]
     assert payload["stories"][0]["source_count"] == 1
+    assert payload["stories"][0]["source_article_count"] == 2
+    assert payload["stories"][0]["multi_angle_source_count"] == 1
+    assert payload["stories"][0]["source_coverage_score"] == 1.5
+    assert payload["stories"][0]["category_source_pool"] == 1
+    assert payload["stories"][0]["source_coverage_ratio"] == 1.0
     assert payload["stories"][0]["homepage_rank_score"] > 0
     assert payload["stories"][0]["category_rank_score"] > 0
-    assert payload["ranking_version"] == "display-ranking-v1"
+    assert payload["ranking_version"] == "display-ranking-v2"
+    assert payload["curation"]["model"] == "deterministic-ranking-fallback"
+    assert payload["curation"]["top_news"] == ["event-2", "event-1"]
     assert payload["stories"][0]["event_updated_at"] == "2026-08-24T01:00:00Z"
-    assert stats == {"active_index_stories": 2, "active_index_missing": 0}
+    assert stats == {
+        "active_index_stories": 2,
+        "active_index_missing": 0,
+        "curation_mode": "fallback",
+        "curation_sections": 0,
+        "curation_top_news": 2,
+    }
+
+
+def test_homepage_curation_validates_top_news_and_meaningful_sections() -> None:
+    client = FakeEditorialClient(
+        {
+            "top_news": ["event-2", "event-2", "unknown"],
+            "sections": [
+                {"title": "Ukraine War", "story_ids": ["event-1", "event-2", "unknown"]},
+                {"title": "Singleton", "story_ids": ["event-3"]},
+                {"title": "Repeated", "story_ids": ["event-2", "event-3"]},
+            ],
+        }
+    )
+    stories = [
+        {
+            "story_id": f"event-{index}",
+            "category": "world",
+            "headline": f"Story {index}",
+            "homepage_rank_score": 1 - index / 10,
+            "category_rank_score": 1 - index / 10,
+            "source_count": 2,
+            "event_updated_at": "2026-08-24T11:00:00Z",
+        }
+        for index in range(1, 4)
+    ]
+
+    curation = generate_homepage_curation(
+        stories=stories,
+        story_details={
+            story["story_id"]: {"dek": f"Dek for {story['story_id']}"} for story in stories
+        },
+        client=client,
+        generated_at=datetime(2026, 8, 24, 12, tzinfo=UTC),
+        rolling_window_hours=72,
+    )
+
+    assert curation["top_news"] == ["event-2", "event-1", "event-3"]
+    assert curation["sections"] == [
+        {"title": "Ukraine War", "story_ids": ["event-1", "event-2"]}
+    ]
+    assert curation["model"] == "gemini-3.7-flash"
+    assert client.calls[0]["thinking_level"] == "low"
+    assert len(client.calls) == 2
+    assert "Everything Else" in client.calls[1]["prompt"]
+    assert "coverage_priority" in client.calls[0]["prompt"]
+    assert "feed inventories" in client.calls[0]["prompt"]
+
+
+def test_homepage_curation_does_not_append_fallback_after_top_news_is_full() -> None:
+    curation = _validate_homepage_curation(
+        {"top_news": ["event-1", "event-2"], "sections": []},
+        valid_story_ids={"event-1", "event-2", "event-3"},
+        fallback_top=["event-3"],
+        target_top_count=2,
+    )
+
+    assert curation["top_news"] == ["event-1", "event-2"]
+
+
+def test_homepage_coverage_priority_normalizes_category_supply_and_expires() -> None:
+    generated_at = datetime(2026, 8, 24, 12, tzinfo=UTC)
+    thin_category_story = {
+        "event_updated_at": "2026-08-24T11:00:00Z",
+        "homepage_rank_score": 0.7,
+        "source_coverage_score": 4,
+        "source_coverage_ratio": 0.5,
+    }
+    rich_category_story = {
+        "event_updated_at": "2026-08-24T11:00:00Z",
+        "homepage_rank_score": 0.7,
+        "source_coverage_score": 6,
+        "source_coverage_ratio": 0.1,
+    }
+    expired_story = {
+        **thin_category_story,
+        "event_updated_at": "2026-08-23T10:00:00Z",
+    }
+
+    thin_priority = _homepage_coverage_priority(
+        thin_category_story,
+        generated_at=generated_at,
+    )
+    assert thin_priority > _homepage_coverage_priority(
+        rich_category_story,
+        generated_at=generated_at,
+    )
+    assert thin_priority > _homepage_coverage_priority(
+        expired_story,
+        generated_at=generated_at,
+    )

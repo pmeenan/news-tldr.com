@@ -72,7 +72,7 @@ gantt
 - [x] Implement paywall detection signals and source-level paywall hints.
 - [x] Implement deduplication by `article_id` (canonical URL hash, GUID fallback) against the state database.
 - [x] Write per-article staging JSON files (atomic writes) keyed on publish date.
-- [x] Fetch supported lead images from feed/scraper/article metadata and store same-stem image sidecars next to staged article JSON.
+- [x] Initially fetched lead-image sidecars; retired image discovery/downloads after the licensing review so new collection runs are text-only while historical cleanup compatibility remains.
 - [x] Register collected articles in the state database.
 - [x] Write collection logs (`data/staging/fetch-log/`).
 - [x] Add tests with fixture feeds, sample article pages, lock contention/stale-lock cases, and SSRF redirect/blocking cases.
@@ -206,7 +206,24 @@ gantt
 - [x] Default the global New/All preference to New and persist the reader's choice across visits and category sections.
 - [x] Keep focused sections neutral while grouping combined-view colors into muted category families with source-count depth.
 - [x] Prevent search indexing without blocking social preview fetches; add noindex metadata and complete Open Graph/X cards with a branded poster.
-- [x] Label the homepage build timestamp as Updated.
+- [x] Keep the homepage freshness line compact with count and a client-refreshed
+  relative build time.
+- [x] Mark stories read after one second of title visibility, show a subtle read
+  state, and re-apply the current local read set when category/view filters change.
+- [x] Add a current-view Mark Read header action without adding a redundant unread action.
+- [x] Add validated AI homepage curation with a distinct 12-story Top News list,
+  specific multi-story topic sections across All/category views, and Everything Else fallback.
+- [x] Collapse curated sections behind tappable, counted headings on mobile and
+  provide an Expand All/Collapse All action for the current view.
+- [x] Order recent topic groups with category-normalized source breadth, capped
+  same-publisher angle depth, and a smaller editorial-rank allowance; preserve
+  curated Top News placement inside focused categories.
+- [x] Prioritize strong slug/title/headline duplicate candidates ahead of broad
+  deduplication prescreen candidates inside the bounded review queue.
+- [x] Add a device-local Top/All source-coverage filter, default it to Top, and
+  define Top as stories covered by at least two distinct sources.
+- [x] Keep the category and Latest Briefing rows in one sticky toolbar and
+  return to the page top when the selected category changes.
 
 ## Backlog
 

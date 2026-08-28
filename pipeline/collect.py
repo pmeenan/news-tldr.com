@@ -17,14 +17,13 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import feedparser
 import trafilatura
-from bs4 import BeautifulSoup
 
 from pipeline.config import FeedConfig, load_feeds, load_pipeline_config
 from pipeline.http_client import PoliteHTTPClient
 from pipeline.lock import PipelineLock
 from pipeline.paths import ARTICLE_DIR, DB_PATH, FETCH_LOG_DIR, LOCK_PATH, PROJECT_ROOT
 from pipeline.state import StateDB, migrate
-from pipeline.util import atomic_append_jsonl, atomic_write_bytes, atomic_write_json, isoformat_z, sanitize_id, utc_now
+from pipeline.util import atomic_append_jsonl, atomic_write_json, isoformat_z, sanitize_id, utc_now
 
 TAG_RE = re.compile(r"<[^>]+>")
 WHITESPACE_RE = re.compile(r"\s+")
@@ -44,21 +43,7 @@ TRAFILATURA_EXTRACTION_MODES: tuple[tuple[str, dict[str, Any]], ...] = (
     ("trafilatura_default", {"include_comments": False}),
     ("trafilatura_precision", {"favor_precision": True, "include_comments": False}),
 )
-IMAGE_CONTENT_TYPES = {
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "image/webp": ".webp",
-    "image/gif": ".gif",
-}
-IMAGE_SOURCE_PRIORITY = {
-    "article_meta": 100,
-    "entry_image": 90,
-    "media_content": 80,
-    "media_thumbnail": 70,
-    "enclosure": 60,
-    "html_img": 50,
-}
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
+LEGACY_IMAGE_SIDECAR_EXTENSIONS = (".jpg", ".png", ".webp", ".gif")
 ProgressCallback = Callable[[str], None]
 
 
@@ -92,13 +77,6 @@ def _hash(value: str | None) -> str | None:
     if not value:
         return None
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _relative_to_project(path: Path) -> str:
-    try:
-        return str(path.resolve().relative_to(PROJECT_ROOT))
-    except ValueError:
-        return str(path)
 
 
 def _canonicalize_url(url: str) -> str:
@@ -161,256 +139,6 @@ def _feed_content(entry: Any) -> tuple[str, str]:
             return text, "feed"
     summary = _clean_text(entry.get("summary") or entry.get("description"))
     return summary, "feed"
-
-
-def _is_supported_image_url(url: str) -> bool:
-    try:
-        path = urlsplit(url).path.lower()
-    except Exception:
-        return False
-    if path.endswith((".svg", ".svgz", ".ico", ".css", ".js", ".json")):
-        return False
-    dot_idx = path.rfind(".")
-    slash_idx = path.rfind("/")
-    if dot_idx > slash_idx:
-        ext = path[dot_idx:]
-        if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
-            return False
-    return True
-
-
-def _add_image_candidate(
-    candidates: list[dict[str, Any]],
-    seen: set[str],
-    raw_url: str | None,
-    base_url: str,
-    source: str,
-    *,
-    width: Any = None,
-    height: Any = None,
-) -> None:
-    if not raw_url:
-        return
-    url = urljoin(base_url, str(raw_url).strip())
-    if not _is_supported_image_url(url):
-        return
-    parts = urlsplit(url)
-    if parts.scheme not in {"http", "https"} or not parts.netloc:
-        return
-    if url in seen:
-        return
-    seen.add(url)
-
-    def int_or_none(value: Any) -> int | None:
-        try:
-            parsed = int(str(value).strip())
-        except (TypeError, ValueError):
-            return None
-        return parsed if parsed > 0 else None
-
-    candidates.append(
-        {
-            "url": url,
-            "source": source,
-            "width": int_or_none(width),
-            "height": int_or_none(height),
-        }
-    )
-
-
-def _url_has_image_extension(raw_url: str | None) -> bool:
-    if not raw_url:
-        return False
-    path = urlsplit(str(raw_url)).path.lower()
-    return path.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
-
-
-def _best_srcset_url(value: str | None) -> str | None:
-    if not value:
-        return None
-    best_url = None
-    best_score = -1
-    for item in value.split(","):
-        parts = item.strip().split()
-        if not parts:
-            continue
-        score = 0
-        if len(parts) > 1:
-            descriptor = parts[1]
-            try:
-                score = int(float(descriptor[:-1]) * 1000) if descriptor.endswith("x") else int(descriptor[:-1])
-            except ValueError:
-                score = 0
-        if score >= best_score:
-            best_url = parts[0]
-            best_score = score
-    return best_url
-
-
-def _html_image_candidates(html_text: str | None, base_url: str, source: str) -> list[dict[str, Any]]:
-    if not html_text:
-        return []
-    soup = BeautifulSoup(html_text, "html.parser")
-    candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    for meta_name in ("og:image", "og:image:url", "twitter:image", "twitter:image:src"):
-        meta = soup.find("meta", attrs={"property": meta_name}) or soup.find("meta", attrs={"name": meta_name})
-        if meta:
-            _add_image_candidate(candidates, seen, meta.get("content"), base_url, source)
-
-    # Restrict general image parsing to the main article/body content if present
-    body = (
-        soup.find("article")
-        or soup.find("main")
-        or soup.find(class_=re.compile(r"article-body|entry-content|post-content|main-content", re.IGNORECASE))
-    )
-    search_context = body if body else soup
-
-    for img in search_context.find_all("img"):
-        raw_url = (
-            img.get("src")
-            or img.get("data-src")
-            or img.get("data-original")
-            or img.get("data-lazy-src")
-            or _best_srcset_url(img.get("srcset"))
-        )
-        _add_image_candidate(
-            candidates,
-            seen,
-            raw_url,
-            base_url,
-            "html_img",
-            width=img.get("width"),
-            height=img.get("height"),
-        )
-
-    for source_tag in search_context.find_all("source"):
-        _add_image_candidate(
-            candidates,
-            seen,
-            _best_srcset_url(source_tag.get("srcset")),
-            base_url,
-            "html_img",
-        )
-
-    return candidates
-
-
-def _entry_image_candidates(entry: Any, base_url: str) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    image_url = entry.get("image_url")
-    _add_image_candidate(candidates, seen, image_url, base_url, "entry_image")
-
-    image = entry.get("image")
-    if isinstance(image, dict):
-        _add_image_candidate(candidates, seen, image.get("href") or image.get("url"), base_url, "entry_image")
-    elif isinstance(image, str):
-        _add_image_candidate(candidates, seen, image, base_url, "entry_image")
-
-    for item in entry.get("media_content", []) or []:
-        try:
-            if not isinstance(item, dict):
-                continue
-            medium = str(item.get("medium") or "").lower()
-            mime_type = str(item.get("type") or "").lower()
-            if medium == "image" or mime_type.startswith("image/") or _url_has_image_extension(item.get("url")):
-                _add_image_candidate(
-                    candidates,
-                    seen,
-                    item.get("url"),
-                    base_url,
-                    "media_content",
-                    width=item.get("width"),
-                    height=item.get("height"),
-                )
-        except Exception:
-            continue
-
-    for item in entry.get("media_thumbnail", []) or []:
-        try:
-            if not isinstance(item, dict):
-                continue
-            _add_image_candidate(
-                candidates,
-                seen,
-                item.get("url"),
-                base_url,
-                "media_thumbnail",
-                width=item.get("width"),
-                height=item.get("height"),
-            )
-        except Exception:
-            continue
-
-    for item in (entry.get("links", []) or []) + (entry.get("enclosures", []) or []):
-        try:
-            if not isinstance(item, dict):
-                continue
-            mime_type = str(item.get("type") or "").lower()
-            rel = str(item.get("rel") or "").lower()
-            href = item.get("href")
-            if mime_type.startswith("image/") or rel == "thumbnail" or _url_has_image_extension(href):
-                _add_image_candidate(candidates, seen, item.get("href"), base_url, "enclosure")
-        except Exception:
-            continue
-
-    for html_field in (entry.get("summary"), entry.get("description")):
-        try:
-            for candidate in _html_image_candidates(html_field, base_url, "html_img"):
-                _add_image_candidate(
-                    candidates,
-                    seen,
-                    candidate.get("url"),
-                    base_url,
-                    candidate.get("source", "html_img"),
-                    width=candidate.get("width"),
-                    height=candidate.get("height"),
-                )
-        except Exception:
-            continue
-
-    for content_item in entry.get("content", []) or []:
-        try:
-            if not isinstance(content_item, dict):
-                continue
-            for candidate in _html_image_candidates(content_item.get("value"), base_url, "html_img"):
-                _add_image_candidate(
-                    candidates,
-                    seen,
-                    candidate.get("url"),
-                    base_url,
-                    candidate.get("source", "html_img"),
-                    width=candidate.get("width"),
-                    height=candidate.get("height"),
-                )
-        except Exception:
-            continue
-
-    return sorted(candidates, key=_image_candidate_score, reverse=True)
-
-
-def _image_candidate_score(candidate: dict[str, Any]) -> tuple[int, int]:
-    width = candidate.get("width") or 0
-    height = candidate.get("height") or 0
-    return (IMAGE_SOURCE_PRIORITY.get(candidate.get("source"), 0), width * height)
-
-
-def _image_extension(content_type: str | None, content: bytes) -> tuple[str, str] | tuple[None, None]:
-    mime_type = (content_type or "").split(";", 1)[0].strip().lower()
-    if mime_type in IMAGE_CONTENT_TYPES:
-        return IMAGE_CONTENT_TYPES[mime_type], mime_type
-    if content.startswith(b"\xff\xd8\xff"):
-        return ".jpg", "image/jpeg"
-    if content.startswith(b"\x89PNG\r\n\x1a\n"):
-        return ".png", "image/png"
-    if content.startswith((b"GIF87a", b"GIF89a")):
-        return ".gif", "image/gif"
-    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
-        return ".webp", "image/webp"
-    return None, None
 
 
 def _is_incomplete_feed_content(text: str, summary: str) -> bool:
@@ -492,7 +220,7 @@ def _article_path(article_id: str, published_at: str) -> Path:
 
 
 def _article_sidecar_paths(article_path: Path) -> list[Path]:
-    return [article_path.with_suffix(extension) for extension in IMAGE_CONTENT_TYPES.values()]
+    return [article_path.with_suffix(extension) for extension in LEGACY_IMAGE_SIDECAR_EXTENSIONS]
 
 
 def _paywall_status(source_hint: str | None, status_code: int | None, text: str) -> dict[str, Any]:
@@ -575,9 +303,6 @@ class Collector:
         self.last_activity_time = time.time()
         self.active_tasks: dict[str, str] = {}
         self.task_counter = 0
-        self.image_origin_failures: dict[str, int] = {}
-        self.disabled_image_origins: set[str] = set()
-
     async def run(self) -> dict[str, int]:
         self._progress(f"collector: syncing {len(self.feeds)} feeds")
         self.state.sync_feeds(self.feeds)
@@ -866,7 +591,7 @@ class Collector:
                                 return
                             self.seen_article_ids.add(preflight_article_id)
                             preflight_reserved = True
-                    article, candidates = await self._article_from_entry(feed, entry)
+                    article = await self._article_from_entry(feed, entry)
                     article_path = _article_path(article["article_id"], article["published_at"])
                     if article_path.exists():
                         async with self.article_id_lock:
@@ -910,19 +635,7 @@ class Collector:
                             self.seen_article_ids.add(article["article_id"])
                         elif not preflight_reserved:
                             self.seen_article_ids.add(article["article_id"])
-                    image_metadata = await self._fetch_article_image(candidates, article, article_path)
-                    if image_metadata:
-                        article["image"] = image_metadata
-                    try:
-                        atomic_write_json(article_path, article)
-                    except Exception:
-                        if image_metadata:
-                            sidecar = PROJECT_ROOT / image_metadata["path"]
-                            try:
-                                sidecar.unlink(missing_ok=True)
-                            except OSError:
-                                pass
-                        raise
+                    atomic_write_json(article_path, article)
                     try:
                         self.state.insert_article(article, article_path)
                     except Exception:
@@ -930,12 +643,6 @@ class Collector:
                             article_path.unlink(missing_ok=True)
                         except OSError:
                             pass
-                        if image_metadata:
-                            sidecar = PROJECT_ROOT / image_metadata["path"]
-                            try:
-                                sidecar.unlink(missing_ok=True)
-                            except OSError:
-                                pass
                         raise
                     self.stats["articles_written"] += 1
                     self._inc_source_stat(feed.source_id, "articles_written")
@@ -958,13 +665,12 @@ class Collector:
         finally:
             self._deregister_task(task_id)
 
-    async def _article_from_entry(self, feed: FeedConfig, entry: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    async def _article_from_entry(self, feed: FeedConfig, entry: Any) -> dict[str, Any]:
         fetched_at = isoformat_z()
         entry_url, canonical_url, guid = _entry_url_and_identity(feed, entry)
         headline = _clean_text(entry.get("title")) or "(untitled)"
         summary = _clean_text(entry.get("summary") or entry.get("description"))
         content_text, extractor = _feed_content(entry)
-        image_candidates = _entry_image_candidates(entry, entry_url)
         status_code: int | None = None
         article_fetch_attempted = False
         extractor_detail: str | None = None
@@ -978,12 +684,6 @@ class Collector:
                 self._progress(f"article {feed.source_id}: fetched page {canonical_url} status={status_code}")
                 if status_code < 400:
                     canonical_url = _canonicalize_url(str(page.url))
-                    image_candidates.extend(_html_image_candidates(page.text, canonical_url, "article_meta"))
-                    image_candidates = sorted(
-                        {candidate["url"]: candidate for candidate in image_candidates}.values(),
-                        key=_image_candidate_score,
-                        reverse=True,
-                    )
                     extracted_text, extraction_mode = _extract_article_text(
                         page.text,
                         canonical_url,
@@ -1064,111 +764,7 @@ class Collector:
                 "content_hash": _hash(content_text),
             },
         }
-        return article, image_candidates
-
-    async def _fetch_article_image(
-        self,
-        candidates: list[dict[str, Any]],
-        article: dict[str, Any],
-        article_path: Path,
-    ) -> dict[str, Any] | None:
-        if not candidates:
-            self.stats["images_skipped"] += 1
-            self._inc_source_stat(article["source_id"], "images_skipped")
-            return None
-
-        # If we have any explicit primary lead images, discard general body images (html_img)
-        has_primary = any(c.get("source") != "html_img" for c in candidates)
-        if has_primary:
-            candidates = [c for c in candidates if c.get("source") != "html_img"]
-
-        for candidate in candidates:
-            image_url = candidate.get("url")
-            if not image_url:
-                continue
-
-            parsed = urlsplit(image_url)
-            origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else None
-            if origin and origin in self.disabled_image_origins:
-                self._progress(f"image {article['source_id']}: skipping {image_url} - origin {origin} is disabled")
-                self.stats["images_skipped"] += 1
-                self._inc_source_stat(article["source_id"], "images_skipped")
-                if has_primary:
-                    break
-                continue
-
-            task_id = self._register_task(f"image:{article['source_id']}:{image_url}")
-            try:
-                response = await self.client.get(image_url)
-                self._progress(f"image {article['source_id']}: fetched {image_url} status={response.status_code}")
-                if response.status_code >= 400:
-                    self._record_error(
-                        "image_fetch_http_error",
-                        image_url,
-                        article["source_id"],
-                        f"HTTP status {response.status_code}",
-                    )
-                    if origin:
-                        self.image_origin_failures[origin] = self.image_origin_failures.get(origin, 0) + 1
-                        if self.image_origin_failures[origin] >= 3:
-                            self.disabled_image_origins.add(origin)
-                            self._progress(
-                                f"image {article['source_id']}: disabled origin {origin} after "
-                                f"{self.image_origin_failures[origin]} consecutive failures"
-                            )
-                    if has_primary:
-                        break
-                    continue
-                content = response.content
-                if len(content) > MAX_IMAGE_BYTES:
-                    raise ValueError(f"image exceeds {MAX_IMAGE_BYTES} byte cap")
-                extension, content_type = _image_extension(response.headers.get("content-type"), content)
-                if not extension or not content_type:
-                    raise ValueError(f"unsupported image content type: {response.headers.get('content-type')}")
-
-                image_path = article_path.with_suffix(extension)
-                atomic_write_bytes(image_path, content)
-                self.stats["images_fetched"] += 1
-                self._inc_source_stat(article["source_id"], "images_fetched")
-                self._progress(f"image {article['source_id']}: saved {image_path.name}")
-                if origin:
-                    self.image_origin_failures[origin] = 0
-                return {
-                    "url": image_url,
-                    "path": _relative_to_project(image_path),
-                    "content_type": content_type,
-                    "bytes": len(content),
-                    "source": candidate.get("source"),
-                    "width": candidate.get("width"),
-                    "height": candidate.get("height"),
-                }
-            except Exception as exc:
-                self._progress(
-                    f"image {article['source_id']}: failed to fetch {image_url} - {type(exc).__name__}: {exc}"
-                )
-                self._record_error(
-                    "image_fetch_exception",
-                    image_url,
-                    article["source_id"],
-                    exc,
-                )
-                if origin:
-                    self.image_origin_failures[origin] = self.image_origin_failures.get(origin, 0) + 1
-                    if self.image_origin_failures[origin] >= 3:
-                        self.disabled_image_origins.add(origin)
-                        self._progress(
-                            f"image {article['source_id']}: disabled origin {origin} after "
-                            f"{self.image_origin_failures[origin]} consecutive failures"
-                        )
-                if has_primary:
-                    break
-            finally:
-                self._deregister_task(task_id)
-
-        self.stats["images_failed"] += 1
-        self._inc_source_stat(article["source_id"], "images_failed")
-        self._progress(f"image {article['source_id']}: failed {article['article_id']}")
-        return None
+        return article
 
     def _log(
         self,

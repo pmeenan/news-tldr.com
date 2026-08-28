@@ -2605,6 +2605,27 @@ def test_deduplication_pair_reviews_run_concurrently_for_disjoint_pairs(tmp_path
     assert client.max_in_flight > 1
 
 
+def test_strong_title_duplicate_candidates_are_reviewed_before_newer_prescreen_pairs() -> None:
+    from pipeline.aggregate import _ordered_deduplication_candidate_pairs
+
+    dolly_pair = frozenset(("dolly-dead", "dolly-dies"))
+    broad_pair = frozenset(("newer-a", "newer-b"))
+    events = {
+        "dolly-dead": {"updated_at": "2026-08-25T18:20:00Z"},
+        "dolly-dies": {"updated_at": "2026-08-25T18:20:00Z"},
+        "newer-a": {"updated_at": "2026-08-25T18:30:00Z"},
+        "newer-b": {"updated_at": "2026-08-25T18:30:00Z"},
+    }
+
+    ordered = _ordered_deduplication_candidate_pairs(
+        [broad_pair, dolly_pair],
+        candidate_priorities={dolly_pair: 4, broad_pair: 1},
+        events_by_id=events,
+    )
+
+    assert ordered == [dolly_pair, broad_pair]
+
+
 def test_deduplicate_active_events_llm_requires_high_confidence(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "pipeline.db"
     migrate(db_path)
