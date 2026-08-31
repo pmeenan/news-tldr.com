@@ -22,6 +22,8 @@ def _valid_fixture(tmp_path: Path) -> dict[str, Path]:
     db_path = tmp_path / "pipeline.db"
     article_id = "article-1"
     event_id = "2026-08-24-test-event"
+    css_asset = "assets/site.1111111111111111.css"
+    js_asset = "assets/site.2222222222222222.js"
 
     _write_json(
         config_dir / "categories.json",
@@ -113,9 +115,10 @@ def _valid_fixture(tmp_path: Path) -> dict[str, Path]:
     )
     for relative in (
         "index.html",
+        "favicon.ico",
         "archive/index.html",
-        "assets/site.css",
-        "assets/site.js",
+        css_asset,
+        js_asset,
         "assets/social-card.png",
         "robots.txt",
         "sitemap.xml",
@@ -125,6 +128,12 @@ def _valid_fixture(tmp_path: Path) -> dict[str, Path]:
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.suffix == ".png":
             path.write_bytes(b"png")
+        elif relative == "index.html":
+            path.write_text(
+                f'<link rel="stylesheet" href="/{css_asset}">'
+                f'<script src="/{js_asset}" defer></script>',
+                encoding="utf-8",
+            )
         else:
             path.write_text("ok", encoding="utf-8")
     _write_json(dist_dir / "api" / "active-stories.json", {"stories": []})
@@ -152,7 +161,7 @@ def test_validate_artifacts_accepts_complete_fixture(tmp_path: Path) -> None:
         "events": 1,
         "stories": 1,
         "active_index_stories": 1,
-            "static_files": 10,
+            "static_files": 11,
         "categories": 1,
     }
 

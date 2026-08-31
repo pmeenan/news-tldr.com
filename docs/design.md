@@ -14,9 +14,9 @@ news-tldr.com is a filesystem-backed RSS aggregator that collects source article
 ## Technology Stack
 
 - **Pipeline**: Python. Libraries: `feedparser`, `httpx` (HTTP/2-enabled collection client and pooled HTTP/1.1 Gemini client), `h2`, `trafilatura` (article extraction), `beautifulsoup4` (custom scrapers), hosted LLM API client (Gemini Developer API by default). SQLite is accessed through Python's standard-library `sqlite3` module.
-- **Presentation**: Dependency-free Python renderer in `pipeline/present.py`. Generates static HTML/CSS/JSON from published story artifacts.
+- **Presentation**: Dependency-free Python renderer in `pipeline/present.py`. Generates static HTML, content-fingerprinted CSS/JavaScript, and JSON from published story artifacts.
 - **State**: SQLite database for pipeline state, incremental processing tracking, and fast lookups. JSON files remain the human-readable artifacts for each stage.
-- **Deployment**: The pipeline environment (including the SQLite database, staging files, and lock states) is never web-accessible. Only generated files from `dist/` are copied to the Nginx document root at `/var/www/news-tldr.com/`, which serves [news-tldr.com](https://news-tldr.com/). Scheduling remains isolated from the public-facing site.
+- **Deployment**: The pipeline environment (including the SQLite database, staging files, and lock states) is never web-accessible. Only generated files from `dist/` are copied to the Nginx document root at `/var/www/news-tldr.com/`, which serves [news-tldr.com](https://news-tldr.com/). The checked-in `deploy/nginx/news-tldr.com` virtual host gives generated HTML a 10-minute freshness lifetime so Cloudflare can serve matching pages from its edge cache. Scheduling remains isolated from the public-facing site.
 
 ## High-Level Architecture
 
@@ -688,10 +688,15 @@ Responsibilities:
   so social preview agents can retrieve metadata and images. Home, archive,
   404, and story pages include Open Graph/X metadata backed by the checked-in
   1200×630 `site/assets/social-card.png`; story pages use their own headline and
-  dek and declare `og:type=article`. Historical pages for archived events remain
-  a future enhancement.
+  dek and declare `og:type=article`. All generated pages reference the checked-in
+  `site/assets/favicon.ico`, which contains 16, 32, 48, and 64 px versions of a
+  simple newspaper mark. Historical pages for archived events remain a future
+  enhancement.
 - Render source links with paywall indicators and uncertainty notes.
-- Output fully static, cacheable HTML/CSS/JSON with no application runtime.
+- Output fully static, cacheable HTML/CSS/JSON with no application runtime. CSS
+  and JavaScript use the first 16 hexadecimal characters of their SHA-256 content
+  hash in the filename, so unchanged presentation assets keep a stable URL while
+  changed content produces a new URL.
 - Apply a strict Content Security Policy. CSS and JavaScript are generated locally and loaded from the same origin, so there are no external assets requiring Subresource Integrity.
 
 ### Stage 4 Implementation
@@ -717,9 +722,22 @@ and source URLs before writing into a temporary sibling directory. It replaces
 relative, broad, symlinked, or source-equal destinations and rejects symlinks or
 path traversal in the generated tree. It copies generated assets and story pages
 before `index.html`, then records the exact managed path set in
-`.news-tldr-managed.json`. Later deploys remove only stale paths from that
-manifest and preserve unknown server-managed files. Public files are written
-with mode `0644`.
+`.news-tldr-managed.json`. Later deploys remove ordinary stale paths from that
+manifest and preserve unknown server-managed files. Previous content-hashed CSS
+and JavaScript remain managed and available because HTML or browser caches may
+legitimately request them during their one-year cache lifetime; the legacy
+unversioned paths are also retained for cached HTML during the initial migration.
+Public files are written with mode `0644`.
+
+The checked-in Nginx virtual host applies `expires 10m` to `.html` and `.htm`
+responses. Nginx emits `Cache-Control: max-age=600` and a matching `Expires`
+header, giving browsers and the configured Cloudflare HTML cache rule a bounded
+10-minute freshness window. The hourly build remains the source of content;
+after the freshness window, caches revalidate against Nginx's `Last-Modified`
+and `ETag` validators. Hashed `site.<fingerprint>.css` and
+`site.<fingerprint>.js` responses receive a one-year `Expires`/`max-age` policy
+plus `immutable`; a content change creates a new URL instead of invalidating an
+existing cached response.
 
 The initial production publish on August 24, 2026 generated and deployed 874
 public files for 433 stories. The homepage, a representative story page, and

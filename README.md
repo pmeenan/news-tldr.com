@@ -191,9 +191,24 @@ Presentation defaults live under `presentation` in `config/pipeline.json`.
 `publish_enabled: true` makes every normal top-level `run` publish automatically;
 `site_url`, `rolling_window_hours`, and `publish_dir` control canonical URLs,
 homepage freshness, and the production root. Deployment copies only generated
-static files, removes only stale files recorded in its managed manifest, preserves
+static files, removes only ordinary stale files recorded in its managed manifest,
+preserves prior and legacy CSS/JavaScript paths for cached pages, preserves
 unknown server files, and replaces `index.html` last so readers do not see a new
 homepage before its referenced pages and assets are present.
+
+The production Nginx virtual host is checked in at
+`deploy/nginx/news-tldr.com`. Generated HTML pages receive a 10-minute freshness
+lifetime (`Cache-Control: max-age=600` plus the corresponding `Expires` header),
+allowing the site's Cloudflare HTML cache rule to serve them from the edge before
+revalidating with the origin. CSS and JavaScript filenames include a 16-character
+SHA-256 content fingerprint, change only when their contents change, and receive a
+one-year immutable cache policy. Install and validate changes before reloading Nginx:
+
+```bash
+sudo install -o root -g root -m 0644 deploy/nginx/news-tldr.com /etc/nginx/sites-available/news-tldr.com
+sudo nginx -t
+sudo systemctl reload nginx
+```
 
 The homepage ranks the All view by fresh global impact and re-ranks each category
 by fresh category impact. Its global New/All control defaults to New and saves
@@ -225,9 +240,10 @@ Generated pages carry `noindex` metadata, and `robots.txt` blocks major search
 index crawlers while leaving ordinary/social-preview access allowed. The home,
 archive, and story pages publish complete Open Graph and X card metadata with a
 same-origin 1200×630 branded poster; story shares retain their own headline and
-description. The homepage status line stays compact by showing the visible
-count and a client-calculated relative generation time that refreshes every
-minute.
+description. Every page also references the checked-in multi-resolution
+newspaper favicon at `site/assets/favicon.ico`. The homepage status line stays
+compact by showing the visible count and a client-calculated relative generation
+time that refreshes every minute.
 
 ### Operations and Monitoring
 

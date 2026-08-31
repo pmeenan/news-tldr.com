@@ -224,6 +224,12 @@ gantt
   define Top as stories covered by at least two distinct sources.
 - [x] Keep the category and Latest Briefing rows in one sticky toolbar and
   return to the page top when the selected category changes.
+- [x] Check in the production Nginx virtual host and give generated HTML a
+  10-minute browser/Cloudflare cache lifetime.
+- [x] Content-fingerprint generated CSS and JavaScript, cache hashed assets for
+  one year, and retain prior/legacy paths for cached HTML during deployments.
+- [x] Add a checked-in multi-resolution newspaper favicon and reference it from
+  every generated page.
 
 ## Backlog
 

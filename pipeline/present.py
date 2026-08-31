@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -21,6 +23,7 @@ from pipeline.paths import (
     ACTIVE_STORIES_PATH,
     CONFIG_DIR,
     DIST_DIR,
+    FAVICON_PATH,
     LOCK_PATH,
     SOCIAL_CARD_PATH,
     STORY_DIR,
@@ -28,10 +31,15 @@ from pipeline.paths import (
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v13"
+PRESENTATION_VERSION = "presentation-v15"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
+ASSET_FINGERPRINT_LENGTH = 16
+VERSIONED_SITE_ASSET_PATTERN = re.compile(
+    rf"^assets/site\.[0-9a-f]{{{ASSET_FINGERPRINT_LENGTH}}}\.(?:css|js)$"
+)
+LEGACY_SITE_ASSET_PATHS = frozenset({"assets/site.css", "assets/site.js"})
 
 ROBOTS_TXT = """User-agent: Googlebot
 Disallow: /
@@ -603,6 +611,17 @@ renderStories();
 """.strip()
 
 
+def _fingerprinted_asset_path(extension: str, content: str) -> str:
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:ASSET_FINGERPRINT_LENGTH]
+    return f"assets/site.{digest}.{extension}"
+
+
+SITE_CSS_CONTENT = SITE_CSS + "\n"
+SITE_JS_CONTENT = SITE_JS + "\n"
+SITE_CSS_ASSET_PATH = _fingerprinted_asset_path("css", SITE_CSS_CONTENT)
+SITE_JS_ASSET_PATH = _fingerprinted_asset_path("js", SITE_JS_CONTENT)
+
+
 def presentation_once(
     *,
     publish: bool | None = None,
@@ -777,9 +796,17 @@ def deploy_static_site(*, source_dir: Path, publish_dir: Path) -> dict[str, Any]
         copied += 1
 
     stale_files = sorted(previous_files - set(source_files), reverse=True)
+    retained_site_assets: set[str] = set()
     removed = 0
     for relative in stale_files:
         target = _safe_publish_target(publish_root, relative)
+        is_retained_site_asset = (
+            relative in LEGACY_SITE_ASSET_PATHS
+            or VERSIONED_SITE_ASSET_PATTERN.fullmatch(relative)
+        )
+        if is_retained_site_asset and target.is_file():
+            retained_site_assets.add(relative)
+            continue
         if target.is_file() or target.is_symlink():
             target.unlink()
             removed += 1
@@ -791,7 +818,7 @@ def deploy_static_site(*, source_dir: Path, publish_dir: Path) -> dict[str, Any]
         "version": 1,
         "presentation_version": PRESENTATION_VERSION,
         "published_at": isoformat_z(),
-        "files": sorted(source_files),
+        "files": sorted(set(source_files) | retained_site_assets),
     }
     _write_public_bytes(
         publish_root / DEPLOY_MANIFEST,
@@ -802,6 +829,7 @@ def deploy_static_site(*, source_dir: Path, publish_dir: Path) -> dict[str, Any]
         "publish_dir": str(publish_root),
         "files_published": copied,
         "stale_files_removed": removed,
+        "site_assets_retained": len(retained_site_assets),
     }
 
 
@@ -818,8 +846,9 @@ def _write_site_files(
     rolling_window_hours: int,
     active_index: dict[str, Any],
 ) -> None:
-    _write_text(root / "assets" / "site.css", SITE_CSS + "\n")
-    _write_text(root / "assets" / "site.js", SITE_JS + "\n")
+    _write_text(root / SITE_CSS_ASSET_PATH, SITE_CSS_CONTENT)
+    _write_text(root / SITE_JS_ASSET_PATH, SITE_JS_CONTENT)
+    _write_public_bytes(root / "favicon.ico", FAVICON_PATH.read_bytes())
     _write_public_bytes(root / "assets" / "social-card.png", SOCIAL_CARD_PATH.read_bytes())
     _write_text(
         root / "index.html",
@@ -1119,7 +1148,7 @@ def _page(
     og_type: str = "website",
     social_image: str | None = None,
 ) -> str:
-    script_tag = '<script src="/assets/site.js" defer></script>' if script else ""
+    script_tag = f'<script src="/{SITE_JS_ASSET_PATH}" defer></script>' if script else ""
     image_meta = ""
     if social_image:
         image_meta = (
@@ -1141,6 +1170,7 @@ def _page(
         "object-src 'none'; base-uri 'none'; form-action 'none'\">"
         '<meta name="robots" content="noindex,follow,noarchive,max-image-preview:large">'
         f"<title>{_e(title)}</title><meta name=\"description\" content=\"{_attr(description)}\">"
+        '<link rel="icon" href="/favicon.ico" type="image/x-icon" sizes="16x16 32x32 48x48 64x64">'
         f'<link rel="canonical" href="{_attr(canonical)}">'
         f'<meta property="og:type" content="{_attr(og_type)}"><meta property="og:site_name" content="news-tldr.com">'
         f'<meta property="og:title" content="{_attr(title)}">'
@@ -1149,7 +1179,7 @@ def _page(
         f'{image_meta}<meta name="twitter:card" content="summary_large_image">'
         f'<meta name="twitter:title" content="{_attr(title)}">'
         f'<meta name="twitter:description" content="{_attr(description)}">'
-        '<link rel="stylesheet" href="/assets/site.css">'
+        f'<link rel="stylesheet" href="/{SITE_CSS_ASSET_PATH}">'
         f"{script_tag}</head><body><header class=\"site-header\"><div class=\"masthead\">"
         '<a class="brand" href="/">news<span>-tldr</span>.com</a>'
         '<p class="tagline">The important facts, the open questions, and the sources — without the churn.</p>'

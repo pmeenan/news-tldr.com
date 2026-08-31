@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
+import struct
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from pipeline.present import DEPLOY_MANIFEST, build_static_site, deploy_static_site
+
+
+def _site_asset(output_dir: Path, extension: str) -> Path:
+    matches = list((output_dir / "assets").glob(f"site.*.{extension}"))
+    assert len(matches) == 1
+    return matches[0]
 
 
 def _story(story_id: str, *, updated_at: str, headline: str = "A test headline") -> dict:
@@ -103,6 +111,8 @@ def test_build_static_site_renders_current_stories_and_keeps_old_detail_pages(tm
     detail = (output_dir / "stories" / current["story_id"] / "index.html").read_text(
         encoding="utf-8"
     )
+    css_asset = _site_asset(output_dir, "css")
+    js_asset = _site_asset(output_dir, "js")
     assert stats["stories_rendered"] == 2
     assert stats["homepage_stories"] == 1
     assert "Current &lt;script&gt;alert(1)&lt;/script&gt; story" in home
@@ -124,8 +134,25 @@ def test_build_static_site_renders_current_stories_and_keeps_old_detail_pages(tm
     ) in home
     assert "About</a> · <a href=\"/archive/\">Archive</a>" in detail
     assert (output_dir / "api" / "active-stories.json").exists()
+    favicon = (output_dir / "favicon.ico").read_bytes()
+    assert struct.unpack("<HHH", favicon[:6]) == (0, 1, 4)
+    favicon_sizes = {
+        (favicon[6 + index * 16] or 256, favicon[7 + index * 16] or 256)
+        for index in range(4)
+    }
+    assert favicon_sizes == {(16, 16), (32, 32), (48, 48), (64, 64)}
+    assert '<link rel="icon" href="/favicon.ico" type="image/x-icon"' in home
+    assert '<link rel="icon" href="/favicon.ico" type="image/x-icon"' in detail
     assert (output_dir / "assets" / "social-card.png").is_file()
     assert (output_dir / "sitemap.xml").exists()
+    assert not (output_dir / "assets" / "site.css").exists()
+    assert not (output_dir / "assets" / "site.js").exists()
+    assert css_asset.name == f"site.{hashlib.sha256(css_asset.read_bytes()).hexdigest()[:16]}.css"
+    assert js_asset.name == f"site.{hashlib.sha256(js_asset.read_bytes()).hexdigest()[:16]}.js"
+    assert f'href="/assets/{css_asset.name}"' in home
+    assert f'src="/assets/{js_asset.name}"' in home
+    assert f'href="/assets/{css_asset.name}"' in detail
+    assert f'src="/assets/{js_asset.name}"' not in detail
 
 
 def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
@@ -150,7 +177,7 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     )
 
     home = (output_dir / "index.html").read_text(encoding="utf-8")
-    script = (output_dir / "assets" / "site.js").read_text(encoding="utf-8")
+    script = _site_asset(output_dir, "js").read_text(encoding="utf-8")
     assert '>World</button>' in home
     assert '>Business</button>' in home
     assert '>Tech</button>' in home
@@ -215,7 +242,7 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "if (nextCategory === activeCategory) return;" in script
     assert "window.scrollTo({ top: 0, behavior: reducedMotion ? 'auto' : 'smooth' })" in script
 
-    css = (output_dir / "assets" / "site.css").read_text(encoding="utf-8")
+    css = _site_asset(output_dir, "css").read_text(encoding="utf-8")
     assert ".reader-toolbar { position: sticky; top: 0; z-index: 20; background: var(--paper); }" in css
     assert ".reader-toolbar:not(:has(.edition)) { border-bottom: 1px solid var(--ink); }" in css
     assert ".home-main { padding-top: 0; }" in css
@@ -348,3 +375,39 @@ def test_deploy_static_site_requires_absolute_safe_destination(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="absolute"):
         deploy_static_site(source_dir=source, publish_dir=Path("relative-site"))
+
+
+def test_deploy_static_site_retains_previous_and_legacy_site_assets(tmp_path: Path) -> None:
+    old_asset = "assets/site.1111111111111111.css"
+    new_asset = "assets/site.2222222222222222.css"
+    legacy_asset = "assets/site.js"
+    source = tmp_path / "dist"
+    (source / "assets").mkdir(parents=True)
+    (source / "index.html").write_text("new home", encoding="utf-8")
+    (source / new_asset).write_text("new css", encoding="utf-8")
+
+    target = tmp_path / "production"
+    (target / "assets").mkdir(parents=True)
+    (target / old_asset).write_text("old css", encoding="utf-8")
+    (target / legacy_asset).write_text("legacy js", encoding="utf-8")
+    (target / "obsolete.txt").write_text("obsolete", encoding="utf-8")
+    (target / DEPLOY_MANIFEST).write_text(
+        json.dumps({"files": ["index.html", old_asset, legacy_asset, "obsolete.txt"]}),
+        encoding="utf-8",
+    )
+
+    stats = deploy_static_site(source_dir=source, publish_dir=target.resolve())
+
+    assert stats["stale_files_removed"] == 1
+    assert stats["site_assets_retained"] == 2
+    assert (target / old_asset).read_text(encoding="utf-8") == "old css"
+    assert (target / new_asset).read_text(encoding="utf-8") == "new css"
+    assert (target / legacy_asset).read_text(encoding="utf-8") == "legacy js"
+    assert not (target / "obsolete.txt").exists()
+    manifest = json.loads((target / DEPLOY_MANIFEST).read_text(encoding="utf-8"))
+    assert manifest["files"] == [
+        "assets/site.1111111111111111.css",
+        "assets/site.2222222222222222.css",
+        "assets/site.js",
+        "index.html",
+    ]

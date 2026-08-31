@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -26,6 +27,7 @@ from pipeline.util import atomic_write_json, isoformat_z, sanitize_id, utc_now
 
 VALIDATION_VERSION = "artifact-validation-v1"
 HEALTH_VERSION = "operations-health-v1"
+VERSIONED_SITE_ASSET_PATTERN = re.compile(r"^site\.[0-9a-f]{16}\.(css|js)$")
 REQUIRED_PIPELINE_STAGES = (
     "maintenance",
     "collection",
@@ -652,10 +654,9 @@ def _validate_static_output(
         return 0
     required = (
         dist_dir / "index.html",
+        dist_dir / "favicon.ico",
         dist_dir / "archive" / "index.html",
         dist_dir / "api" / "active-stories.json",
-        dist_dir / "assets" / "site.css",
-        dist_dir / "assets" / "site.js",
         dist_dir / "assets" / "social-card.png",
         dist_dir / "robots.txt",
         dist_dir / "sitemap.xml",
@@ -663,6 +664,31 @@ def _validate_static_output(
     for path in required:
         if not path.is_file():
             report(path, "required static file is missing")
+    assets_dir = dist_dir / "assets"
+    versioned_assets: dict[str, list[Path]] = {"css": [], "js": []}
+    if assets_dir.is_dir():
+        for path in assets_dir.iterdir():
+            match = VERSIONED_SITE_ASSET_PATTERN.fullmatch(path.name)
+            if path.is_file() and match:
+                versioned_assets[match.group(1)].append(path)
+    try:
+        home_html = (dist_dir / "index.html").read_text(encoding="utf-8")
+    except OSError:
+        home_html = ""
+    for extension, matches in versioned_assets.items():
+        if len(matches) != 1:
+            report(
+                assets_dir,
+                f"expected exactly one versioned site {extension} asset, found {len(matches)}",
+            )
+            continue
+        asset_url = f"/assets/{matches[0].name}"
+        if asset_url not in home_html:
+            report(matches[0], f"homepage does not reference versioned site {extension} asset")
+    for filename in ("site.css", "site.js"):
+        unversioned = assets_dir / filename
+        if unversioned.is_file():
+            report(unversioned, "unversioned site asset must not be published")
     count = 0
     for path in dist_dir.rglob("*"):
         if path.is_symlink():
