@@ -158,6 +158,7 @@ def test_build_static_site_renders_current_stories_and_keeps_old_detail_pages(tm
     assert f'src="/assets/{js_asset.name}"' not in detail
     assert "data-sync-button" in home
     assert "data-sync-dialog" in home
+    assert 'data-reader-pending aria-busy="true"' in home
     assert "data-sync-button" not in detail
 
 
@@ -221,12 +222,21 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "syncRequest('/api/sync/v1/merge'" in script
     assert "SYNC_DEBOUNCE_MS = 4 * 1000" in script
     assert "SYNC_MAX_RETRY_MS = 5 * 60 * 1000" in script
+    assert "SYNC_REQUEST_TIMEOUT_MS = 8 * 1000" in script
     assert "SYNC_MAX_READS = 2000" in script
     assert "if (syncDirty && syncToken)" in script
-    assert "function handleSyncFragment()" in script
+    assert "async function handleSyncFragment({ refreshView = false } = {})" in script
     assert "window.addEventListener('hashchange'" in script
-    assert "if (syncButton) handleSyncFragment();" in script
-    assert "const fragmentHandled = handleSyncFragment();" in script
+    assert "void handleSyncFragment({ refreshView: true });" in script
+    assert "const fragmentHandled = await handleSyncFragment();" in script
+    assert "if (applyRemote) mergeRemoteReads(payload?.reads);" in script
+    assert "void synchronizeReads({ quiet: true });" in script
+    assert "await synchronizeReads({ quiet: true, applyRemote: true });" in script
+    assert "document.addEventListener('visibilitychange'" not in script
+    assert "window.addEventListener('online'" not in script
+    assert "event.key === VIEWED_KEY" not in script
+    assert "function revealReader()" in script
+    assert "async function initializeReader()" in script
     assert "Anyone with the private link can join this sync group" in home
     assert "Read stories are synchronized automatically in the background" in home
     assert "Sync now" not in home
@@ -263,7 +273,7 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert 'data-source-share="0.4000"' in home
     assert '<div class="reader-toolbar"><nav class="category-nav"' in home
     assert home.index('<div class="reader-toolbar">') < home.index('Latest briefing')
-    assert home.index('Latest briefing') < home.index('<main class="home-main">')
+    assert home.index('Latest briefing') < home.index('<main class="home-main"')
     assert "if (nextCategory === activeCategory) return;" in script
     assert "window.scrollTo({ top: 0, behavior: reducedMotion ? 'auto' : 'smooth' })" in script
 
@@ -283,6 +293,8 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert ".story-card.is-read .read-indicator" in css
     assert ".sync-button.is-connected" in css
     assert ".sync-dialog::backdrop" in css
+    assert "main[data-reader-pending] > *" in css
+    assert 'content: "Loading latest read status…"' in css
     assert ".edition > p { white-space: nowrap; }" in css
     assert '.section-toggle[aria-expanded="true"]::after' in css
     assert ".story-grid[hidden] { display: none; }" in css
@@ -348,6 +360,7 @@ def test_robots_blocks_search_indexers_without_blocking_social_crawlers(tmp_path
     assert "User-agent: *\nDisallow: /" not in robots
     assert "Sitemap:" not in robots
     assert "data-sync-button" not in home
+    assert "data-reader-pending" not in home
 
 
 def test_build_static_site_rejects_path_traversal_story_id(tmp_path: Path) -> None:

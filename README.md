@@ -246,8 +246,10 @@ unless the reader explicitly starts anonymous synchronization from the header
 icon. Starting sync creates a private capability link; another browser that opens
 the link unions its local read state with the group. The fragment token is removed
 from the address bar immediately, including for same-page fragment navigation;
-writes are debounced, link/foreground/reload visits pull and rerender the latest
-state, and disconnecting preserves the browser's local history.
+writes are debounced and sent silently without changing the current view. A new
+page visit fetches the latest shared state before displaying stories. Tab changes
+and cross-tab writes do not fetch or rerender. Disconnecting preserves the
+browser's local history.
 Anyone possessing the private link can join the group, so the UI identifies it as
 sensitive.
 

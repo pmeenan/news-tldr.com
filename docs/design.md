@@ -653,8 +653,11 @@ Responsibilities:
 - Anonymous sync uses a shareable fragment capability (`#sync=v1.<token>`).
   The browser stores the 256-bit token locally, immediately removes imported
   fragments from the visible URL, handles both initial-load and same-document
-  `hashchange` navigation, uploads the newest 2,000 retained reads on group
-  creation/load/foreground, and debounces new-read writes by four seconds.
+  `hashchange` navigation, and uploads the newest 2,000 retained reads. Initial
+  page display waits for one bounded pull and renders once with the merged state.
+  Later writes are debounced by four seconds and ignore the returned union, so
+  they never rerender the current view. Focus, tab, online, and cross-tab storage
+  events do not pull; a later page visit obtains the latest shared state.
   Server and device state form a grow-only union within the three-day retention
   window; the newest timestamp wins. Disconnecting clears only that browser's
   token, while the separate delete action removes shared server state.
@@ -789,8 +792,10 @@ responses set `Cache-Control: private, no-store`.
 immediate SQLite transaction, unions by story ID using the maximum read timestamp,
 prunes entries beyond the three-day window, retains only the newest bounded set,
 updates the revision, and returns the complete merged map. This is idempotent and
-avoids a fetch-then-write race. There is intentionally no unread operation; adding
-one would require tombstones or another conflict model.
+avoids a fetch-then-write race. The client applies that returned map only during
+initial/link import; ordinary background writes use the same atomic endpoint but
+leave the current display unchanged. There is intentionally no unread operation;
+adding one would require tombstones or another conflict model.
 
 ### Containment and Privacy
 

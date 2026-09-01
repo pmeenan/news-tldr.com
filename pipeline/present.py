@@ -31,7 +31,7 @@ from pipeline.paths import (
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v19"
+PRESENTATION_VERSION = "presentation-v20"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
@@ -146,6 +146,11 @@ a { color: inherit; }
 .category-nav button, .category-nav a { border: 1px solid var(--line); border-radius: 999px; background: transparent; padding: .43rem .62rem; white-space: nowrap; color: var(--muted); text-decoration: none; font: 700 .69rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .035em; cursor: pointer; }
 .category-nav button:hover, .category-nav button[aria-pressed="true"], .category-nav a:hover { color: white; border-color: var(--ink); background: var(--ink); }
 main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+main[data-reader-pending] { position: relative; min-height: 14rem; }
+main[data-reader-pending] > * { visibility: hidden; animation: reader-pending-reveal 0s 12s forwards; }
+main[data-reader-pending]::before { content: "Loading latest read status…"; position: absolute; inset: 0; padding: 4rem 1rem; color: var(--muted); font: 700 .78rem/1.4 system-ui, sans-serif; text-align: center; animation: reader-pending-hide 0s 12s forwards; }
+@keyframes reader-pending-reveal { to { visibility: visible; } }
+@keyframes reader-pending-hide { to { visibility: hidden; } }
 .home-main { padding-top: 0; }
 .edition { max-width: 1180px; margin: 0 auto; padding: .15rem 1.25rem .75rem; display: flex; justify-content: space-between; gap: 1rem; align-items: center; border-top: 1px solid var(--line); border-bottom: 3px double var(--ink); }
 .edition-heading { display: flex; align-items: center; gap: .8rem; min-width: 0; }
@@ -295,6 +300,7 @@ const SYNC_FRAGMENT_PREFIX = 'sync=v1.';
 const SYNC_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const SYNC_DEBOUNCE_MS = 4 * 1000;
 const SYNC_MAX_RETRY_MS = 5 * 60 * 1000;
+const SYNC_REQUEST_TIMEOUT_MS = 8 * 1000;
 const SYNC_MAX_READS = 2000;
 const VIEWED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
 const VIEW_THRESHOLD_MS = 1 * 1000;
@@ -312,6 +318,7 @@ const sectionRoot = document.querySelector('[data-story-sections]');
 const emptyState = document.querySelector('[data-empty-state]');
 const markViewReadButton = document.querySelector('[data-mark-view-read]');
 const toggleSectionsButton = document.querySelector('[data-toggle-sections]');
+const readerMain = document.querySelector('[data-reader-pending]');
 const syncButton = document.querySelector('[data-sync-button]');
 const syncDialog = document.querySelector('[data-sync-dialog]');
 const syncCloseButton = document.querySelector('[data-sync-close]');
@@ -336,6 +343,7 @@ let syncInFlight = null;
 let syncDirty = false;
 let syncFragmentImported = false;
 let syncRetryMs = SYNC_DEBOUNCE_MS;
+let readerReady = false;
 
 function loadViewed() {
   const now = Date.now();
@@ -477,13 +485,14 @@ function consumeSyncFragment() {
   setSyncToken(candidate);
 }
 
-function handleSyncFragment() {
+async function handleSyncFragment({ refreshView = false } = {}) {
   syncFragmentImported = false;
   consumeSyncFragment();
   if (!syncFragmentImported) return false;
   updateSyncUi();
   openSyncDialog();
-  if (syncToken) void synchronizeReads();
+  if (syncToken) await synchronizeReads({ applyRemote: true });
+  if (refreshView) renderStories();
   return true;
 }
 
@@ -522,7 +531,6 @@ function mergeRemoteReads(reads) {
   if (changed) {
     persistViewedMap(viewed);
   }
-  renderStories();
   return changed;
 }
 
@@ -531,25 +539,32 @@ async function syncRequest(path, { method = 'POST', token = '', body = null, kee
   if (body !== null) headers['Content-Type'] = 'application/json';
   if (token) headers.Authorization = `Bearer ${token}`;
   const encodedBody = body === null ? null : JSON.stringify(body);
-  const response = await fetch(path, {
-    method,
-    headers,
-    body: encodedBody,
-    credentials: 'same-origin',
-    cache: 'no-store',
-    keepalive: keepalive && (encodedBody?.length || 0) <= 60 * 1024,
-  });
-  let payload = null;
-  if (response.status !== 204) {
-    try { payload = await response.json(); } catch (_) {}
+  const controller = new AbortController();
+  const requestTimeout = window.setTimeout(() => controller.abort(), SYNC_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(path, {
+      method,
+      headers,
+      body: encodedBody,
+      credentials: 'same-origin',
+      cache: 'no-store',
+      keepalive: keepalive && (encodedBody?.length || 0) <= 60 * 1024,
+      signal: controller.signal,
+    });
+    let payload = null;
+    if (response.status !== 204) {
+      try { payload = await response.json(); } catch (_) {}
+    }
+    if (!response.ok) {
+      const error = new Error(payload?.message || `Sync request failed (${response.status}).`);
+      error.status = response.status;
+      error.code = payload?.error || '';
+      throw error;
+    }
+    return payload;
+  } finally {
+    window.clearTimeout(requestTimeout);
   }
-  if (!response.ok) {
-    const error = new Error(payload?.message || `Sync request failed (${response.status}).`);
-    error.status = response.status;
-    error.code = payload?.error || '';
-    throw error;
-  }
-  return payload;
 }
 
 function scheduleSync(delay = SYNC_DEBOUNCE_MS) {
@@ -558,15 +573,17 @@ function scheduleSync(delay = SYNC_DEBOUNCE_MS) {
   if (syncTimer !== null) window.clearTimeout(syncTimer);
   syncTimer = window.setTimeout(() => {
     syncTimer = null;
-    void synchronizeReads();
+    void synchronizeReads({ quiet: true });
   }, delay);
 }
 
-async function synchronizeReads({ keepalive = false, quiet = false } = {}) {
+async function synchronizeReads({ keepalive = false, quiet = false, applyRemote = false } = {}) {
   if (!syncButton || !syncToken) return null;
   if (syncInFlight) {
     syncDirty = true;
-    return syncInFlight;
+    await syncInFlight;
+    if (!syncButton || !syncToken) return null;
+    return synchronizeReads({ keepalive, quiet, applyRemote });
   }
   if (syncTimer !== null) {
     window.clearTimeout(syncTimer);
@@ -585,7 +602,7 @@ async function synchronizeReads({ keepalive = false, quiet = false } = {}) {
     keepalive,
   }).then((payload) => {
     if (requestToken !== syncToken) return payload;
-    mergeRemoteReads(payload?.reads);
+    if (applyRemote) mergeRemoteReads(payload?.reads);
     syncRetryMs = SYNC_DEBOUNCE_MS;
     if (!quiet) updateSyncUi(`Synchronized ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`);
     return payload;
@@ -903,7 +920,10 @@ if (markViewReadButton) {
   });
 }
 
-if ('IntersectionObserver' in window) {
+function startReadObserver() {
+  if (readerReady) return;
+  readerReady = true;
+  if (!('IntersectionObserver' in window)) return;
   const observer = new IntersectionObserver((entries) => {
     for (const entry of entries) {
       const title = entry.target;
@@ -921,6 +941,14 @@ if ('IntersectionObserver' in window) {
     }
   }, { threshold: [0.6] });
   for (const title of document.querySelectorAll('[data-story-title]')) observer.observe(title);
+}
+
+function revealReader() {
+  if (readerMain) {
+    readerMain.removeAttribute('data-reader-pending');
+    readerMain.removeAttribute('aria-busy');
+  }
+  startReadObserver();
 }
 
 window.addEventListener('pagehide', () => {
@@ -941,37 +969,33 @@ if (syncCopyButton) syncCopyButton.addEventListener('click', () => void copySync
 if (syncDisconnectButton) syncDisconnectButton.addEventListener('click', disconnectSync);
 if (syncDeleteButton) syncDeleteButton.addEventListener('click', () => void deleteSyncGroup());
 
-window.addEventListener('online', () => void synchronizeReads({ quiet: true }));
 window.addEventListener('hashchange', () => {
-  if (syncButton) handleSyncFragment();
-});
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') void synchronizeReads({ quiet: true });
+  if (syncButton) void handleSyncFragment({ refreshView: true });
 });
 window.addEventListener('storage', (event) => {
-  if (event.key === VIEWED_KEY) {
-    const latest = loadViewed();
-    for (const storyId of Object.keys(viewed)) delete viewed[storyId];
-    Object.assign(viewed, latest);
-    renderStories();
-    scheduleSync();
-  } else if (event.key === SYNC_TOKEN_KEY) {
+  if (event.key === SYNC_TOKEN_KEY) {
     syncToken = loadSyncToken();
     updateSyncUi();
-    if (syncButton && syncToken) void synchronizeReads({ quiet: true });
   }
 });
 
 updateSiteFreshness();
 window.setInterval(updateSiteFreshness, 60 * 1000);
-renderStories();
-if (syncButton) {
-  const fragmentHandled = handleSyncFragment();
-  if (!fragmentHandled) {
-    updateSyncUi();
-    if (syncToken) void synchronizeReads({ quiet: true });
+async function initializeReader() {
+  try {
+    if (syncButton) {
+      const fragmentHandled = await handleSyncFragment();
+      if (!fragmentHandled) {
+        updateSyncUi();
+        if (syncToken) await synchronizeReads({ quiet: true, applyRemote: true });
+      }
+    }
+  } finally {
+    renderStories();
+    revealReader();
   }
 }
+void initializeReader();
 """.strip()
 
 
@@ -1569,7 +1593,9 @@ def _page(
             f'<meta name="twitter:image" content="{_attr(social_image)}">'
             '<meta name="twitter:image:alt" content="news-tldr.com — The news, distilled">'
         )
-    main_class = ' class="home-main"' if toolbar else ""
+    main_attributes = ' class="home-main"' if toolbar else ""
+    if script and reader_sync_enabled:
+        main_attributes += ' data-reader-pending aria-busy="true"'
     return (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -1595,7 +1621,7 @@ def _page(
         f'and the sources — without the churn.</p>{sync_header}</div>'
         f'</div></header>{sync_dialog}<div class="reader-toolbar"><nav class="category-nav" '
         f'aria-label="Story categories">{nav}</nav>{toolbar}</div>'
-        f"<main{main_class}>{content}</main><footer class=\"site-footer\"><div>"
+        f"<main{main_attributes}>{content}</main><footer class=\"site-footer\"><div>"
         '<span>Automated, source-attributed news summaries. Verify important details with the linked reporting.</span>'
         '<span><a href="https://github.com/pmeenan/news-tldr.com" rel="noopener noreferrer">About</a> · '
         '<a href="/archive/">Archive</a> · <a href="/api/active-stories.json">JSON</a></span>'

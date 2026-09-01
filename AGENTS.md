@@ -37,12 +37,14 @@ This file serves as the coordinator and handoff state for AI agents working on t
 - **Browser flow**: Added an optional masthead sync control that creates a
   256-bit private fragment link, imports it into local storage on another
   browser, removes it from the address bar, unions the last three days of read
-  state, pushes after a four-second idle period, and pulls on load, foreground,
-  reconnect, and same-page fragment navigation. Every successful pull rerenders
-  the reader immediately. The dialog explains in plain language that read
-  stories synchronize automatically and has no redundant manual-sync action.
-  Readers can disconnect one browser
-  without losing local history or explicitly delete the shared group.
+  state, and pushes after a four-second idle period. A new page waits for one
+  bounded pull before revealing and rendering stories. Later writes are silent
+  and do not apply the returned union, while focus, tab, online, and cross-tab
+  storage events do not pull or rerender. Opening a new capability link remains
+  an explicit pull/apply action. The dialog explains in plain language that
+  synchronization is automatic and has no redundant manual-sync action. Readers
+  can disconnect one browser without losing local history or explicitly delete
+  the shared group.
 - **Origin API**: Added dependency-free PHP create/merge/delete endpoints backed
   by a separate SQLite database. Tokens are stored only as SHA-256 hashes;
   requests require an exact allowed Origin and JSON; responses are no-store;
@@ -61,7 +63,7 @@ This file serves as the coordinator and handoff state for AI agents working on t
   the socket is `pmeenan:pmeenan` mode `0660`; PHP-FPM and Nginx are active and
   the origin smoke check returns the expected HTTP 415 validation response.
 - **Production state**: `presentation.reader_sync_enabled` is now `true`.
-  Presentation v18 was republished with 3,823 stories and 7,656 managed static
+  Presentation v20 was republished with 3,872 stories and 7,754 managed static
   files. The public homepage contains the sync control and private-link warning;
   a public create/merge/delete lifecycle returned HTTP 201/200/204, and the API
   validation response carries no-store, nosniff, no-referrer, and same-origin
@@ -71,8 +73,8 @@ This file serves as the coordinator and handoff state for AI agents working on t
   JavaScript syntax checking with Node, installer `bash -n`, and
   `validate-data --verbose` passed. `health --verbose` confirms SQLite,
   artifacts, freshness, and public endpoints are good but remains unhealthy
-  because the concurrent hourly editorial stage left four unrelated Gemini
-  capacity failures pending. No dependency was added.
+  because the concurrent hourly run had Gemini capacity failures in digestion
+  and left 43 editorial events pending. No dependency was added.
 - **Files touched**: `pipeline/present.py`, `server/sync/*.php`,
   `deploy/{nginx,php-fpm,cron}`, `scripts/install-sync-origin.sh`,
   `config/pipeline.json`, `tests/{test_present,test_sync_origin}.py`,

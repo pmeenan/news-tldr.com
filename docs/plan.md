@@ -232,7 +232,8 @@ gantt
   every generated page.
 - [x] Add opt-in anonymous cross-browser read-history sync using a private URL
   fragment capability, atomic three-day state union, debounced writes,
-  foreground refresh, local disconnect, and explicit shared-state deletion.
+  a single pre-display refresh, non-rerendering background writes, local
+  disconnect, and explicit shared-state deletion.
 - [x] Add a same-origin PHP/SQLite sync service isolated from pipeline state and
   the document root, with hashed tokens, strict schema/origin validation, daily
   retention cleanup, and a portable three-endpoint API contract.
