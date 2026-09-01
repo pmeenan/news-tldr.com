@@ -32,6 +32,54 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on September 1, 2026 (Contained Anonymous Reader Sync)
+
+- **Browser flow**: Added an optional masthead sync control that creates a
+  256-bit private fragment link, imports it into local storage on another
+  browser, removes it from the address bar, unions the last three days of read
+  state, pushes after a four-second idle period, and pulls on load, foreground,
+  reconnect, and same-page fragment navigation. Every successful pull rerenders
+  the reader immediately. The dialog explains in plain language that read
+  stories synchronize automatically and has no redundant manual-sync action.
+  Readers can disconnect one browser
+  without losing local history or explicitly delete the shared group.
+- **Origin API**: Added dependency-free PHP create/merge/delete endpoints backed
+  by a separate SQLite database. Tokens are stored only as SHA-256 hashes;
+  requests require an exact allowed Origin and JSON; responses are no-store;
+  validation, transactions, retention, and capacity limits live in
+  `server/sync/lib.php`.
+- **Containment**: The checked-in Nginx route exposes only three exact API
+  paths, applies layered request/body/connection limits and short FastCGI
+  timeouts, and sends them to a dedicated ondemand PHP-FPM pool capped at three
+  32 MiB workers. Application defaults cap the service at 2,000 groups, 100 new
+  groups/day, 2,000 reads/group, 256 KiB per request/state, and a 256 MiB SQLite
+  page limit. Reads expire after three days, inactive groups after 180 days,
+  and a daily cron command prunes retained state.
+- **Origin installation**: `scripts/install-sync-origin.sh` puts root-owned PHP
+  under `/opt/news-tldr-sync`, state under `/var/lib/news-tldr-sync`, and detects
+  the configured Nginx worker identity for the dedicated socket. On this host
+  the socket is `pmeenan:pmeenan` mode `0660`; PHP-FPM and Nginx are active and
+  the origin smoke check returns the expected HTTP 415 validation response.
+- **Production state**: `presentation.reader_sync_enabled` is now `true`.
+  Presentation v18 was republished with 3,823 stories and 7,656 managed static
+  files. The public homepage contains the sync control and private-link warning;
+  a public create/merge/delete lifecycle returned HTTP 201/200/204, and the API
+  validation response carries no-store, nosniff, no-referrer, and same-origin
+  resource-policy headers.
+- **Verification**: `PYTHONPATH=. ./.venv/bin/pytest -q` passed **278 tests**;
+  `ruff check .`, `compileall`, `git diff --check`, PHP lint for all sync files,
+  JavaScript syntax checking with Node, installer `bash -n`, and
+  `validate-data --verbose` passed. `health --verbose` confirms SQLite,
+  artifacts, freshness, and public endpoints are good but remains unhealthy
+  because the concurrent hourly editorial stage left four unrelated Gemini
+  capacity failures pending. No dependency was added.
+- **Files touched**: `pipeline/present.py`, `server/sync/*.php`,
+  `deploy/{nginx,php-fpm,cron}`, `scripts/install-sync-origin.sh`,
+  `config/pipeline.json`, `tests/{test_present,test_sync_origin}.py`,
+  `README.md`, `docs/{design,plan}.md`, and this handoff.
+- **Not committed.** The origin service and sync UI are installed and live;
+  source changes remain in the working tree.
+
 ### State on August 24, 2026 (Global New View + Sharing/Indexing + Color Refinement)
 
 - **Reader preference**: New is now the default New/All mode. The global choice uses the existing `newsTldrViewModeV1` local-storage key, is honored across category sections and later visits, and is reflected in the URL only for the non-default All mode. Three-day/10-second viewed-story behavior is unchanged.

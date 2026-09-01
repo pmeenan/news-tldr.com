@@ -1,0 +1,3 @@
+# Daily read-history retention cleanup. Install as /etc/cron.d/news-tldr-sync.
+43 3 * * * www-data SYNC_DB_PATH=/var/lib/news-tldr-sync/sync.sqlite /usr/bin/php /opt/news-tldr-sync/cleanup.php >/dev/null
+

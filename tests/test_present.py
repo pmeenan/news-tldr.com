@@ -104,6 +104,7 @@ def test_build_static_site_renders_current_stories_and_keeps_old_detail_pages(tm
         active_stories_path=active_path,
         site_url="https://news-tldr.com",
         rolling_window_hours=72,
+        reader_sync_enabled=True,
         now=datetime(2026, 8, 24, 1, tzinfo=UTC),
     )
 
@@ -121,6 +122,8 @@ def test_build_static_site_renders_current_stories_and_keeps_old_detail_pages(tm
     assert 'href="#"' in detail
     assert "javascript:alert" not in detail
     assert "Content-Security-Policy" in detail
+    assert "connect-src 'self'" in home
+    assert '<meta name="referrer" content="no-referrer">' in home
     assert '<meta name="robots" content="noindex,follow,noarchive,max-image-preview:large">' in detail
     assert '<meta property="og:type" content="article">' in detail
     assert (
@@ -153,6 +156,9 @@ def test_build_static_site_renders_current_stories_and_keeps_old_detail_pages(tm
     assert f'src="/assets/{js_asset.name}"' in home
     assert f'href="/assets/{css_asset.name}"' in detail
     assert f'src="/assets/{js_asset.name}"' not in detail
+    assert "data-sync-button" in home
+    assert "data-sync-dialog" in home
+    assert "data-sync-button" not in detail
 
 
 def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
@@ -173,6 +179,7 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
         output_dir=output_dir,
         story_dir=story_dir,
         active_stories_path=active_path,
+        reader_sync_enabled=True,
         now=datetime(2026, 8, 24, 1, tzinfo=UTC),
     )
 
@@ -208,6 +215,24 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "MIN_TOP_SOURCE_COUNT = 2" in script
     assert "VIEW_THRESHOLD_MS = 1 * 1000" in script
     assert "VIEWED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000" in script
+    assert "SYNC_TOKEN_KEY = 'newsTldrSyncTokenV1'" in script
+    assert "SYNC_FRAGMENT_PREFIX = 'sync=v1.'" in script
+    assert "history.replaceState(null, '', `${location.pathname}${location.search}`)" in script
+    assert "syncRequest('/api/sync/v1/merge'" in script
+    assert "SYNC_DEBOUNCE_MS = 4 * 1000" in script
+    assert "SYNC_MAX_RETRY_MS = 5 * 60 * 1000" in script
+    assert "SYNC_MAX_READS = 2000" in script
+    assert "if (syncDirty && syncToken)" in script
+    assert "function handleSyncFragment()" in script
+    assert "window.addEventListener('hashchange'" in script
+    assert "if (syncButton) handleSyncFragment();" in script
+    assert "const fragmentHandled = handleSyncFragment();" in script
+    assert "Anyone with the private link can join this sync group" in home
+    assert "Read stories are synchronized automatically in the background" in home
+    assert "Sync now" not in home
+    assert "data-sync-now" not in script
+    assert "Disconnect this browser" in home
+    assert "Delete synced data" in home
     assert "IntersectionObserver" in script
     assert "Boolean(viewed[card.dataset.storyId])" in script
     assert "activeCoverage === 'top' ? 'top' : 'stories'" in script
@@ -256,6 +281,8 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "letter-spacing: normal;" in css
     assert "letter-spacing: -.025em;" not in css
     assert ".story-card.is-read .read-indicator" in css
+    assert ".sync-button.is-connected" in css
+    assert ".sync-dialog::backdrop" in css
     assert ".edition > p { white-space: nowrap; }" in css
     assert '.section-toggle[aria-expanded="true"]::after' in css
     assert ".story-grid[hidden] { display: none; }" in css
@@ -313,12 +340,14 @@ def test_robots_blocks_search_indexers_without_blocking_social_crawlers(tmp_path
     )
 
     robots = (output_dir / "robots.txt").read_text(encoding="utf-8")
+    home = (output_dir / "index.html").read_text(encoding="utf-8")
     assert "User-agent: Googlebot\nDisallow: /" in robots
     assert "User-agent: bingbot\nDisallow: /" in robots
     assert "User-agent: DuckDuckBot\nDisallow: /" in robots
     assert "User-agent: *\nAllow: /" in robots
     assert "User-agent: *\nDisallow: /" not in robots
     assert "Sitemap:" not in robots
+    assert "data-sync-button" not in home
 
 
 def test_build_static_site_rejects_path_traversal_story_id(tmp_path: Path) -> None:

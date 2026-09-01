@@ -31,7 +31,7 @@ from pipeline.paths import (
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v15"
+PRESENTATION_VERSION = "presentation-v19"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
@@ -114,7 +114,32 @@ a { color: inherit; }
 .masthead { max-width: 1180px; margin: 0 auto; padding: 1.25rem 1.25rem 1rem; display: flex; gap: 2rem; align-items: end; justify-content: space-between; }
 .brand { text-decoration: none; font-size: clamp(2rem, 6vw, 4.4rem); line-height: .9; letter-spacing: -.065em; font-weight: 800; }
 .brand span { color: var(--accent); }
+.masthead-side { display: flex; align-items: flex-end; justify-content: flex-end; gap: .8rem; }
 .tagline { max-width: 30rem; margin: 0; color: var(--muted); font: 600 .78rem/1.4 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .1em; text-align: right; }
+.sync-button { flex: 0 0 auto; width: 2.45rem; height: 2.45rem; display: inline-grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
+.sync-button:hover, .sync-button.is-connected { color: var(--accent-dark); border-color: var(--accent-dark); }
+.sync-button svg { width: 1.15rem; height: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.sync-button.is-syncing svg { animation: sync-spin .9s linear infinite; }
+.sync-dialog { width: min(31rem, calc(100% - 2rem)); padding: 0; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); box-shadow: 0 1.2rem 4rem rgba(23,32,29,.28); }
+.sync-dialog::backdrop { background: rgba(23,32,29,.48); }
+.sync-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 1.2rem 1.25rem .8rem; border-bottom: 1px solid var(--line); }
+.sync-dialog-header h2 { margin: 0; font-size: 1.35rem; }
+.sync-dialog-close { border: 0; padding: .15rem .35rem; background: transparent; color: var(--muted); font: 1.4rem/1 system-ui, sans-serif; cursor: pointer; }
+.sync-dialog-body { padding: 1.15rem 1.25rem 1.3rem; font: .9rem/1.5 system-ui, sans-serif; }
+.sync-dialog-body p { margin: 0 0 1rem; }
+.sync-dialog-body [hidden] { display: none; }
+.sync-status { color: var(--muted); }
+.sync-share-label { display: block; margin-bottom: .45rem; color: var(--muted); font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.sync-share-url { width: 100%; margin-bottom: .7rem; padding: .65rem .7rem; border: 1px solid var(--line); background: var(--card); color: var(--ink); font: .78rem/1.3 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.sync-actions { display: flex; flex-wrap: wrap; gap: .55rem; }
+.sync-action { border: 1px solid var(--line); border-radius: 999px; padding: .55rem .8rem; background: transparent; color: var(--ink); font: 750 .72rem/1 system-ui, sans-serif; cursor: pointer; }
+.sync-action:hover { border-color: var(--ink); }
+.sync-action-primary { border-color: var(--ink); background: var(--ink); color: white; }
+.sync-action-danger { color: var(--accent-dark); }
+.sync-action:disabled { cursor: wait; opacity: .55; }
+.sync-privacy { margin-top: 1rem !important; color: var(--muted); font-size: .78rem; }
+.sync-error { margin-top: 1rem !important; color: var(--accent-dark); font-weight: 700; }
+@keyframes sync-spin { to { transform: rotate(360deg); } }
 .reader-toolbar { position: sticky; top: 0; z-index: 20; background: var(--paper); }
 .reader-toolbar:not(:has(.edition)) { border-bottom: 1px solid var(--ink); }
 .category-nav { max-width: 1180px; margin: 0 auto; padding: .65rem 1.25rem; display: flex; justify-content: center; gap: .35rem; overflow: visible; }
@@ -223,10 +248,14 @@ main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 .site-footer a { text-underline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
+  .sync-button.is-syncing svg { animation: none; }
 }
 @media (max-width: 820px) {
-  .masthead { display: block; }
-  .tagline { margin-top: .8rem; text-align: left; }
+  .masthead { align-items: center; }
+  .masthead-side { align-items: center; }
+  .masthead:has(.sync-button) .tagline { display: none; }
+  .masthead:not(:has(.sync-button)) { display: block; }
+  .masthead:not(:has(.sync-button)) .tagline { margin-top: .8rem; text-align: left; }
   .section-actions { display: flex; justify-content: flex-end; padding-top: .7rem; }
   .story-section, .story-section + .story-section { margin-top: .8rem; }
   .section-heading { display: block; padding: 0; }
@@ -261,6 +290,12 @@ SITE_JS = """
 const VIEWED_KEY = 'newsTldrViewedStoriesV1';
 const VIEW_MODE_KEY = 'newsTldrViewModeV1';
 const COVERAGE_MODE_KEY = 'newsTldrCoverageModeV1';
+const SYNC_TOKEN_KEY = 'newsTldrSyncTokenV1';
+const SYNC_FRAGMENT_PREFIX = 'sync=v1.';
+const SYNC_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const SYNC_DEBOUNCE_MS = 4 * 1000;
+const SYNC_MAX_RETRY_MS = 5 * 60 * 1000;
+const SYNC_MAX_READS = 2000;
 const VIEWED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
 const VIEW_THRESHOLD_MS = 1 * 1000;
 const MIN_TOP_SOURCE_COUNT = 2;
@@ -277,11 +312,30 @@ const sectionRoot = document.querySelector('[data-story-sections]');
 const emptyState = document.querySelector('[data-empty-state]');
 const markViewReadButton = document.querySelector('[data-mark-view-read]');
 const toggleSectionsButton = document.querySelector('[data-toggle-sections]');
+const syncButton = document.querySelector('[data-sync-button]');
+const syncDialog = document.querySelector('[data-sync-dialog]');
+const syncCloseButton = document.querySelector('[data-sync-close]');
+const syncDisconnected = document.querySelector('[data-sync-disconnected]');
+const syncConnected = document.querySelector('[data-sync-connected]');
+const syncStatus = document.querySelector('[data-sync-status]');
+const syncError = document.querySelector('[data-sync-error]');
+const syncShareUrl = document.querySelector('[data-sync-share-url]');
+const syncCreateButton = document.querySelector('[data-sync-create]');
+const syncCopyButton = document.querySelector('[data-sync-copy]');
+const syncDisconnectButton = document.querySelector('[data-sync-disconnect]');
+const syncDeleteButton = document.querySelector('[data-sync-delete]');
+const syncActionButtons = Array.from(document.querySelectorAll('[data-sync-action]'));
 const mobileSections = window.matchMedia('(max-width: 820px)');
 const expandedSectionKeys = new Set();
 const timers = new Map();
 let visibleCards = [];
 let sectionSequence = 0;
+let syncToken = '';
+let syncTimer = null;
+let syncInFlight = null;
+let syncDirty = false;
+let syncFragmentImported = false;
+let syncRetryMs = SYNC_DEBOUNCE_MS;
 
 function loadViewed() {
   const now = Date.now();
@@ -293,13 +347,28 @@ function loadViewed() {
     viewed = {};
   }
   for (const [storyId, timestamp] of Object.entries(viewed)) {
-    if (!Number.isFinite(timestamp) || now - timestamp > VIEWED_RETENTION_MS) delete viewed[storyId];
+    if (!Number.isFinite(timestamp) || timestamp <= 0 || timestamp > now + 5 * 60 * 1000
+        || now - timestamp > VIEWED_RETENTION_MS) delete viewed[storyId];
   }
-  try { localStorage.setItem(VIEWED_KEY, JSON.stringify(viewed)); } catch (_) {}
+  persistViewedMap(viewed);
   return viewed;
 }
 
+function persistViewedMap(value) {
+  try { localStorage.setItem(VIEWED_KEY, JSON.stringify(value)); } catch (_) {}
+}
+
+function loadSyncToken() {
+  try {
+    const saved = localStorage.getItem(SYNC_TOKEN_KEY) || '';
+    return SYNC_TOKEN_PATTERN.test(saved) ? saved : '';
+  } catch (_) {
+    return '';
+  }
+}
+
 const viewed = loadViewed();
+syncToken = loadSyncToken();
 const params = new URLSearchParams(location.search);
 let activeCategory = params.get('category') || 'all';
 if (!categoryButtons.some((button) => button.dataset.categoryFilter === activeCategory)) {
@@ -338,6 +407,259 @@ function updateSiteFreshness() {
   if (!siteUpdated) return;
   const timestamp = Date.parse(siteUpdated.dataset.generatedAt || '');
   if (Number.isFinite(timestamp)) siteUpdated.textContent = relativeUpdatedLabel(timestamp);
+}
+
+function setSyncToken(token) {
+  syncToken = SYNC_TOKEN_PATTERN.test(token || '') ? token : '';
+  try {
+    if (syncToken) localStorage.setItem(SYNC_TOKEN_KEY, syncToken);
+    else localStorage.removeItem(SYNC_TOKEN_KEY);
+  } catch (_) {}
+  updateSyncUi();
+}
+
+function syncLink() {
+  return syncToken ? `${location.origin}/#${SYNC_FRAGMENT_PREFIX}${syncToken}` : '';
+}
+
+function updateSyncUi(message = '') {
+  const connected = Boolean(syncToken);
+  if (syncDisconnected) syncDisconnected.hidden = connected;
+  if (syncConnected) syncConnected.hidden = !connected;
+  if (syncShareUrl) syncShareUrl.value = syncLink();
+  if (syncButton) {
+    syncButton.classList.toggle('is-connected', connected);
+    syncButton.setAttribute('aria-label', connected
+      ? 'Read-history sync connected'
+      : 'Set up read-history sync');
+  }
+  if (syncStatus) {
+    syncStatus.textContent = message || (connected
+      ? 'This browser is connected. Read stories sync without an account.'
+      : '');
+  }
+}
+
+function setSyncBusy(busy) {
+  for (const button of syncActionButtons) button.disabled = busy;
+  if (syncButton) syncButton.classList.toggle('is-syncing', busy);
+}
+
+function showSyncError(message = '') {
+  if (!syncError) return;
+  syncError.hidden = !message;
+  syncError.textContent = message;
+}
+
+function openSyncDialog() {
+  if (!syncDialog) return;
+  updateSyncUi();
+  if (typeof syncDialog.showModal === 'function') syncDialog.showModal();
+  else syncDialog.setAttribute('open', '');
+}
+
+function consumeSyncFragment() {
+  const fragment = location.hash.startsWith('#') ? location.hash.slice(1) : '';
+  if (!fragment.startsWith(SYNC_FRAGMENT_PREFIX)) return;
+  const candidate = fragment.slice(SYNC_FRAGMENT_PREFIX.length);
+  history.replaceState(null, '', `${location.pathname}${location.search}`);
+  syncFragmentImported = true;
+  if (!SYNC_TOKEN_PATTERN.test(candidate)) {
+    showSyncError('That sync link is invalid.');
+    return;
+  }
+  if (syncToken && syncToken !== candidate && !window.confirm(
+    'This browser is already connected to a different sync group. Switch groups and merge its local read history?'
+  )) {
+    syncFragmentImported = false;
+    return;
+  }
+  setSyncToken(candidate);
+}
+
+function handleSyncFragment() {
+  syncFragmentImported = false;
+  consumeSyncFragment();
+  if (!syncFragmentImported) return false;
+  updateSyncUi();
+  openSyncDialog();
+  if (syncToken) void synchronizeReads();
+  return true;
+}
+
+function currentReadPayload() {
+  const now = Date.now();
+  const current = Object.entries(viewed).filter(([, timestamp]) => (
+    Number.isFinite(timestamp) && timestamp > 0 && now - timestamp <= VIEWED_RETENTION_MS
+  ));
+  current.sort((left, right) => right[1] - left[1]);
+  const reads = {};
+  for (const [storyId, timestamp] of current.slice(0, SYNC_MAX_READS)) {
+    reads[storyId] = Math.min(timestamp, now);
+  }
+  return { reads };
+}
+
+function mergeRemoteReads(reads) {
+  if (!reads || typeof reads !== 'object' || Array.isArray(reads)) return false;
+  const now = Date.now();
+  let changed = false;
+  for (const [storyId, timestamp] of Object.entries(reads)) {
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(storyId) || !Number.isFinite(timestamp)
+        || timestamp <= 0 || now - timestamp > VIEWED_RETENTION_MS) continue;
+    const normalized = Math.min(timestamp, now);
+    if (!viewed[storyId] || viewed[storyId] < normalized) {
+      viewed[storyId] = normalized;
+      changed = true;
+    }
+  }
+  for (const [storyId, timestamp] of Object.entries(viewed)) {
+    if (!Number.isFinite(timestamp) || now - timestamp > VIEWED_RETENTION_MS) {
+      delete viewed[storyId];
+      changed = true;
+    }
+  }
+  if (changed) {
+    persistViewedMap(viewed);
+  }
+  renderStories();
+  return changed;
+}
+
+async function syncRequest(path, { method = 'POST', token = '', body = null, keepalive = false } = {}) {
+  const headers = {};
+  if (body !== null) headers['Content-Type'] = 'application/json';
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const encodedBody = body === null ? null : JSON.stringify(body);
+  const response = await fetch(path, {
+    method,
+    headers,
+    body: encodedBody,
+    credentials: 'same-origin',
+    cache: 'no-store',
+    keepalive: keepalive && (encodedBody?.length || 0) <= 60 * 1024,
+  });
+  let payload = null;
+  if (response.status !== 204) {
+    try { payload = await response.json(); } catch (_) {}
+  }
+  if (!response.ok) {
+    const error = new Error(payload?.message || `Sync request failed (${response.status}).`);
+    error.status = response.status;
+    error.code = payload?.error || '';
+    throw error;
+  }
+  return payload;
+}
+
+function scheduleSync(delay = SYNC_DEBOUNCE_MS) {
+  if (!syncButton || !syncToken) return;
+  syncDirty = true;
+  if (syncTimer !== null) window.clearTimeout(syncTimer);
+  syncTimer = window.setTimeout(() => {
+    syncTimer = null;
+    void synchronizeReads();
+  }, delay);
+}
+
+async function synchronizeReads({ keepalive = false, quiet = false } = {}) {
+  if (!syncButton || !syncToken) return null;
+  if (syncInFlight) {
+    syncDirty = true;
+    return syncInFlight;
+  }
+  if (syncTimer !== null) {
+    window.clearTimeout(syncTimer);
+    syncTimer = null;
+  }
+  syncDirty = false;
+  const requestToken = syncToken;
+  if (!quiet) {
+    setSyncBusy(true);
+    showSyncError();
+    updateSyncUi('Synchronizing read history…');
+  }
+  syncInFlight = syncRequest('/api/sync/v1/merge', {
+    token: requestToken,
+    body: currentReadPayload(),
+    keepalive,
+  }).then((payload) => {
+    if (requestToken !== syncToken) return payload;
+    mergeRemoteReads(payload?.reads);
+    syncRetryMs = SYNC_DEBOUNCE_MS;
+    if (!quiet) updateSyncUi(`Synchronized ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`);
+    return payload;
+  }).catch((error) => {
+    if (![401, 403, 404, 413].includes(error.status)) {
+      syncDirty = true;
+      syncRetryMs = Math.min(Math.max(10 * 1000, syncRetryMs * 2), SYNC_MAX_RETRY_MS);
+    }
+    if (!quiet && requestToken === syncToken) {
+      showSyncError(error.message || 'Read-history sync is temporarily unavailable.');
+      updateSyncUi(error.status === 404 ? 'The saved sync link is invalid or expired.' : 'Sync will retry later.');
+    }
+    return null;
+  }).finally(() => {
+    syncInFlight = null;
+    if (!quiet) setSyncBusy(false);
+    if (syncDirty && syncToken) scheduleSync(syncRetryMs);
+  });
+  return syncInFlight;
+}
+
+async function createSyncGroup() {
+  setSyncBusy(true);
+  showSyncError();
+  try {
+    const payload = await syncRequest('/api/sync/v1/groups', { body: currentReadPayload() });
+    if (!SYNC_TOKEN_PATTERN.test(payload?.token || '')) throw new Error('The server returned an invalid sync token.');
+    setSyncToken(payload.token);
+    mergeRemoteReads(payload.reads);
+    updateSyncUi('Sync is connected. Copy the private link to another browser.');
+    scheduleSync();
+  } catch (error) {
+    showSyncError(error.message || 'Read-history sync could not be started.');
+  } finally {
+    setSyncBusy(false);
+  }
+}
+
+async function copySyncLink() {
+  const value = syncLink();
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch (_) {
+    syncShareUrl?.focus();
+    syncShareUrl?.select();
+    document.execCommand('copy');
+  }
+  updateSyncUi('Private sync link copied.');
+}
+
+function disconnectSync() {
+  if (syncTimer !== null) window.clearTimeout(syncTimer);
+  syncTimer = null;
+  syncDirty = false;
+  syncRetryMs = SYNC_DEBOUNCE_MS;
+  setSyncToken('');
+  showSyncError();
+}
+
+async function deleteSyncGroup() {
+  if (!syncToken || !window.confirm(
+    'Delete this sync group for every connected browser? Local read history on each browser will remain.'
+  )) return;
+  setSyncBusy(true);
+  showSyncError();
+  try {
+    await syncRequest('/api/sync/v1/group', { method: 'DELETE', token: syncToken });
+    disconnectSync();
+  } catch (error) {
+    showSyncError(error.message || 'The sync group could not be deleted.');
+  } finally {
+    setSyncBusy(false);
+  }
 }
 
 function cardCoveragePriority(card, category) {
@@ -569,7 +891,8 @@ function markViewed(card) {
   if (!storyId) return;
   viewed[storyId] = Date.now();
   card.classList.add('is-read');
-  try { localStorage.setItem(VIEWED_KEY, JSON.stringify(viewed)); } catch (_) {}
+  persistViewedMap(viewed);
+  scheduleSync();
 }
 
 if (markViewReadButton) {
@@ -603,11 +926,52 @@ if ('IntersectionObserver' in window) {
 window.addEventListener('pagehide', () => {
   for (const timer of timers.values()) window.clearTimeout(timer);
   timers.clear();
+  if (syncButton && syncDirty && syncToken) void synchronizeReads({ keepalive: true, quiet: true });
+});
+
+if (syncButton) syncButton.addEventListener('click', openSyncDialog);
+if (syncCloseButton) syncCloseButton.addEventListener('click', () => syncDialog?.close());
+if (syncDialog) {
+  syncDialog.addEventListener('click', (event) => {
+    if (event.target === syncDialog) syncDialog.close();
+  });
+}
+if (syncCreateButton) syncCreateButton.addEventListener('click', () => void createSyncGroup());
+if (syncCopyButton) syncCopyButton.addEventListener('click', () => void copySyncLink());
+if (syncDisconnectButton) syncDisconnectButton.addEventListener('click', disconnectSync);
+if (syncDeleteButton) syncDeleteButton.addEventListener('click', () => void deleteSyncGroup());
+
+window.addEventListener('online', () => void synchronizeReads({ quiet: true }));
+window.addEventListener('hashchange', () => {
+  if (syncButton) handleSyncFragment();
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') void synchronizeReads({ quiet: true });
+});
+window.addEventListener('storage', (event) => {
+  if (event.key === VIEWED_KEY) {
+    const latest = loadViewed();
+    for (const storyId of Object.keys(viewed)) delete viewed[storyId];
+    Object.assign(viewed, latest);
+    renderStories();
+    scheduleSync();
+  } else if (event.key === SYNC_TOKEN_KEY) {
+    syncToken = loadSyncToken();
+    updateSyncUi();
+    if (syncButton && syncToken) void synchronizeReads({ quiet: true });
+  }
 });
 
 updateSiteFreshness();
 window.setInterval(updateSiteFreshness, 60 * 1000);
 renderStories();
+if (syncButton) {
+  const fragmentHandled = handleSyncFragment();
+  if (!fragmentHandled) {
+    updateSyncUi();
+    if (syncToken) void synchronizeReads({ quiet: true });
+  }
+}
 """.strip()
 
 
@@ -642,6 +1006,7 @@ def presentation_once(
     rolling_window_hours = int(
         presentation_config.get("rolling_window_hours", DEFAULT_ROLLING_WINDOW_HOURS)
     )
+    reader_sync_enabled = bool(presentation_config.get("reader_sync_enabled", False))
     if rolling_window_hours < 1:
         raise ValueError("presentation rolling_window_hours must be at least 1")
 
@@ -666,6 +1031,7 @@ def presentation_once(
                         output_dir=output_dir,
                         site_url=site_url,
                         rolling_window_hours=rolling_window_hours,
+                        reader_sync_enabled=reader_sync_enabled,
                     )
                 )
                 if selected_publish:
@@ -696,6 +1062,7 @@ def build_static_site(
     active_stories_path: Path = ACTIVE_STORIES_PATH,
     site_url: str = DEFAULT_SITE_URL,
     rolling_window_hours: int = DEFAULT_ROLLING_WINDOW_HOURS,
+    reader_sync_enabled: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     generated_at = now or utc_now()
@@ -743,6 +1110,7 @@ def build_static_site(
             site_url=site_url,
             generated_at=generated_at,
             rolling_window_hours=rolling_window_hours,
+            reader_sync_enabled=reader_sync_enabled,
             active_index=index,
         )
         _replace_generated_directory(temporary_dir, output_dir)
@@ -759,6 +1127,7 @@ def build_static_site(
         "files_built": file_count,
         "generated_at": isoformat_z(generated_at),
         "rolling_window_hours": rolling_window_hours,
+        "reader_sync_enabled": reader_sync_enabled,
     }
 
 
@@ -844,6 +1213,7 @@ def _write_site_files(
     site_url: str,
     generated_at: datetime,
     rolling_window_hours: int,
+    reader_sync_enabled: bool,
     active_index: dict[str, Any],
 ) -> None:
     _write_text(root / SITE_CSS_ASSET_PATH, SITE_CSS_CONTENT)
@@ -859,6 +1229,7 @@ def _write_site_files(
             site_url=site_url,
             generated_at=generated_at,
             rolling_window_hours=rolling_window_hours,
+            reader_sync_enabled=reader_sync_enabled,
             active_index=active_index,
         ),
     )
@@ -896,6 +1267,7 @@ def _render_home(
     site_url: str,
     generated_at: datetime,
     rolling_window_hours: int,
+    reader_sync_enabled: bool,
     active_index: dict[str, Any],
 ) -> str:
     buttons = [
@@ -1003,6 +1375,7 @@ def _render_home(
         nav="".join(buttons),
         content=content,
         script=True,
+        reader_sync_enabled=reader_sync_enabled,
         toolbar=toolbar,
         social_image=f"{site_url}/assets/social-card.png",
     )
@@ -1144,11 +1517,46 @@ def _page(
     nav: str,
     content: str,
     script: bool = False,
+    reader_sync_enabled: bool = False,
     toolbar: str = "",
     og_type: str = "website",
     social_image: str | None = None,
 ) -> str:
     script_tag = f'<script src="/{SITE_JS_ASSET_PATH}" defer></script>' if script else ""
+    sync_header = ""
+    sync_dialog = ""
+    if script and reader_sync_enabled:
+        sync_header = (
+            '<button type="button" class="sync-button" data-sync-button '
+            'aria-label="Set up read-history sync" aria-haspopup="dialog" aria-controls="sync-dialog">'
+            '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-5V2"/>'
+            '<path d="M20 7a8 8 0 0 0-13.7-2.7L4 7"/><path d="M4 17h5v5"/>'
+            '<path d="M4 17a8 8 0 0 0 13.7 2.7L20 17"/></svg></button>'
+        )
+        sync_dialog = (
+            '<dialog class="sync-dialog" data-sync-dialog id="sync-dialog" aria-labelledby="sync-dialog-title">'
+            '<div class="sync-dialog-header"><h2 id="sync-dialog-title">Read-history sync</h2>'
+            '<button type="button" class="sync-dialog-close" data-sync-close '
+            'aria-label="Close sync settings">×</button></div><div class="sync-dialog-body">'
+            '<div data-sync-disconnected><p>Keep read stories aligned across browsers without creating an account.</p>'
+            '<div class="sync-actions"><button type="button" class="sync-action sync-action-primary" '
+            'data-sync-create data-sync-action>Start sync</button></div></div>'
+            '<div data-sync-connected hidden><p class="sync-status" data-sync-status></p>'
+            '<label class="sync-share-label" for="sync-share-url">Private sync link</label>'
+            '<input class="sync-share-url" data-sync-share-url id="sync-share-url" readonly '
+            'autocomplete="off" spellcheck="false">'
+            '<p>Read stories are synchronized automatically in the background, and new visits '
+            'automatically use the latest status.</p>'
+            '<div class="sync-actions"><button type="button" class="sync-action sync-action-primary" '
+            'data-sync-copy data-sync-action>Copy link</button>'
+            '<button type="button" class="sync-action" data-sync-disconnect data-sync-action>'
+            'Disconnect this browser</button>'
+            '<button type="button" class="sync-action sync-action-danger" data-sync-delete data-sync-action>'
+            'Delete synced data</button></div></div>'
+            '<p class="sync-privacy">Anyone with the private link can join this sync group. '
+            'Only story IDs and read times from the last three days are stored.</p>'
+            '<p class="sync-error" data-sync-error role="alert" hidden></p></div></dialog>'
+        )
     image_meta = ""
     if social_image:
         image_meta = (
@@ -1166,8 +1574,9 @@ def _page(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'; '
-        "script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; "
+        "script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
         "object-src 'none'; base-uri 'none'; form-action 'none'\">"
+        '<meta name="referrer" content="no-referrer">'
         '<meta name="robots" content="noindex,follow,noarchive,max-image-preview:large">'
         f"<title>{_e(title)}</title><meta name=\"description\" content=\"{_attr(description)}\">"
         '<link rel="icon" href="/favicon.ico" type="image/x-icon" sizes="16x16 32x32 48x48 64x64">'
@@ -1182,8 +1591,9 @@ def _page(
         f'<link rel="stylesheet" href="/{SITE_CSS_ASSET_PATH}">'
         f"{script_tag}</head><body><header class=\"site-header\"><div class=\"masthead\">"
         '<a class="brand" href="/">news<span>-tldr</span>.com</a>'
-        '<p class="tagline">The important facts, the open questions, and the sources — without the churn.</p>'
-        f'</div></header><div class="reader-toolbar"><nav class="category-nav" '
+        '<div class="masthead-side"><p class="tagline">The important facts, the open questions, '
+        f'and the sources — without the churn.</p>{sync_header}</div>'
+        f'</div></header>{sync_dialog}<div class="reader-toolbar"><nav class="category-nav" '
         f'aria-label="Story categories">{nav}</nav>{toolbar}</div>'
         f"<main{main_class}>{content}</main><footer class=\"site-footer\"><div>"
         '<span>Automated, source-attributed news summaries. Verify important details with the linked reporting.</span>'

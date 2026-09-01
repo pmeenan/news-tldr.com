@@ -7,7 +7,7 @@ This document tracks the phased buildout of the filesystem-backed RSS aggregator
 - **Pipeline**: Python with `feedparser`, pooled `httpx` HTTP/1.1 clients for collection and Gemini calls, `trafilatura`, `beautifulsoup4`, standard-library `sqlite3`, and LLM client libraries.
 - **Presentation**: Dependency-free Python static renderer in `pipeline/present.py`.
 - **State**: SQLite for pipeline state and incremental processing. JSON files for human-readable stage artifacts.
-- **No database server** or application runtime for the published site.
+- **No database server**. Published news content remains static; the optional anonymous reader-sync endpoint is an isolated PHP-FPM/SQLite origin service.
 - Filesystem JSON artifacts are the source of truth between stages.
 - Pipeline stages: maintenance/retention, data collection, article digestion, story aggregation, editorial, presentation, production publish.
 - All executable stages through production publish are implemented. The retained dataset, 433 editorial stories, and production presentation were refreshed through August 24, 2026; optional metadata/thread enhancements remain open.
@@ -230,6 +230,15 @@ gantt
   one year, and retain prior/legacy paths for cached HTML during deployments.
 - [x] Add a checked-in multi-resolution newspaper favicon and reference it from
   every generated page.
+- [x] Add opt-in anonymous cross-browser read-history sync using a private URL
+  fragment capability, atomic three-day state union, debounced writes,
+  foreground refresh, local disconnect, and explicit shared-state deletion.
+- [x] Add a same-origin PHP/SQLite sync service isolated from pipeline state and
+  the document root, with hashed tokens, strict schema/origin validation, daily
+  retention cleanup, and a portable three-endpoint API contract.
+- [x] Contain the sync origin with daily/total group ceilings, bounded reads and
+  payloads, a 256 MiB SQLite page cap, layered Nginx rate/connection/body limits,
+  and a dedicated three-worker PHP-FPM pool.
 
 ## Backlog
 

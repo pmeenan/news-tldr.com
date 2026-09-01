@@ -34,6 +34,7 @@
   "presentation": {
     "site_url": "https://news-tldr.com",
     "rolling_window_hours": 72,
+    "reader_sync_enabled": true,
     "publish_enabled": true,
     "publish_dir": "/var/www/news-tldr.com"
   },

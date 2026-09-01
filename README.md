@@ -4,7 +4,7 @@ Source code for the RSS aggregator and summarizer at https://news-tldr.com.
 
 ## Overview
 
-news-tldr.com is a filesystem-backed RSS aggregator that parses web feeds, extracts article content, groups related coverage into durable topics/events, and uses AI/LLMs to generate concise neutral TL;DR summaries. The published site is fully static and served at [news-tldr.com](https://news-tldr.com/).
+news-tldr.com is a filesystem-backed RSS aggregator that parses web feeds, extracts article content, groups related coverage into durable topics/events, and uses AI/LLMs to generate concise neutral TL;DR summaries. Published news content is fully static and served at [news-tldr.com](https://news-tldr.com/); an isolated origin endpoint optionally synchronizes anonymous read history.
 
 ## Key Features
 
@@ -13,6 +13,7 @@ news-tldr.com is a filesystem-backed RSS aggregator that parses web feeds, extra
 - **Filesystem Pipeline**: JSON artifacts and a SQLite state database connect collection, aggregation, editorial, and presentation stages without a server runtime.
 - **AI-Powered Summaries**: Automatic generation of brief, sourced summaries across multiple articles covering the same event.
 - **Static Presentation**: A dependency-free Python renderer builds the reader interface from editorial JSON and publishes it without a server runtime.
+- **Optional Anonymous Sync**: Readers can share a private capability link to synchronize three days of read-story state without an account.
 
 ## Project Resources
 
@@ -202,7 +203,24 @@ lifetime (`Cache-Control: max-age=600` plus the corresponding `Expires` header),
 allowing the site's Cloudflare HTML cache rule to serve them from the edge before
 revalidating with the origin. CSS and JavaScript filenames include a 16-character
 SHA-256 content fingerprint, change only when their contents change, and receive a
-one-year immutable cache policy. Install and validate changes before reloading Nginx:
+one-year immutable cache policy.
+
+The optional anonymous read-history service uses the existing origin's PHP-FPM
+runtime plus a dedicated SQLite database outside the document root. Install the
+API code, isolated PHP-FPM pool, daily cleanup job, and updated Nginx route with:
+
+```bash
+sudo ./scripts/install-sync-origin.sh
+```
+
+The installer requires PHP-FPM and `pdo_sqlite`, initializes
+`/var/lib/news-tldr-sync/sync.sqlite` as `www-data`, validates PHP-FPM and Nginx,
+binds the dedicated socket to the configured Nginx worker identity, and reloads
+both services. After it succeeds, set
+`presentation.reader_sync_enabled` to `true` in `config/pipeline.json` and run
+`present --verbose`; keeping the flag false prevents a sync control from being
+published before its API exists. To update only the static Nginx configuration, install
+and validate it before reloading Nginx:
 
 ```bash
 sudo install -o root -g root -m 0644 deploy/nginx/news-tldr.com /etc/nginx/sites-available/news-tldr.com
@@ -223,7 +241,16 @@ as `coverage=all` in the URL.
 Stories are marked read after their title remains visible for one second, retain
 a subtle read indicator, and are remembered for three days. New mode re-applies
 that local history whenever the reader changes category or view; a header action
-marks every currently visible story read. No reading history leaves the browser.
+marks every currently visible story read. Reading history remains browser-local
+unless the reader explicitly starts anonymous synchronization from the header
+icon. Starting sync creates a private capability link; another browser that opens
+the link unions its local read state with the group. The fragment token is removed
+from the address bar immediately, including for same-page fragment navigation;
+writes are debounced, link/foreground/reload visits pull and rerender the latest
+state, and disconnecting preserves the browser's local history.
+Anyone possessing the private link can join the group, so the UI identifies it as
+sensitive.
+
 An editorial curation pass selects up to 12 distinct Top News stories and groups
 related story cards under specific topic headings, leaving unmatched cards under
 Everything Else. On mobile, every section is collapsed to its heading by default;
@@ -244,6 +271,35 @@ description. Every page also references the checked-in multi-resolution
 newspaper favicon at `site/assets/favicon.ico`. The homepage status line stays
 compact by showing the visible count and a client-calculated relative generation
 time that refreshes every minute.
+
+### Anonymous Read-History Sync
+
+The same-origin API exposes only three mutation endpoints:
+
+- `POST /api/sync/v1/groups` creates a group and imports the browser's current reads.
+- `POST /api/sync/v1/merge` atomically unions local and server read state.
+- `DELETE /api/sync/v1/group` deletes the shared group for every browser.
+
+The 256-bit bearer token is returned only at creation, stored in browser local
+storage, transported in the `Authorization` header, and persisted on the origin
+only as a SHA-256 hash. Responses are `no-store`; requests require an allowed
+same-origin `Origin` and JSON content type. The server stores only story IDs and
+millisecond read timestamps.
+
+Default containment limits are 2,000 read IDs per group, 2,000 active groups,
+100 group creations per UTC day, a 256 KiB request/state size, a 256 MiB SQLite
+page ceiling, three PHP-FPM workers, and layered client/peer Nginx request limits.
+Reads expire after three days and unused groups after 180 days. Daily cleanup is
+installed from `deploy/cron/news-tldr-sync`; successful cleanup is silent and
+failures use cron's normal error-mail path. The sync database should be excluded
+from backups so expired reader history is not retained elsewhere.
+
+Run cleanup manually with machine-readable stdout and optional progress on stderr:
+
+```bash
+sudo -u www-data env SYNC_DB_PATH=/var/lib/news-tldr-sync/sync.sqlite \
+  /usr/bin/php /opt/news-tldr-sync/cleanup.php --verbose
+```
 
 ### Operations and Monitoring
 

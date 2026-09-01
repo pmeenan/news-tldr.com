@@ -4,7 +4,7 @@ news-tldr.com is a filesystem-backed RSS aggregator that collects source article
 
 ## Design Goals
 
-- No database server or application runtime. Pipeline state uses SQLite (a single file). Stage artifacts are JSON.
+- No database server. Pipeline state uses SQLite (a single file), stage artifacts are JSON, and published news content remains static. The optional anonymous reader-sync endpoint is a small isolated PHP-FPM/SQLite exception at the origin.
 - Every pipeline stage is inspectable: JSON files on disk, SQLite queryable with standard tools.
 - Preserve source attribution from collection through presentation.
 - Separate data collection, aggregation, editorial, and rendering so each stage can be tested and rerun independently.
@@ -16,7 +16,8 @@ news-tldr.com is a filesystem-backed RSS aggregator that collects source article
 - **Pipeline**: Python. Libraries: `feedparser`, `httpx` (HTTP/2-enabled collection client and pooled HTTP/1.1 Gemini client), `h2`, `trafilatura` (article extraction), `beautifulsoup4` (custom scrapers), hosted LLM API client (Gemini Developer API by default). SQLite is accessed through Python's standard-library `sqlite3` module.
 - **Presentation**: Dependency-free Python renderer in `pipeline/present.py`. Generates static HTML, content-fingerprinted CSS/JavaScript, and JSON from published story artifacts.
 - **State**: SQLite database for pipeline state, incremental processing tracking, and fast lookups. JSON files remain the human-readable artifacts for each stage.
-- **Deployment**: The pipeline environment (including the SQLite database, staging files, and lock states) is never web-accessible. Only generated files from `dist/` are copied to the Nginx document root at `/var/www/news-tldr.com/`, which serves [news-tldr.com](https://news-tldr.com/). The checked-in `deploy/nginx/news-tldr.com` virtual host gives generated HTML a 10-minute freshness lifetime so Cloudflare can serve matching pages from its edge cache. Scheduling remains isolated from the public-facing site.
+- **Reader sync**: Optional same-origin PHP 8.4 endpoint in a dedicated resource-bounded PHP-FPM pool. It stores hashed capability groups and three days of story-ID/read-time state in `/var/lib/news-tldr-sync/sync.sqlite`, separate from pipeline state and outside the document root.
+- **Deployment**: The pipeline environment (including the pipeline SQLite database, staging files, and lock states) is never web-accessible. Generated files from `dist/` are copied to the Nginx document root at `/var/www/news-tldr.com/`; the sync API source is installed separately under `/opt/news-tldr-sync/`. The checked-in `deploy/nginx/news-tldr.com` virtual host gives generated HTML a 10-minute freshness lifetime so Cloudflare can serve matching pages from its edge cache. Scheduling remains isolated from the public-facing site.
 
 ## High-Level Architecture
 
@@ -34,6 +35,8 @@ graph TD
     Present --> Site[dist/ — Static HTML/CSS/JSON]
     Site --> Publish[/var/www/news-tldr.com/]
     Publish --> Nginx[news-tldr.com]
+    Browser[Reader browser] -->|POST/DELETE /api/sync/v1| SyncAPI[Dedicated PHP-FPM sync API]
+    SyncAPI --> SyncState[(sync.sqlite outside document root)]
 
     State[(data/state/pipeline.db)] -.-> Collect
     State -.-> Maintenance
@@ -70,6 +73,8 @@ data/
     active-stories.json      # Index of currently active stories for the presentation layer.
 
 pipeline/present.py          # Static renderer and production deployment logic.
+server/sync/                 # Origin sync API, SQLite store, cleanup, local router.
+deploy/php-fpm/              # Dedicated sync PHP-FPM pool configuration.
 dist/                        # Ignored generated static output; only this tree is publishable.
 ```
 
@@ -643,7 +648,16 @@ Responsibilities:
   reader scans the current view; category and New/All changes re-apply the live
   read set so newly read cards disappear from the next New view. A header action
   marks every currently visible card read. All always restores the complete
-  rolling window. Reading history is never sent to the server.
+  rolling window. Reading history remains device-local unless the reader
+  explicitly enables anonymous synchronization from the masthead control.
+- Anonymous sync uses a shareable fragment capability (`#sync=v1.<token>`).
+  The browser stores the 256-bit token locally, immediately removes imported
+  fragments from the visible URL, handles both initial-load and same-document
+  `hashchange` navigation, uploads the newest 2,000 retained reads on group
+  creation/load/foreground, and debounces new-read writes by four seconds.
+  Server and device state form a grow-only union within the three-day retention
+  window; the newest timestamp wins. Disconnecting clears only that browser's
+  token, while the separate delete action removes shared server state.
 - An independent device-local Top/All source-coverage control composes with the
   category and New/All filters. Top is the default and requires at least two
   distinct sources according to the active story index's `source_count`; All
@@ -693,7 +707,8 @@ Responsibilities:
   simple newspaper mark. Historical pages for archived events remain a future
   enhancement.
 - Render source links with paywall indicators and uncertainty notes.
-- Output fully static, cacheable HTML/CSS/JSON with no application runtime. CSS
+- Output fully static, cacheable HTML/CSS/JSON; the optional reader-sync API is
+  isolated from this presentation build and its document root. CSS
   and JavaScript use the first 16 hexadecimal characters of their SHA-256 content
   hash in the filename, so unchanged presentation assets keep a stable URL while
   changed content produces a new URL.
@@ -714,6 +729,8 @@ Presentation settings live in `config/pipeline.json`:
 - `site_url`: canonical public origin, currently `https://news-tldr.com`.
 - `rolling_window_hours`: homepage event freshness window, currently 72 hours.
 - `publish_enabled`: whether ordinary top-level runs deploy after building.
+- `reader_sync_enabled`: whether the homepage exposes anonymous sync; keep false
+  until the origin API, FPM pool, cleanup cron, and Nginx route are installed.
 - `publish_dir`: absolute production document root, currently `/var/www/news-tldr.com`.
 
 The renderer validates the active story index, story IDs, story/category parity,
@@ -742,6 +759,62 @@ existing cached response.
 The initial production publish on August 24, 2026 generated and deployed 874
 public files for 433 stories. The homepage, a representative story page, and
 `/api/active-stories.json` all returned HTTP 200 over HTTPS.
+
+## Anonymous Reader-Sync Origin
+
+The sync service is deliberately separate from both the static document root and
+`data/state/pipeline.db`:
+
+- `server/sync/api.php` exposes create, merge, and delete mutations under
+  `/api/sync/v1/`; all other sync paths return 404 at Nginx.
+- `server/sync/lib.php` owns schema creation, validation, atomic `BEGIN
+  IMMEDIATE` merges, retention, and capacity enforcement.
+- `/opt/news-tldr-sync/` contains root-owned installed PHP source;
+  `/var/lib/news-tldr-sync/sync.sqlite` is writable only through the dedicated
+  `www-data` PHP-FPM pool and is outside the public tree.
+- `server/sync/cleanup.php` prunes expired reads/groups and old creation counters;
+  `/etc/cron.d/news-tldr-sync` runs it daily as `www-data`.
+
+### Capability and Merge Model
+
+Group creation generates 32 random bytes and returns their unpadded base64url
+encoding. The browser treats this token as a bearer capability. SQLite stores
+only `SHA-256(token)`, the JSON story-ID/read-time map, a revision, and lifecycle
+timestamps. The token never appears in an API path or query string. The share URL
+places it in the fragment, which client JavaScript consumes and removes before
+network synchronization. API calls carry it in `Authorization: Bearer` and
+responses set `Cache-Control: private, no-store`.
+
+`POST /api/sync/v1/merge` validates the offered map, loads the group inside an
+immediate SQLite transaction, unions by story ID using the maximum read timestamp,
+prunes entries beyond the three-day window, retains only the newest bounded set,
+updates the revision, and returns the complete merged map. This is idempotent and
+avoids a fetch-then-write race. There is intentionally no unread operation; adding
+one would require tombstones or another conflict model.
+
+### Containment and Privacy
+
+The default application ceilings are 2,000 active groups, 100 new groups per UTC
+day, 2,000 read IDs per group, 256 KiB request/state payloads, 180-day group
+inactivity expiry, and a persistent 256 MiB SQLite `max_page_count`. WAL
+autocheckpointing and a 16 MiB journal size limit bound transient database growth.
+Nginx adds separate Cloudflare-client and direct-peer request limits, four
+connections per peer, a 256 KiB body cap, and short FastCGI timeouts. The dedicated
+ondemand PHP-FPM pool allows at most three 32 MiB workers, disables process/shell
+functions, and confines PHP filesystem access to the installed code, sync state,
+and `/tmp`.
+
+Requests require JSON and an exact allowed `Origin`; cross-origin access is never
+enabled. Only story IDs and read timestamps are retained. Daily cleanup and every
+mutation remove expired groups; active merges remove expired reads. The sync
+database should not enter general backups, because backup retention would defeat
+the reader-facing expiry promise. Local reading remains fully functional during
+API failure.
+
+`scripts/install-sync-origin.sh` installs the PHP source, pool, cron file, and
+Nginx virtual host, initializes the database as `www-data`, validates both service
+configurations, binds the dedicated socket to the worker identity declared by
+the host's Nginx configuration, and reloads PHP-FPM/Nginx.
 
 ## Pipeline Operations
 
