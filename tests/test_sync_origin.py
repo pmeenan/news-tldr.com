@@ -127,6 +127,7 @@ def test_sync_api_creates_merges_prunes_and_deletes_group(tmp_path: Path) -> Non
         pull = _merge_group(client, token, {})
         assert pull.status_code == 200
         assert pull.json()["reads"] == merged["reads"]
+        assert pull.json()["revision"] == 2
 
         delete = client.delete(
             "/api/sync/v1/group",
@@ -163,6 +164,115 @@ def test_sync_api_rejects_cross_origin_invalid_and_oversized_state(tmp_path: Pat
         )
         assert too_many.status_code == 413
         assert too_many.json()["error"] == "too_many_reads"
+
+        invalid_order = client.post(
+            "/api/sync/v1/groups",
+            headers={"Origin": ALLOWED_ORIGIN},
+            json={
+                "reads": {"story-valid": int(time.time() * 1000)},
+                "read_orders": {"story-valid": "not-an-order"},
+            },
+        )
+        assert invalid_order.status_code == 400
+        assert invalid_order.json()["error"] == "invalid_story_order"
+
+        invalid_revision = client.post(
+            "/api/sync/v1/merge",
+            headers={"Origin": ALLOWED_ORIGIN, "Authorization": "Bearer " + "a" * 43},
+            json={"reads": {}, "known_revision": 0},
+        )
+        assert invalid_revision.status_code == 400
+        assert invalid_revision.json()["error"] == "invalid_revision"
+
+
+def test_sync_api_compacts_read_prefix_and_skips_unchanged_state_download(tmp_path: Path) -> None:
+    with _sync_server(tmp_path) as (client, database_path):
+        now = int(time.time() * 1000)
+        story_a = "2026-09-03-a"
+        story_b = "2026-09-03-b"
+        story_c = "2026-09-03-c"
+        order_b = f"{now - 2_000:013d}:{story_b}"
+        create = client.post(
+            "/api/sync/v1/groups",
+            headers={"Origin": ALLOWED_ORIGIN},
+            json={
+                "state_version": 2,
+                "reads": {},
+                "ordered_reads": [
+                    [story_a, now, now - 3_000],
+                    [story_b, now, now - 2_000],
+                    [story_c, now, now - 1_000],
+                ],
+                "read_before": order_b,
+            },
+        )
+        assert create.status_code == 201
+        created = create.json()
+        assert created["state_version"] == 2
+        assert created["read_before"] == order_b
+        accepted_now = created["reads"][story_c]
+        assert now - 1_000 <= accepted_now <= now
+
+        unchanged = client.post(
+            "/api/sync/v1/merge",
+            headers={
+                "Origin": ALLOWED_ORIGIN,
+                "Authorization": f"Bearer {created['token']}",
+            },
+            json={
+                "state_version": 2,
+                "reads": {},
+                "ordered_reads": [[story_c, accepted_now, now - 1_000]],
+                "read_before": order_b,
+                "known_revision": 1,
+            },
+        )
+        assert unchanged.status_code == 200
+        assert unchanged.json()["unchanged"] is True
+        assert unchanged.json()["revision"] == 1
+        assert "reads" not in unchanged.json()
+
+        story_d = "2026-09-03-d"
+        changed = client.post(
+            "/api/sync/v1/merge",
+            headers={
+                "Origin": ALLOWED_ORIGIN,
+                "Authorization": f"Bearer {created['token']}",
+            },
+            json={
+                "state_version": 2,
+                "reads": {},
+                "ordered_reads": [
+                    [story_c, accepted_now, now - 1_000],
+                    [story_d, accepted_now, now],
+                ],
+                "read_before": order_b,
+                "known_revision": 1,
+            },
+        )
+        assert changed.status_code == 200
+        assert changed.json()["unchanged"] is False
+        assert changed.json()["revision"] == 2
+        assert "reads" not in changed.json()
+
+        stale = client.post(
+            "/api/sync/v1/merge",
+            headers={
+                "Origin": ALLOWED_ORIGIN,
+                "Authorization": f"Bearer {created['token']}",
+            },
+            json={"reads": {}, "known_revision": 1},
+        )
+        assert stale.status_code == 200
+        assert stale.json()["revision"] == 2
+        assert stale.json()["read_before"] == order_b
+        assert stale.json()["reads"] == {story_c: accepted_now, story_d: accepted_now}
+
+    with sqlite3.connect(database_path) as database:
+        stored = json.loads(database.execute("SELECT reads_json FROM sync_groups").fetchone()[0])
+    assert stored["read_before"] == order_b
+    assert stored["reads"] == {}
+    assert {row[0] for row in stored["ordered_reads"]} == {story_c, story_d}
 
 
 def test_sync_api_enforces_daily_creation_and_total_group_caps(tmp_path: Path) -> None:
@@ -230,7 +340,9 @@ def test_sync_cleanup_removes_expired_groups_reads_and_counters(tmp_path: Path) 
         rows = database.execute("SELECT token_hash, reads_json FROM sync_groups").fetchall()
         assert len(rows) == 1
         assert rows[0][0] == second_hash
-        assert set(json.loads(rows[0][1])) == {"story-current"}
+        stored = json.loads(rows[0][1])
+        assert stored["state_version"] == 2
+        assert set(stored["reads"]) == {"story-current"}
 
 
 def test_sync_deployment_configuration_contains_origin_resources() -> None:

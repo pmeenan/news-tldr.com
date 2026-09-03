@@ -212,7 +212,11 @@ gantt
   state, and re-apply the current local read set when category/view filters change.
 - [x] Add a current-view Mark Read header action without adding a redundant unread action.
 - [x] Add validated AI homepage curation with a distinct 12-story Top News list,
-  specific multi-story topic sections across All/category views, and Everything Else fallback.
+  specific multi-story topic sections across All/category views, and category-specific
+  remainder sections.
+- [x] Limit topic curation to one high-ranked candidate set per category, encourage
+  coherent three-story groups and broader meaningful desk labels, and fold topic
+  groups reduced to one visible card into their category remainder.
 - [x] Collapse curated sections behind tappable, counted headings on mobile and
   provide an Expand All/Collapse All action for the current view.
 - [x] Order recent topic groups with category-normalized source breadth, capped
@@ -220,6 +224,9 @@ gantt
   curated Top News placement inside focused categories.
 - [x] Prioritize strong slug/title/headline duplicate candidates ahead of broad
   deduplication prescreen candidates inside the bounded review queue.
+- [x] Run bounded deduplication even without new aggregation-window work, cover
+  active and stale events across the 72-hour homepage, and treat immediate
+  follow-up angles on one core development as one evolving story.
 - [x] Add a device-local Top/All source-coverage filter, default it to Top, and
   define Top as stories covered by at least two distinct sources.
 - [x] Keep the category and Latest Briefing rows in one sticky toolbar and
@@ -240,6 +247,12 @@ gantt
 - [x] Contain the sync origin with daily/total group ceilings, bounded reads and
   payloads, a 256 MiB SQLite page cap, layered Nginx rate/connection/body limits,
   and a dedicated three-worker PHP-FPM pool.
+- [x] Replace the masthead's visible/new story count with a live unread count for
+  the current category/source view.
+- [x] Compress contiguous read history behind an immutable story-publication
+  watermark while retaining sparse newer read IDs and legacy-map compatibility.
+- [x] Make sync revisions content-sensitive and let returning browsers skip the
+  complete state response when their last applied revision is still current.
 
 ## Backlog
 

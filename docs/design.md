@@ -335,12 +335,16 @@ For each window chunk:
 
 After the grouping response validates, deterministic code also splits weakly connected headline groups into smaller components. Components only inherit an `existing_event_id` when they have enough headline overlap with that active event title (or already contain an article assigned to that event), which prevents broad-keyword clusters from attaching unrelated articles to an existing event. If the model returns an `existing_event_id` that was not offered in the prompt, validation drops that ID instead of failing the whole category batch.
 
-Post-aggregation deduplication collects candidate event pairs from four complementary gates and then runs the same strict per-pair LLM merge call on the union:
+Post-aggregation deduplication runs on every aggregation invocation, including
+passes with no new window work, and collects candidate event pairs from four
+complementary gates before running the same strict per-pair LLM merge call on
+the union. The default 72-hour lookback includes active and stale events for the
+complete homepage window:
 
 1. **Slug / title heuristics** — base-slug equality, title-word overlap (`_titles_similar`), and highly similar individual article headlines (catches reprints with different lead facts).
 2. **Keyword-overlap gate** (`_keyword_overlap_candidates`) — within a single category-group batch, pairs events that share at least 2 distinctive event-level keywords after stripping a global static stopword list and a per-batch *dynamic* hot-keyword stopword list (`_dynamic_keyword_stopwords`). The dynamic list flags any keyword appearing in ≥20% of the batch's events AND in ≥4 events (an absolute floor that prevents tiny batches from stopwording distinctive entities like "ferrari" that only appear in the 2 candidate duplicates).
 3. **LLM pre-screen gate** (`_llm_prescreen_candidates`) — loose-recall LLM calls over category-group batches (`politics_gov`, `news_business_{us,world,business}`, `sci_tech`, `leisure`), sending each event's id, title, top-6 filtered keywords, and top-3 article headlines. The model is instructed to err on the side of inclusion; false positives are filtered by the strict per-pair merge call. Each call is bounded to `DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH = 40` events and chunked when batches exceed that. For oversized batches, the top high-article-count anchor events are repeated into every prescreen chunk so large ongoing stories can still be compared with later singleton updates that would otherwise land in a different chunk. `news_business` also gets an additional parent-level cross-category prescreen because market, business, U.S., and world framings often describe the same underlying event from different verticals. All prescreen chunks across all category-group batches share one worker pool up to `aggregation.deduplication_concurrency` (default: 16). Prompt version: `deduplication-prescreen-v1`. Token usage and errors are recorded under stage `deduplication_prescreen`.
-4. **Per-pair merge LLM** — for every unique candidate pair from the union of (1)–(3), the existing `_build_event_merge_prompt` call decides `should_merge` with confidence ≥ `DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD` (0.8). This is the single source of truth for actually merging; over-merging risk lives here only. Candidate-pair reviews run concurrently in rounds of disjoint event IDs, then accepted merges are applied serially in deterministic order so one merge cannot race another merge touching the same event. Full-Flash decisions are cached against both event `updated_at` values and the prompt version, so unchanged negative pairs are not paid for or retried every hour. The bounded 40-pair queue orders exact/base-slug and strong title/headline candidates before keyword-overlap candidates, which in turn precede broad LLM-prescreen candidates; recency breaks ties within each confidence tier. This prevents obvious same-headline splits from being crowded out by a burst of newer loose-recall candidates. A changed event invalidates its cached pair decisions automatically.
+4. **Per-pair merge LLM** — for every unique candidate pair from the union of (1)–(3), `_build_event_merge_prompt` decides `should_merge` with confidence ≥ `DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD` (0.8). Prompt version `deduplication-review-v2` treats immediate reactions, consequences, implementation details, and alternate reporting angles as one evolving homepage story when they share the same core development, while explicitly keeping separate incidents and materially distinct developments apart. This is the single source of truth for actually merging; over-merging risk lives here only. Candidate-pair reviews run concurrently in rounds of disjoint event IDs, then accepted merges are applied serially in deterministic order so one merge cannot race another merge touching the same event. Full-Flash decisions are cached against both event `updated_at` values and the prompt version, so unchanged negative pairs are not paid for or retried every hour. The bounded 40-pair queue orders exact/base-slug and strong title/headline candidates before keyword-overlap candidates, which in turn precede broad LLM-prescreen candidates; recency breaks ties within each confidence tier. This prevents obvious same-headline splits from being crowded out by a burst of newer loose-recall candidates. A changed event invalidates its cached pair decisions automatically.
 
 Over-merging protection comes from the strict per-pair call; recall comes from the diversity of candidate gates. Adding a new gate cannot weaken the merge decision — at worst it adds extra per-pair LLM calls that return `should_merge=false`.
 
@@ -359,7 +363,7 @@ Scores are normalized from `0.0` to `1.0`, validated by deterministic code, stor
 
 ### Stage 2 Implementation
 
-The initial aggregation implementation lives in `pipeline/aggregate.py` and is exposed by `./.venv/bin/python -m pipeline.cli aggregate`. It plans 3-hour aggregation chunks with a 1-hour overlap lookahead (4-hour LLM windows fixed to `00/03/06/09/12/15/18/21` UTC starts), skips completed windows using `aggregation_windows`, loads category-impact-eligible articles in each planned window, calls Gemini with headline + digest/summary metadata in category-bounded batches, validates that every article index appears exactly once, scores resulting groups for newsworthiness from digest impact or fallback scoring, writes `data/events/<event_id>.json`, upserts the `events` table, assigns `articles.event_id`, and records completed windows. Windows remain sequential because each window should see event state from earlier windows; within a window the LLM-only category batch work is concurrent. The command supports `--range-start`, `--range-end`, `--limit-windows`, `--dry-run`, `--force`, and `--verbose`. By default, if no range is specified, aggregation bounds cover the configured staging-retention horizon, while non-force planning sparsely selects only fixed UTC windows that have unassigned articles in their publish-time bucket, plus the latest completed window when applicable. If no unassigned articles exist within this horizon, the run completes early without planning windows. With `--force`, default planning instead uses completed digests in the same retention horizon, clears prior event assignments and aggregation-stage filter decisions for the actual planned window coverage, deletes or trims affected event artifacts, and then reruns the continuous window range even if windows were previously marked completed.
+The initial aggregation implementation lives in `pipeline/aggregate.py` and is exposed by `./.venv/bin/python -m pipeline.cli aggregate`. It plans 3-hour aggregation chunks with a 1-hour overlap lookahead (4-hour LLM windows fixed to `00/03/06/09/12/15/18/21` UTC starts), skips completed windows using `aggregation_windows`, loads category-impact-eligible articles in each planned window, calls Gemini with headline + digest/summary metadata in category-bounded batches, validates that every article index appears exactly once, scores resulting groups for newsworthiness from digest impact or fallback scoring, writes `data/events/<event_id>.json`, upserts the `events` table, assigns `articles.event_id`, and records completed windows. Windows remain sequential because each window should see event state from earlier windows; within a window the LLM-only category batch work is concurrent. The command supports `--range-start`, `--range-end`, `--limit-windows`, `--dry-run`, `--force`, and `--verbose`. By default, if no range is specified, aggregation bounds cover the configured staging-retention horizon, while non-force planning sparsely selects only fixed UTC windows that have unassigned articles in their publish-time bucket, plus the latest completed window when applicable. If no unassigned articles exist within this horizon, the run plans no windows but still drains bounded deduplication review work. With `--force`, default planning instead uses completed digests in the same retention horizon, clears prior event assignments and aggregation-stage filter decisions for the actual planned window coverage, deletes or trims affected event artifacts, and then reruns the continuous window range even if windows were previously marked completed.
 
 Event naming in this first pass is deterministic and intentionally simple: existing event IDs are reused when a group contains already-assigned articles; otherwise code derives a stable date + headline slug and stores lightweight keyword metadata. Richer title/slug/entity generation remains a follow-up LLM pass.
 
@@ -372,7 +376,7 @@ Prompt version `article-digest-v6` includes URL, canonical URL, and estimated-pu
 To handle stories that develop over longer periods and span across different 3-hour windows, the system implements a two-layered event merging strategy:
 
 1. **Proactive Active-Events Matching**: During the window aggregation pass, the aggregator queries the SQLite database for events updated within the last 48 hours matching the categories of the window articles. These active events are filtered to only include those whose title shares at least 2 non-stopword words with at least one article's headline in the current window (or shares the single non-stopword if the event title only has one). This prevents context bloat and false-positive groupings in the LLM. The matched active events are passed to the grouping LLM call (containing their IDs, categories, and titles/headlines). The LLM is instructed to assign window articles directly to these existing events where appropriate, returning their `existing_event_id` in the JSON groups response. The validator only preserves event IDs that were actually included in that prompt.
-2. **Reactive Post-Aggregation Deduplication**: At the end of the aggregation pass, a reactive deduplication process runs over all active events updated in the last 48 hours. It checks for candidate event pairs using suffix conflicts (e.g. `event-name` vs `event-name-2` date-slug collisions), title word overlaps, highly similar article headlines, distinctive keyword overlap, and an inclusive 3.5 Flash-Lite prescreen. Each unique candidate pair then goes to the strict `deduplication-review-v1` call on `gemini-3.7-flash`, which evaluates full article lists, headlines, and digests. A merge requires both `should_merge=true` and confidence of at least `0.80`.
+2. **Reactive Post-Aggregation Deduplication**: At the end of every aggregation invocation, a reactive deduplication process runs over active and stale events updated in the configured 72-hour lookback, even when no aggregation window changed. It checks for candidate event pairs using suffix conflicts (e.g. `event-name` vs `event-name-2` date-slug collisions), title word overlaps, highly similar article headlines, distinctive keyword overlap, and an inclusive 3.5 Flash-Lite prescreen. Each unique candidate pair then goes to the strict `deduplication-review-v2` call on `gemini-3.7-flash`, which evaluates full article lists, headlines, and digests. A merge requires both `should_merge=true` and confidence of at least `0.80`.
 
 When a merge is triggered (either proactively via the window LLM or reactively via post-aggregation deduplication), the aggregator selects a winning event ID, loads historical article IDs from both events, merges their article lists, updates the winning event's JSON and database assignments, deletes the merged-away events' JSON files, and removes their SQLite database entries to prevent historical data loss.
 
@@ -566,14 +570,16 @@ The presentation layer reads this index to decide which stories to render and ho
 
 The index also carries a validated `curation` object generated once per editorial
 run from the rolling-window story headlines, deks, ranks, source counts, and
-event ages. Prompt version `homepage-curation-v4` selects up to 12 distinct Top
+event ages. Prompt version `homepage-curation-v5` selects up to 12 distinct Top
 News story IDs from a compact global high-rank candidate set, favoring
-consequential developments from the last 12–24 hours. Topic grouping runs in
-bounded per-category chunks so a large 72-hour corpus cannot exhaust one model
-response before covering later categories; those results are merged into one
-ordered list of specific multi-story topic sections. A story may
+consequential developments from the last 12–24 hours. Topic grouping runs once
+over the 100 highest category-ranked candidates per category, so a large 72-hour
+corpus cannot create repeated headings across arbitrary chunks. It prefers
+coherent sections of at least three stories and may broaden an overly narrow
+label to a meaningful regional or subject desk. Those results are merged into
+one ordered list of specific multi-story topic sections. A story may
 belong to at most one topic section; unmatched stories are intentionally left
-for the presentation layer's Everything Else section. The curation artifact
+for the presentation layer's per-category remainder sections. The curation artifact
 stores model/prompt/timestamp provenance and LLM usage is recorded under
 `homepage_curation`. A failed category chunk is recorded and omitted without
 discarding successful chunks; a pass-wide failure falls back to the ranked Top
@@ -647,14 +653,21 @@ Responsibilities:
   is global across visits and category sections. Cards remain in place while the
   reader scans the current view; category and New/All changes re-apply the live
   read set so newly read cards disappear from the next New view. A header action
-  marks every currently visible card read. All always restores the complete
+  marks every currently visible card read. The masthead count is always the live
+  unread total for the selected category and source-coverage filters, independent
+  of New/All, and decrements immediately as titles become read. All always restores the complete
   rolling window. Reading history remains device-local unless the reader
   explicitly enables anonymous synchronization from the masthead control.
 - Anonymous sync uses a shareable fragment capability (`#sync=v1.<token>`).
   The browser stores the 256-bit token locally, immediately removes imported
   fragments from the visible URL, handles both initial-load and same-document
-  `hashchange` navigation, and uploads the newest 2,000 retained reads. Initial
-  page display waits for one bounded pull and renders once with the merged state.
+  `hashchange` navigation, and uploads the newest 2,000 retained reads. Each card
+  carries a stable order composed from the story artifact's immutable first-publication
+  timestamp and story ID. A contiguous read prefix within the retention window is
+  collapsed into one `read_before` watermark; only out-of-order reads after that
+  boundary remain individual ID/timestamp entries. Initial page display waits for
+  one bounded revision check and renders once with merged state only when the
+  server revision differs from the revision saved by this browser.
   Later writes are debounced by four seconds and ignore the returned union, so
   they never rerender the current view. Focus, tab, online, and cross-tab storage
   events do not pull; a later page visit obtains the latest shared state.
@@ -673,11 +686,13 @@ Responsibilities:
   to the card-style `Updated Xm/h/d ago` label and refreshes it once per minute,
   so a static page still communicates its current age without a server runtime.
 - The homepage renders the curated Top News list first in the All view, then
-  multi-story topic sections, then Everything Else. Top News cards are removed
+  multi-story topic sections, then per-category remainder sections such as More
+  World News and More Science. Top News cards are removed
   from their repeated topic position in All but keep their topic assignment in
-  focused category views. Empty sections disappear after category/read filtering,
-  and topic groups are ordered by the strongest remaining story rank for the
-  selected view. At mobile widths, all rendered sections begin collapsed behind
+  focused category views. Empty sections disappear after category/read filtering;
+  a topic with fewer than two remaining visible cards is dissolved into its
+  category remainder instead of rendering as a singleton. Topic groups are
+  ordered by the strongest remaining story rank for the selected view. At mobile widths, all rendered sections begin collapsed behind
   accessible heading buttons with story counts. Readers can toggle one section or
   use the view-level Expand All/Collapse All control; desktop sections remain expanded.
   Curated Top News stories remain in Top News when a focused category is selected.
@@ -782,19 +797,23 @@ The sync service is deliberately separate from both the static document root and
 
 Group creation generates 32 random bytes and returns their unpadded base64url
 encoding. The browser treats this token as a bearer capability. SQLite stores
-only `SHA-256(token)`, the JSON story-ID/read-time map, a revision, and lifecycle
+only `SHA-256(token)`, the versioned JSON read state, a revision, and lifecycle
 timestamps. The token never appears in an API path or query string. The share URL
 places it in the fragment, which client JavaScript consumes and removes before
 network synchronization. API calls carry it in `Authorization: Bearer` and
 responses set `Cache-Control: private, no-store`.
 
-`POST /api/sync/v1/merge` validates the offered map, loads the group inside an
-immediate SQLite transaction, unions by story ID using the maximum read timestamp,
-prunes entries beyond the three-day window, retains only the newest bounded set,
-updates the revision, and returns the complete merged map. This is idempotent and
-avoids a fetch-then-write race. The client applies that returned map only during
-initial/link import; ordinary background writes use the same atomic endpoint but
-leave the current display unchanged. There is intentionally no unread operation;
+`POST /api/sync/v1/merge` validates the offered versioned state, loads the group
+inside an immediate SQLite transaction, takes the maximum read-prefix watermark,
+unions remaining IDs using the maximum read timestamp, and prunes ordered IDs
+covered by the watermark plus state beyond the three-day window. The group
+revision advances only when read state changes. A browser includes its last
+applied revision; when it still matches the pre-merge server revision, the server
+returns only revision/status metadata rather than the complete state. This is
+idempotent and avoids a fetch-then-write race. Legacy flat ID/timestamp maps remain
+readable and are normalized into the versioned envelope when changed. The client
+applies returned state only during initial/link import; ordinary background writes
+use the same atomic endpoint but leave the current display unchanged. There is intentionally no unread operation;
 adding one would require tombstones or another conflict model.
 
 ### Containment and Privacy

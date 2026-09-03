@@ -239,7 +239,9 @@ least two distinct sources; All restores every story in the rolling window.
 That preference is also device-local, and the non-default All state is reflected
 as `coverage=all` in the URL.
 Stories are marked read after their title remains visible for one second, retain
-a subtle read indicator, and are remembered for three days. New mode re-applies
+a subtle read indicator, and are remembered for three days. The masthead reports
+the live unread count for the current category/source view and decrements it as
+stories become read without moving cards during the scan. New mode re-applies
 that local history whenever the reader changes category or view; a header action
 marks every currently visible story read. Reading history remains browser-local
 unless the reader explicitly starts anonymous synchronization from the header
@@ -247,15 +249,21 @@ icon. Starting sync creates a private capability link; another browser that open
 the link unions its local read state with the group. The fragment token is removed
 from the address bar immediately, including for same-page fragment navigation;
 writes are debounced and sent silently without changing the current view. A new
-page visit fetches the latest shared state before displaying stories. Tab changes
-and cross-tab writes do not fetch or rerender. Disconnecting preserves the
-browser's local history.
+page visit checks the shared revision before displaying stories and downloads
+state only when that revision changed. Contiguous read prefixes are represented
+by one immutable story-order watermark, leaving only newer out-of-order reads as
+individual IDs. Tab changes and cross-tab writes do not fetch or rerender.
+Disconnecting preserves the browser's local history.
 Anyone possessing the private link can join the group, so the UI identifies it as
 sensitive.
 
 An editorial curation pass selects up to 12 distinct Top News stories and groups
-related story cards under specific topic headings, leaving unmatched cards under
-Everything Else. On mobile, every section is collapsed to its heading by default;
+the highest-ranked related story cards under specific topic headings. It favors
+coherent groups of three or more and can broaden an overly narrow label to a
+meaningful regional or subject desk. Unmatched cards—and topic groups reduced to
+one visible card by the reader's filters—are collected under per-category
+remainders such as More World News or More Science instead of one Everything Else
+dump. On mobile, every section is collapsed to its heading by default;
 the heading toggles that section and an Expand All/Collapse All action controls
 the current set of sections. Top News remains visible within focused category
 views when a curated story belongs to that category. Topic sections are ordered
@@ -271,7 +279,7 @@ archive, and story pages publish complete Open Graph and X card metadata with a
 same-origin 1200×630 branded poster; story shares retain their own headline and
 description. Every page also references the checked-in multi-resolution
 newspaper favicon at `site/assets/favicon.ico`. The homepage status line stays
-compact by showing the visible count and a client-calculated relative generation
+compact by showing the live unread count and a client-calculated relative generation
 time that refreshes every minute.
 
 ### Anonymous Read-History Sync
@@ -285,8 +293,10 @@ The same-origin API exposes only three mutation endpoints:
 The 256-bit bearer token is returned only at creation, stored in browser local
 storage, transported in the `Authorization` header, and persisted on the origin
 only as a SHA-256 hash. Responses are `no-store`; requests require an allowed
-same-origin `Origin` and JSON content type. The server stores only story IDs and
-millisecond read timestamps.
+same-origin `Origin` and JSON content type. The server stores only story IDs,
+millisecond read timestamps, immutable first-publication order values for
+compactable IDs, a read-prefix watermark, and a monotonic group revision.
+Matching revisions return a small response without the complete state.
 
 Default containment limits are 2,000 read IDs per group, 2,000 active groups,
 100 group creations per UTC day, a 256 KiB request/state size, a 256 MiB SQLite

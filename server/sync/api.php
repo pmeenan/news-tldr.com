@@ -15,12 +15,16 @@ try {
 
     if ($path === '/api/sync/v1/groups' && $method === 'POST') {
         $payload = sync_read_payload($config);
-        sync_json_response(201, $store->createGroup(sync_payload_reads($payload)));
+        sync_json_response(201, $store->createGroup(sync_payload_state($payload)));
     } elseif ($path === '/api/sync/v1/merge' && $method === 'POST') {
         $payload = sync_read_payload($config);
         sync_json_response(
             200,
-            $store->mergeGroup(sync_bearer_token(), sync_payload_reads($payload)),
+            $store->mergeGroup(
+                sync_bearer_token(),
+                sync_payload_state($payload),
+                sync_payload_known_revision($payload),
+            ),
         );
     } elseif ($path === '/api/sync/v1/group' && $method === 'DELETE') {
         if (!$store->deleteGroup(sync_bearer_token())) {
@@ -95,15 +99,33 @@ function sync_read_payload(SyncConfig $config): array
 }
 
 /** @param array<string, mixed> $payload
- *  @return array<string, int>
+ *  @return array<string, mixed>
  */
-function sync_payload_reads(array $payload): array
+function sync_payload_state(array $payload): array
 {
     $reads = $payload['reads'] ?? null;
     if (!is_array($reads) || (array_is_list($reads) && $reads !== [])) {
         throw new SyncHttpError(400, 'invalid_reads', 'The reads field must be a JSON object.');
     }
-    return $reads;
+    return [
+        'reads' => $reads,
+        'read_orders' => $payload['read_orders'] ?? [],
+        'ordered_reads' => $payload['ordered_reads'] ?? [],
+        'read_before' => $payload['read_before'] ?? null,
+    ];
+}
+
+/** @param array<string, mixed> $payload */
+function sync_payload_known_revision(array $payload): ?int
+{
+    $revision = $payload['known_revision'] ?? null;
+    if ($revision === null) {
+        return null;
+    }
+    if (!is_int($revision) || $revision < 1) {
+        throw new SyncHttpError(400, 'invalid_revision', 'The known revision is invalid.');
+    }
+    return $revision;
 }
 
 function sync_bearer_token(): string
@@ -124,4 +146,3 @@ function sync_json_response(int $status, array $payload): never
     }
     exit;
 }
-

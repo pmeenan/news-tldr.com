@@ -2116,6 +2116,43 @@ def test_aggregate_once_force_default_range_uses_completed_digests(tmp_path, mon
     assert planned_windows[0] == (expected_start, expected_end, True)
 
 
+def test_aggregate_once_runs_deduplication_without_new_window_work(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+
+    from pipeline.config import PipelineConfig
+
+    monkeypatch.setattr("pipeline.aggregate.StateDB", lambda: StateDB(db_path))
+    monkeypatch.setattr("pipeline.aggregate.LOCK_PATH", tmp_path / "pipeline.lock")
+    monkeypatch.setattr(
+        "pipeline.aggregate.load_pipeline_config",
+        lambda: PipelineConfig(
+            collection={},
+            aggregation={"deduplication_lookback_hours": 72},
+            retention={},
+            pipeline={},
+            digest={},
+        ),
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_deduplicate(**kwargs: Any) -> int:
+        calls.append(kwargs)
+        return 2
+
+    monkeypatch.setattr(
+        "pipeline.aggregate.deduplicate_active_events_llm",
+        fake_deduplicate,
+    )
+
+    stats = aggregate_once(client=FakeJsonGenerator({}))
+
+    assert stats["windows_planned"] == 0
+    assert stats["events_merged"] == 2
+    assert len(calls) == 1
+    assert calls[0]["lookback_hours"] == 72
+
+
 def test_aggregate_once_default_range_snaps_to_fixed_utc_boundaries(tmp_path, monkeypatch) -> None:
     from pipeline.util import utc_now
 
@@ -2451,6 +2488,7 @@ def test_deduplicate_active_events_llm(tmp_path, monkeypatch) -> None:
             "updated_at": "2026-05-31T10:00:00Z",
             "article_ids": ["art1"],
             "article_count": 1,
+            "status": "active",
         }
         event2 = {
             "event_id": "2026-05-25-sudans-war-economy-2",
@@ -2460,6 +2498,7 @@ def test_deduplicate_active_events_llm(tmp_path, monkeypatch) -> None:
             "updated_at": "2026-05-31T11:00:00Z",
             "article_ids": ["art2"],
             "article_count": 1,
+            "status": "stale",
         }
 
         (event_dir / "2026-05-25-sudans-war-economy.json").write_text(json.dumps(event1), encoding="utf-8")
@@ -2508,12 +2547,13 @@ def test_deduplicate_active_events_llm(tmp_path, monkeypatch) -> None:
         feeds_by_source = {}
 
         from pipeline.aggregate import deduplicate_active_events_llm
-        deduplicate_active_events_llm(
+        merges = deduplicate_active_events_llm(
             state=state,
             client=client,
             feeds_by_source=feeds_by_source,
         )
 
+        assert merges == 1
         assert not (event_dir / "2026-05-25-sudans-war-economy-2.json").exists()
         assert (event_dir / "2026-05-25-sudans-war-economy.json").exists()
 
@@ -2603,6 +2643,19 @@ def test_deduplication_pair_reviews_run_concurrently_for_disjoint_pairs(tmp_path
 
     assert merges == 0
     assert client.max_in_flight > 1
+
+
+def test_event_merge_prompt_treats_immediate_followups_as_one_homepage_story() -> None:
+    from pipeline.aggregate import _build_event_merge_prompt
+
+    prompt = _build_event_merge_prompt(
+        {"event_id": "event-a", "title": "Decision announced", "articles": []},
+        {"event_id": "event-b", "title": "Reaction follows", "articles": []},
+    )
+
+    assert "one evolving homepage story" in prompt
+    assert "immediate reaction, consequences, implementation details" in prompt
+    assert "same war, region, company, election, or continuing issue" in prompt
 
 
 def test_strong_title_duplicate_candidates_are_reviewed_before_newer_prescreen_pairs() -> None:

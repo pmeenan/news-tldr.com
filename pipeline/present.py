@@ -31,7 +31,7 @@ from pipeline.paths import (
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v20"
+PRESENTATION_VERSION = "presentation-v22"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
@@ -293,11 +293,15 @@ main[data-reader-pending]::before { content: "Loading latest read status…"; po
 
 SITE_JS = """
 const VIEWED_KEY = 'newsTldrViewedStoriesV1';
+const READ_BEFORE_KEY = 'newsTldrReadBeforeV1';
 const VIEW_MODE_KEY = 'newsTldrViewModeV1';
 const COVERAGE_MODE_KEY = 'newsTldrCoverageModeV1';
 const SYNC_TOKEN_KEY = 'newsTldrSyncTokenV1';
+const SYNC_REVISION_KEY = 'newsTldrSyncRevisionV1';
 const SYNC_FRAGMENT_PREFIX = 'sync=v1.';
 const SYNC_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const STORY_ORDER_PATTERN = /^[0-9]{13}:[A-Za-z0-9._-]{1,128}$/;
+const SYNC_STATE_VERSION = 2;
 const SYNC_DEBOUNCE_MS = 4 * 1000;
 const SYNC_MAX_RETRY_MS = 5 * 60 * 1000;
 const SYNC_REQUEST_TIMEOUT_MS = 8 * 1000;
@@ -305,12 +309,14 @@ const SYNC_MAX_READS = 2000;
 const VIEWED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
 const VIEW_THRESHOLD_MS = 1 * 1000;
 const MIN_TOP_SOURCE_COUNT = 2;
+const MIN_TOPIC_SECTION_STORIES = 2;
 const COVERAGE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const EDITORIAL_PRIORITY_WEIGHT = 10;
 const categoryButtons = Array.from(document.querySelectorAll('[data-category-filter]'));
 const viewButtons = Array.from(document.querySelectorAll('[data-view-filter]'));
 const coverageButtons = Array.from(document.querySelectorAll('[data-coverage-filter]'));
 const cards = Array.from(document.querySelectorAll('[data-story-category]'));
+const cardsByStoryId = new Map(cards.map((card) => [card.dataset.storyId, card]));
 const count = document.querySelector('[data-visible-count]');
 const countLabel = document.querySelector('[data-count-label]');
 const siteUpdated = document.querySelector('[data-site-updated]');
@@ -344,6 +350,8 @@ let syncDirty = false;
 let syncFragmentImported = false;
 let syncRetryMs = SYNC_DEBOUNCE_MS;
 let readerReady = false;
+let readBefore = loadReadBefore();
+let syncRevision = null;
 
 function loadViewed() {
   const now = Date.now();
@@ -366,6 +374,30 @@ function persistViewedMap(value) {
   try { localStorage.setItem(VIEWED_KEY, JSON.stringify(value)); } catch (_) {}
 }
 
+function validStoryOrder(value, now = Date.now()) {
+  if (!STORY_ORDER_PATTERN.test(value || '')) return false;
+  const timestamp = Number.parseInt(value.slice(0, 13), 10);
+  return Number.isFinite(timestamp)
+    && timestamp <= now + 5 * 60 * 1000
+    && now - timestamp <= VIEWED_RETENTION_MS;
+}
+
+function loadReadBefore() {
+  try {
+    const saved = localStorage.getItem(READ_BEFORE_KEY) || '';
+    if (validStoryOrder(saved)) return saved;
+    localStorage.removeItem(READ_BEFORE_KEY);
+  } catch (_) {}
+  return '';
+}
+
+function persistReadBefore() {
+  try {
+    if (readBefore) localStorage.setItem(READ_BEFORE_KEY, readBefore);
+    else localStorage.removeItem(READ_BEFORE_KEY);
+  } catch (_) {}
+}
+
 function loadSyncToken() {
   try {
     const saved = localStorage.getItem(SYNC_TOKEN_KEY) || '';
@@ -375,8 +407,31 @@ function loadSyncToken() {
   }
 }
 
+function loadSyncRevision(token) {
+  if (!token) return null;
+  try {
+    const saved = JSON.parse(localStorage.getItem(SYNC_REVISION_KEY) || 'null');
+    if (saved?.token === token && Number.isInteger(saved.revision) && saved.revision >= 1) {
+      return saved.revision;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function setSyncRevision(revision) {
+  syncRevision = Number.isInteger(revision) && revision >= 1 ? revision : null;
+  try {
+    if (syncToken && syncRevision !== null) {
+      localStorage.setItem(SYNC_REVISION_KEY, JSON.stringify({ token: syncToken, revision: syncRevision }));
+    } else {
+      localStorage.removeItem(SYNC_REVISION_KEY);
+    }
+  } catch (_) {}
+}
+
 const viewed = loadViewed();
 syncToken = loadSyncToken();
+syncRevision = loadSyncRevision(syncToken);
 const params = new URLSearchParams(location.search);
 let activeCategory = params.get('category') || 'all';
 if (!categoryButtons.some((button) => button.dataset.categoryFilter === activeCategory)) {
@@ -418,11 +473,13 @@ function updateSiteFreshness() {
 }
 
 function setSyncToken(token) {
+  const previousToken = syncToken;
   syncToken = SYNC_TOKEN_PATTERN.test(token || '') ? token : '';
   try {
     if (syncToken) localStorage.setItem(SYNC_TOKEN_KEY, syncToken);
     else localStorage.removeItem(SYNC_TOKEN_KEY);
   } catch (_) {}
+  if (syncToken !== previousToken) setSyncRevision(loadSyncRevision(syncToken));
   updateSyncUi();
 }
 
@@ -503,16 +560,37 @@ function currentReadPayload() {
   ));
   current.sort((left, right) => right[1] - left[1]);
   const reads = {};
+  const orderedReads = [];
   for (const [storyId, timestamp] of current.slice(0, SYNC_MAX_READS)) {
-    reads[storyId] = Math.min(timestamp, now);
+    const normalizedTimestamp = Math.min(timestamp, now);
+    const card = cardsByStoryId.get(storyId);
+    const order = card?.dataset.readOrder || '';
+    if (validStoryOrder(order, now)) {
+      orderedReads.push([storyId, normalizedTimestamp, Number.parseInt(order.slice(0, 13), 10)]);
+    } else {
+      reads[storyId] = normalizedTimestamp;
+    }
   }
-  return { reads };
+  return {
+    state_version: SYNC_STATE_VERSION,
+    reads,
+    ordered_reads: orderedReads,
+    read_before: validStoryOrder(readBefore, now) ? readBefore : null,
+    known_revision: syncRevision,
+  };
 }
 
-function mergeRemoteReads(reads) {
+function mergeRemoteState(payload) {
+  const reads = payload?.reads;
   if (!reads || typeof reads !== 'object' || Array.isArray(reads)) return false;
   const now = Date.now();
   let changed = false;
+  const remoteReadBefore = payload?.read_before;
+  if (validStoryOrder(remoteReadBefore, now) && (!readBefore || remoteReadBefore > readBefore)) {
+    readBefore = remoteReadBefore;
+    persistReadBefore();
+    changed = true;
+  }
   for (const [storyId, timestamp] of Object.entries(reads)) {
     if (!/^[A-Za-z0-9._-]{1,128}$/.test(storyId) || !Number.isFinite(timestamp)
         || timestamp <= 0 || now - timestamp > VIEWED_RETENTION_MS) continue;
@@ -529,9 +607,38 @@ function mergeRemoteReads(reads) {
     }
   }
   if (changed) {
+    compactViewedState();
     persistViewedMap(viewed);
   }
   return changed;
+}
+
+function isStoryRead(card) {
+  const storyId = card.dataset.storyId;
+  if (viewed[storyId]) return true;
+  const order = card.dataset.readOrder || '';
+  return Boolean(readBefore && validStoryOrder(order) && order <= readBefore);
+}
+
+function compactViewedState() {
+  const now = Date.now();
+  if (readBefore && !validStoryOrder(readBefore, now)) readBefore = '';
+  const ordered = cards
+    .filter((card) => validStoryOrder(card.dataset.readOrder || '', now))
+    .sort((left, right) => left.dataset.readOrder.localeCompare(right.dataset.readOrder));
+  let nextReadBefore = readBefore;
+  for (const card of ordered) {
+    const order = card.dataset.readOrder;
+    if (nextReadBefore && order <= nextReadBefore) continue;
+    if (!viewed[card.dataset.storyId]) break;
+    nextReadBefore = order;
+  }
+  if (nextReadBefore !== readBefore) readBefore = nextReadBefore;
+  for (const card of ordered) {
+    if (readBefore && card.dataset.readOrder <= readBefore) delete viewed[card.dataset.storyId];
+  }
+  persistReadBefore();
+  persistViewedMap(viewed);
 }
 
 async function syncRequest(path, { method = 'POST', token = '', body = null, keepalive = false } = {}) {
@@ -602,7 +709,9 @@ async function synchronizeReads({ keepalive = false, quiet = false, applyRemote 
     keepalive,
   }).then((payload) => {
     if (requestToken !== syncToken) return payload;
-    if (applyRemote) mergeRemoteReads(payload?.reads);
+    const includesRemoteState = payload && Object.hasOwn(payload, 'reads');
+    if (applyRemote && includesRemoteState) mergeRemoteState(payload);
+    if (applyRemote || !includesRemoteState) setSyncRevision(payload?.revision);
     syncRetryMs = SYNC_DEBOUNCE_MS;
     if (!quiet) updateSyncUi(`Synchronized ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`);
     return payload;
@@ -631,7 +740,8 @@ async function createSyncGroup() {
     const payload = await syncRequest('/api/sync/v1/groups', { body: currentReadPayload() });
     if (!SYNC_TOKEN_PATTERN.test(payload?.token || '')) throw new Error('The server returned an invalid sync token.');
     setSyncToken(payload.token);
-    mergeRemoteReads(payload.reads);
+    mergeRemoteState(payload);
+    setSyncRevision(payload.revision);
     updateSyncUi('Sync is connected. Copy the private link to another browser.');
     scheduleSync();
   } catch (error) {
@@ -659,6 +769,7 @@ function disconnectSync() {
   syncTimer = null;
   syncDirty = false;
   syncRetryMs = SYNC_DEBOUNCE_MS;
+  setSyncRevision(null);
   setSyncToken('');
   showSyncError();
 }
@@ -705,21 +816,26 @@ function updateUrl() {
 }
 
 function renderStories() {
-  const ordered = [...cards].sort((left, right) => {
+  const compareCards = (left, right) => {
     const rankDifference = cardRank(right, activeCategory) - cardRank(left, activeCategory);
     if (rankDifference) return rankDifference;
     return (right.dataset.eventUpdated || '').localeCompare(left.dataset.eventUpdated || '');
-  });
+  };
+  const ordered = [...cards].sort(compareCards);
   visibleCards = [];
   let categoryStoryCount = 0;
   let coverageStoryCount = 0;
+  let unreadStoryCount = 0;
   for (const card of ordered) {
     const matchesCategory = activeCategory === 'all' || card.dataset.storyCategory === activeCategory;
     const matchesCoverage = activeCoverage === 'all'
       || cardSourceCount(card) >= MIN_TOP_SOURCE_COUNT;
-    const isRead = Boolean(viewed[card.dataset.storyId]);
+    const isRead = isStoryRead(card);
     if (matchesCategory) categoryStoryCount += 1;
-    if (matchesCategory && matchesCoverage) coverageStoryCount += 1;
+    if (matchesCategory && matchesCoverage) {
+      coverageStoryCount += 1;
+      if (!isRead) unreadStoryCount += 1;
+    }
     const show = matchesCategory && matchesCoverage && (activeView === 'all' || !isRead);
     card.hidden = !show;
     card.classList.toggle('is-read', isRead);
@@ -735,37 +851,60 @@ function renderStories() {
   const topIds = new Set(topNews.map((card) => card.dataset.storyId));
   const sectionCandidates = visibleCards.filter((card) => !topIds.has(card.dataset.storyId));
   const topicGroups = new Map();
-  const everythingElse = [];
+  const categoryRemainders = new Map();
+  const addToCategoryRemainder = (card) => {
+    const category = card.dataset.storyCategory || 'other';
+    if (!categoryRemainders.has(category)) {
+      categoryRemainders.set(category, {
+        title: `More ${card.dataset.categoryName || 'News'}`,
+        order: Number(card.dataset.categoryOrder || Number.MAX_SAFE_INTEGER),
+        cards: [],
+      });
+    }
+    categoryRemainders.get(category).cards.push(card);
+  };
   for (const card of sectionCandidates) {
     const title = card.dataset.topicTitle || '';
     if (!title) {
-      everythingElse.push(card);
+      addToCategoryRemainder(card);
       continue;
     }
-    if (!topicGroups.has(title)) topicGroups.set(title, []);
-    topicGroups.get(title).push(card);
+    if (!topicGroups.has(title)) topicGroups.set(title, { title, cards: [] });
+    topicGroups.get(title).cards.push(card);
   }
-  const sortedTopicGroups = Array.from(topicGroups.entries()).sort((left, right) => {
+  const retainedTopicGroups = [];
+  for (const topic of topicGroups.values()) {
+    if (topic.cards.length < MIN_TOPIC_SECTION_STORIES) {
+      for (const card of topic.cards) addToCategoryRemainder(card);
+    } else {
+      retainedTopicGroups.push(topic);
+    }
+  }
+  const sortedTopicGroups = retainedTopicGroups.sort((left, right) => {
     const rightPriority = Math.max(
-      ...right[1].map((card) => cardCoveragePriority(card, activeCategory))
+      ...right.cards.map((card) => cardCoveragePriority(card, activeCategory))
     );
     const leftPriority = Math.max(
-      ...left[1].map((card) => cardCoveragePriority(card, activeCategory))
+      ...left.cards.map((card) => cardCoveragePriority(card, activeCategory))
     );
     if (rightPriority !== leftPriority) return rightPriority - leftPriority;
-    const rightRank = Math.max(...right[1].map((card) => cardRank(card, activeCategory)));
-    const leftRank = Math.max(...left[1].map((card) => cardRank(card, activeCategory)));
+    const rightRank = Math.max(...right.cards.map((card) => cardRank(card, activeCategory)));
+    const leftRank = Math.max(...left.cards.map((card) => cardRank(card, activeCategory)));
     if (rightRank !== leftRank) return rightRank - leftRank;
-    return Number(left[1][0].dataset.topicOrder || 0) - Number(right[1][0].dataset.topicOrder || 0);
+    return Number(left.cards[0].dataset.topicOrder || 0)
+      - Number(right.cards[0].dataset.topicOrder || 0);
   });
+  const sortedCategoryRemainders = Array.from(categoryRemainders.values())
+    .map((remainder) => ({ ...remainder, cards: remainder.cards.sort(compareCards) }))
+    .sort((left, right) => left.order - right.order);
 
   const fragment = document.createDocumentFragment();
   if (topNews.length) fragment.appendChild(createStorySection('Top News', topNews, true));
-  for (const [title, sectionCards] of sortedTopicGroups) {
-    fragment.appendChild(createStorySection(title, sectionCards, false));
+  for (const topic of sortedTopicGroups) {
+    fragment.appendChild(createStorySection(topic.title, topic.cards, false));
   }
-  if (everythingElse.length) {
-    fragment.appendChild(createStorySection('Everything Else', everythingElse, false));
+  for (const remainder of sortedCategoryRemainders) {
+    fragment.appendChild(createStorySection(remainder.title, remainder.cards, false));
   }
   sectionRoot.replaceChildren(fragment);
   updateSectionBulkControl();
@@ -781,12 +920,8 @@ function renderStories() {
     );
   }
   sectionRoot.dataset.activeCategory = activeCategory;
-  if (count) count.textContent = String(visibleCards.length);
-  if (countLabel) {
-    countLabel.textContent = activeView === 'new'
-      ? 'new'
-      : activeCoverage === 'top' ? 'top' : 'stories';
-  }
+  if (count) count.textContent = String(unreadStoryCount);
+  if (countLabel) countLabel.textContent = 'unread';
   if (emptyState) {
     emptyState.hidden = visibleCards.length !== 0;
     if (activeView === 'new' && coverageStoryCount > 0) {
@@ -905,17 +1040,41 @@ for (const button of coverageButtons) {
 
 function markViewed(card) {
   const storyId = card.dataset.storyId;
-  if (!storyId) return;
+  if (!storyId || isStoryRead(card)) return;
   viewed[storyId] = Date.now();
+  compactViewedState();
   card.classList.add('is-read');
-  persistViewedMap(viewed);
+  updateUnreadCount();
   scheduleSync();
+}
+
+function updateUnreadCount() {
+  if (!count) return;
+  const unread = cards.filter((card) => {
+    const matchesCategory = activeCategory === 'all'
+      || card.dataset.storyCategory === activeCategory;
+    const matchesCoverage = activeCoverage === 'all'
+      || cardSourceCount(card) >= MIN_TOP_SOURCE_COUNT;
+    return matchesCategory && matchesCoverage && !isStoryRead(card);
+  }).length;
+  count.textContent = String(unread);
+  if (countLabel) countLabel.textContent = 'unread';
 }
 
 if (markViewReadButton) {
   markViewReadButton.addEventListener('click', () => {
-    for (const card of visibleCards) markViewed(card);
-    markViewReadButton.title = `${visibleCards.length} stories marked read in this view`;
+    const newlyRead = visibleCards.filter((card) => !isStoryRead(card));
+    const readAt = Date.now();
+    for (const card of newlyRead) {
+      viewed[card.dataset.storyId] = readAt;
+      card.classList.add('is-read');
+    }
+    if (newlyRead.length) {
+      compactViewedState();
+      updateUnreadCount();
+      scheduleSync();
+    }
+    markViewReadButton.title = `${newlyRead.length} stories marked read in this view`;
     if (activeView === 'new') renderStories();
   });
 }
@@ -928,7 +1087,7 @@ function startReadObserver() {
     for (const entry of entries) {
       const title = entry.target;
       const card = title.closest('[data-story-id]');
-      if (!card || viewed[card.dataset.storyId]) continue;
+      if (!card || isStoryRead(card)) continue;
       if (entry.isIntersecting && entry.intersectionRatio >= 0.6 && !timers.has(title)) {
         timers.set(title, window.setTimeout(() => {
           timers.delete(title);
@@ -975,6 +1134,7 @@ window.addEventListener('hashchange', () => {
 window.addEventListener('storage', (event) => {
   if (event.key === SYNC_TOKEN_KEY) {
     syncToken = loadSyncToken();
+    syncRevision = loadSyncRevision(syncToken);
     updateSyncUi();
   }
 });
@@ -1303,6 +1463,10 @@ def _render_home(
                 _e(category["id"]), _e(category.get("short_name") or category["name"])
             )
         )
+    category_order = {
+        str(category["id"]): int(category.get("sort_order") or index)
+        for index, category in enumerate(categories, start=1)
+    }
     curation = active_index.get("curation") if isinstance(active_index.get("curation"), dict) else {}
     top_news = curation.get("top_news") if isinstance(curation.get("top_news"), list) else []
     top_order = {str(story_id): index for index, story_id in enumerate(top_news)}
@@ -1334,6 +1498,7 @@ def _render_home(
         category_rank = _score(row.get("category_rank_score", row.get("importance_score")))
         shade_level = _shade_level(source_count=source_count)
         story_id = str(story["story_id"])
+        read_order = _story_read_order(story)
         topic_title, topic_order = topic_by_story.get(story_id, ("", 0))
         story_top_order = top_order.get(story_id)
         cards.append(
@@ -1346,6 +1511,9 @@ def _render_home(
             f'data-source-share="{source_share:.4f}" '
             f'data-top-order="{story_top_order if story_top_order is not None else ""}" '
             f'data-topic-title="{_e(topic_title)}" data-topic-order="{topic_order}" '
+            f'data-category-name="{_e(category_names[story["category"]])}" '
+            f'data-category-order="{category_order[story["category"]]}" '
+            f'data-read-order="{_e(read_order)}" '
             f'data-event-updated="{_e(_event_time(story).isoformat())}">'
             f'<p class="kicker">{_e(category_names[story["category"]])}</p>'
             f'<h2 data-story-title><a href="/stories/{_e(story_id)}/">{_e(story["headline"])}</a></h2>'
@@ -1378,8 +1546,9 @@ def _render_home(
         '<button type="button" class="mark-view-read" data-mark-view-read '
         'aria-label="Mark all visible stories as read" title="Mark visible stories read">'
         '✓ <span>Mark read</span></button></div></div>'
-        f'<p><span data-visible-count>{default_top_count}</span> '
-        f'<span data-count-label>new</span> · '
+        f'<p><span role="status" aria-live="polite" aria-atomic="true">'
+        f'<span data-visible-count>{default_top_count}</span> '
+        f'<span data-count-label>unread</span></span> · '
         f'<time data-site-updated data-generated-at="{_e(isoformat_z(generated_at))}" '
         f'datetime="{_e(isoformat_z(generated_at))}">Updated 1m ago</time></p></div>'
     )
@@ -1710,6 +1879,18 @@ def _event_time(story: dict[str, Any]) -> datetime:
     if not isinstance(value, str):
         raise ValueError(f"story is missing an updated timestamp: {story.get('story_id')}")
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _story_read_order(story: dict[str, Any]) -> str:
+    value = story.get("created_at")
+    if not isinstance(value, str):
+        index = story.get("_index") if isinstance(story.get("_index"), dict) else {}
+        value = index.get("created_at")
+    if not isinstance(value, str):
+        raise ValueError(f"story is missing a creation timestamp: {story.get('story_id')}")
+    created_at = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    milliseconds = int(created_at.timestamp() * 1000)
+    return f"{milliseconds:013d}:{story['story_id']}"
 
 
 def _relative_time(value: datetime, now: datetime) -> str:

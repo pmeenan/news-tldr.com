@@ -195,7 +195,8 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert 'data-coverage-filter="top" aria-pressed="true"' in home
     assert 'data-coverage-filter="all" aria-pressed="false"' in home
     assert 'data-source-count="2"' in home
-    assert '<span data-count-label>new</span> · <time data-site-updated' in home
+    assert '<span data-count-label>unread</span></span> · <time data-site-updated' in home
+    assert 'role="status" aria-live="polite" aria-atomic="true"' in home
     assert 'data-generated-at="2026-08-24T01:00:00Z"' in home
     assert 'datetime="2026-08-24T01:00:00Z">Updated 1m ago</time>' in home
     assert 'data-rank-all="0.8200"' in home
@@ -217,6 +218,8 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "VIEW_THRESHOLD_MS = 1 * 1000" in script
     assert "VIEWED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000" in script
     assert "SYNC_TOKEN_KEY = 'newsTldrSyncTokenV1'" in script
+    assert "READ_BEFORE_KEY = 'newsTldrReadBeforeV1'" in script
+    assert "SYNC_REVISION_KEY = 'newsTldrSyncRevisionV1'" in script
     assert "SYNC_FRAGMENT_PREFIX = 'sync=v1.'" in script
     assert "history.replaceState(null, '', `${location.pathname}${location.search}`)" in script
     assert "syncRequest('/api/sync/v1/merge'" in script
@@ -224,12 +227,15 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "SYNC_MAX_RETRY_MS = 5 * 60 * 1000" in script
     assert "SYNC_REQUEST_TIMEOUT_MS = 8 * 1000" in script
     assert "SYNC_MAX_READS = 2000" in script
+    assert "SYNC_STATE_VERSION = 2" in script
+    assert "ordered_reads: orderedReads" in script
     assert "if (syncDirty && syncToken)" in script
     assert "async function handleSyncFragment({ refreshView = false } = {})" in script
     assert "window.addEventListener('hashchange'" in script
     assert "void handleSyncFragment({ refreshView: true });" in script
     assert "const fragmentHandled = await handleSyncFragment();" in script
-    assert "if (applyRemote) mergeRemoteReads(payload?.reads);" in script
+    assert "if (applyRemote && includesRemoteState) mergeRemoteState(payload);" in script
+    assert "if (applyRemote || !includesRemoteState) setSyncRevision(payload?.revision);" in script
     assert "void synchronizeReads({ quiet: true });" in script
     assert "await synchronizeReads({ quiet: true, applyRemote: true });" in script
     assert "document.addEventListener('visibilitychange'" not in script
@@ -244,13 +250,19 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "Disconnect this browser" in home
     assert "Delete synced data" in home
     assert "IntersectionObserver" in script
-    assert "Boolean(viewed[card.dataset.storyId])" in script
-    assert "activeCoverage === 'top' ? 'top' : 'stories'" in script
+    assert "function isStoryRead(card)" in script
+    assert "function compactViewedState()" in script
+    assert "function updateUnreadCount()" in script
+    assert "countLabel.textContent = 'unread'" in script
+    assert 'data-read-order="1787529600000:2026-08-24-polish"' in home
     assert "function relativeUpdatedLabel(timestamp)" in script
     assert "window.setInterval(updateSiteFreshness, 60 * 1000)" in script
     assert "viewedBeforeLoad" not in script
     assert "createStorySection('Top News'" in script
-    assert "createStorySection('Everything Else'" in script
+    assert "Everything Else" not in script
+    assert "MIN_TOPIC_SECTION_STORIES = 2" in script
+    assert "categoryRemainders" in script
+    assert "title: `More ${card.dataset.categoryName || 'News'}`" in script
     assert "cardCoveragePriority" in script
     assert "COVERAGE_WINDOW_MS = 24 * 60 * 60 * 1000" in script
     assert "const topNews = visibleCards" in script
@@ -337,6 +349,8 @@ def test_home_renders_curation_metadata_for_top_news_and_topic_sections(tmp_path
     assert 'data-top-order="0"' in home
     assert 'data-topic-title="Ukraine War"' in home
     assert 'data-topic-order="0"' in home
+    assert 'data-category-name="World News"' in home
+    assert 'data-category-order="1"' in home
 
 
 def test_robots_blocks_search_indexers_without_blocking_social_crawlers(tmp_path: Path) -> None:

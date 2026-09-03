@@ -466,7 +466,8 @@ def test_homepage_curation_validates_top_news_and_meaningful_sections() -> None:
     assert curation["model"] == "gemini-3.7-flash"
     assert client.calls[0]["thinking_level"] == "low"
     assert len(client.calls) == 2
-    assert "Everything Else" in client.calls[1]["prompt"]
+    assert "category-specific remainder section" in client.calls[1]["prompt"]
+    assert "Middle East" in client.calls[1]["prompt"]
     assert "coverage_priority" in client.calls[0]["prompt"]
     assert "feed inventories" in client.calls[0]["prompt"]
 
@@ -480,6 +481,39 @@ def test_homepage_curation_does_not_append_fallback_after_top_news_is_full() -> 
     )
 
     assert curation["top_news"] == ["event-1", "event-2"]
+
+
+def test_homepage_curation_uses_one_high_ranked_candidate_set_per_category() -> None:
+    client = FakeEditorialClient({"top_news": [], "sections": []})
+    stories = [
+        {
+            "story_id": f"event-{index}",
+            "category": "world",
+            "headline": f"Story {index}",
+            "homepage_rank_score": index / 300,
+            "category_rank_score": index / 205,
+            "source_count": 2,
+            "source_coverage_score": 2,
+            "source_coverage_ratio": 0.1,
+            "event_updated_at": "2026-08-24T11:00:00Z",
+        }
+        for index in range(205)
+    ]
+
+    generate_homepage_curation(
+        stories=stories,
+        story_details={},
+        client=client,
+        generated_at=datetime(2026, 8, 24, 12, tzinfo=UTC),
+        rolling_window_hours=72,
+    )
+
+    assert len(client.calls) == 2
+    category_prompt = client.calls[1]["prompt"]
+    assert category_prompt.count('"id":') == 100
+    assert '"id":"event-204"' in category_prompt
+    assert '"id":"event-105"' in category_prompt
+    assert '"id":"event-104"' not in category_prompt
 
 
 def test_homepage_coverage_priority_normalizes_category_supply_and_expires() -> None:

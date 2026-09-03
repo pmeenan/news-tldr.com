@@ -23,7 +23,7 @@ AGGREGATION_PROMPT_VERSION = "aggregation-v6"
 AGGREGATION_EXPERIMENT_PROMPT_VERSION = "aggregation-experiment-v6"
 NEWSWORTHINESS_PROMPT_VERSION = "newsworthiness-v1"
 DEDUPLICATION_PRESCREEN_PROMPT_VERSION = "deduplication-prescreen-v1"
-DEDUPLICATION_REVIEW_PROMPT_VERSION = "deduplication-review-v1"
+DEDUPLICATION_REVIEW_PROMPT_VERSION = "deduplication-review-v2"
 GROUPING_MODES = ("titles", "titles_summaries")
 DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD = 0.8
 DEDUPLICATION_KEYWORD_OVERLAP_MIN = 2
@@ -37,6 +37,7 @@ DEFAULT_AGGREGATION_CATEGORY_BATCH_CONCURRENCY = 8
 DEFAULT_DEDUPLICATION_CONCURRENCY = 16
 DEFAULT_DEDUPLICATION_MAX_PAIRS_PER_RUN = 40
 DEFAULT_DEDUPLICATION_MAX_PASSES_PER_RUN = 1
+DEFAULT_DEDUPLICATION_LOOKBACK_HOURS = 72
 FORCE_RESET_AGGREGATION_STATUSES = (
     "assigned",
     "filtered_low_impact",
@@ -925,6 +926,10 @@ def aggregate_once(
         config.aggregation.get("deduplication_max_passes_per_run"),
         DEFAULT_DEDUPLICATION_MAX_PASSES_PER_RUN,
     )
+    deduplication_lookback_hours = _positive_int_config(
+        config.aggregation.get("deduplication_lookback_hours"),
+        DEFAULT_DEDUPLICATION_LOOKBACK_HOURS,
+    )
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"aggregation-{uuid.uuid4().hex}"
     state = StateDB()
@@ -956,6 +961,8 @@ def aggregate_once(
         "deduplication_concurrency": deduplication_concurrency,
         "deduplication_max_pairs_per_run": deduplication_max_pairs,
         "deduplication_max_passes_per_run": deduplication_max_passes,
+        "deduplication_lookback_hours": deduplication_lookback_hours,
+        "events_merged": 0,
         "dry_run": dry_run,
         "force": force,
         "force_articles_reset": 0,
@@ -979,6 +986,7 @@ def aggregate_once(
                 started_run = True
             status = "success"
             try:
+                skip_window_planning = False
                 if range_start is None:
                     from datetime import time
 
@@ -997,42 +1005,52 @@ def aggregate_once(
                         if not bounds:
                             if progress:
                                 progress("aggregate: no completed digest articles in the retention window")
-                            return stats
+                            skip_window_planning = True
                     else:
                         bounds = state.article_time_bounds(
                             unassigned_only=True,
                             max_article_rowid=max_article_rowid,
                         )
                         if not bounds:
-                            return stats
+                            skip_window_planning = True
 
-                    bounds_start = _parse_iso_timestamp(bounds[0])
-                    bounds_end = _parse_iso_timestamp(bounds[1])
+                    if not skip_window_planning:
+                        assert bounds is not None
+                        bounds_start = _parse_iso_timestamp(bounds[0])
+                        bounds_end = _parse_iso_timestamp(bounds[1])
 
-                    if not force and bounds_end < limit_dt:
-                        if progress:
-                            progress("aggregate: no unassigned articles in the retention window")
-                        return stats
+                        if not force and bounds_end < limit_dt:
+                            if progress:
+                                progress("aggregate: no unassigned articles in the retention window")
+                            skip_window_planning = True
 
-                    if bounds_start < limit_dt:
-                        bounds_start = limit_dt
+                    if not skip_window_planning:
+                        if bounds_start < limit_dt:
+                            bounds_start = limit_dt
 
-                    range_start = _format_iso_timestamp(_floor_utc_interval(bounds_start, step_hours))
-                    range_end = _format_iso_timestamp(
-                        _floor_utc_interval(bounds_end, step_hours) + timedelta(hours=step_hours)
+                        range_start = _format_iso_timestamp(
+                            _floor_utc_interval(bounds_start, step_hours)
+                        )
+                        range_end = _format_iso_timestamp(
+                            _floor_utc_interval(bounds_end, step_hours)
+                            + timedelta(hours=step_hours)
+                        )
+
+                if skip_window_planning:
+                    windows = []
+                else:
+                    assert range_start is not None and range_end is not None
+                    windows = plan_sliding_windows(
+                        range_start=range_start,
+                        range_end=range_end,
+                        window_hours=window_hours,
+                        step_hours=step_hours,
+                        overlap_hours=overlap_hours,
+                        db=state,
+                        force=force,
+                        sparse=not force,
+                        max_article_rowid=max_article_rowid,
                     )
-
-                windows = plan_sliding_windows(
-                    range_start=range_start,
-                    range_end=range_end,
-                    window_hours=window_hours,
-                    step_hours=step_hours,
-                    overlap_hours=overlap_hours,
-                    db=state,
-                    force=force,
-                    sparse=not force,
-                    max_article_rowid=max_article_rowid,
-                )
                 if limit_windows is not None:
                     windows = windows[:limit_windows]
                 stats["windows_planned"] = len(windows)
@@ -1332,9 +1350,9 @@ def aggregate_once(
                                 article_count=0,
                                 stats={"error": str(exc)},
                             )
-                if not dry_run and (stats["events_created"] or stats["events_updated"]):
+                if not dry_run:
                     try:
-                        deduplicate_active_events_llm(
+                        stats["events_merged"] = deduplicate_active_events_llm(
                             state=state,
                             client=generator,
                             review_client=review_generator,
@@ -1344,6 +1362,7 @@ def aggregate_once(
                             concurrency=deduplication_concurrency,
                             max_pairs=deduplication_max_pairs,
                             max_passes=deduplication_max_passes,
+                            lookback_hours=deduplication_lookback_hours,
                         )
                     except Exception as exc:
                         if progress:
@@ -1356,9 +1375,6 @@ def aggregate_once(
                             None,
                             exc,
                         )
-                elif not dry_run and progress:
-                    progress("deduplicate: skipped because aggregation made no event changes")
-
                 if stats["windows_failed"]:
                     status = "failed" if stats["windows_processed"] == 0 else "partial_failure"
                 elif stats["windows_partial_failed"]:
@@ -2961,13 +2977,17 @@ def _load_events_articles_summary(
 
 def _build_event_merge_prompt(event1: dict[str, Any], event2: dict[str, Any]) -> str:
     return (
-        "Compare these two news event clusters and decide if they represent the exact same "
-        "underlying real-world news event and should be merged into a single event.\n"
-        "They should be merged if they cover the same development, announcement, decision, "
-        "or incident.\n"
+        "Compare these two news event clusters and decide if a careful news editor would cover "
+        "them as one evolving homepage story rather than two entries.\n"
+        "Merge them when they cover the same core development, announcement, decision, or "
+        "incident, including immediate reaction, consequences, implementation details, or a "
+        "different reporting angle that can be summarized accurately in one entry. Do not require "
+        "matching headlines or identical emphasis.\n"
         "They should remain separate if they are different incidents, "
-        "unrelated actions by the same actor, or distinct developments in a broader topic "
-        "(e.g., separate space launches, separate policy announcements, separate trials).\n\n"
+        "unrelated actions by the same actor, or materially distinct developments in a broader "
+        "topic that deserve separate headlines (e.g., separate attacks, policy announcements, "
+        "court rulings, product launches, or trials). Do not merge merely because both belong to "
+        "the same war, region, company, election, or continuing issue.\n\n"
         "Event 1:\n"
         f"  ID: {event1['event_id']}\n"
         f"  Title: {event1['title']}\n"
@@ -3005,8 +3025,8 @@ def _evaluate_deduplication_pair(
 ) -> DeduplicationPairDecision:
     result = client.generate_json(
         system_instruction=(
-            "You are an expert news editor. Determine if two event clusters represent "
-            "the same news event and should be merged."
+            "You are an expert news editor. Determine if two event clusters belong in "
+            "one evolving homepage story and should be merged."
         ),
         prompt=_build_event_merge_prompt(payload1, payload2),
         response_schema=_event_merge_response_schema(),
@@ -3584,7 +3604,9 @@ def deduplicate_active_events_llm(
     concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
     max_pairs: int | None = None,
     max_passes: int = DEDUPLICATION_MAX_PASSES,
-) -> None:
+    lookback_hours: int = DEFAULT_DEDUPLICATION_LOOKBACK_HOURS,
+) -> int:
+    total_merges = 0
     for pass_index in range(1, max(1, max_passes) + 1):
         merges_count = _deduplicate_active_events_llm_pass(
             state=state,
@@ -3595,7 +3617,9 @@ def deduplicate_active_events_llm(
             run_id=run_id,
             concurrency=concurrency,
             max_pairs=max_pairs,
+            lookback_hours=lookback_hours,
         )
+        total_merges += merges_count
         if merges_count == 0:
             break
         if progress and pass_index < max(1, max_passes):
@@ -3603,6 +3627,7 @@ def deduplicate_active_events_llm(
                 f"deduplicate: pass {pass_index} merged {merges_count} event(s); "
                 "checking for newly exposed duplicates"
             )
+    return total_merges
 
 
 def _deduplicate_active_events_llm_pass(
@@ -3615,14 +3640,15 @@ def _deduplicate_active_events_llm_pass(
     run_id: str | None = None,
     concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
     max_pairs: int | None = None,
+    lookback_hours: int = DEFAULT_DEDUPLICATION_LOOKBACK_HOURS,
 ) -> int:
-    since = _recent_event_cutoff()
+    since = _recent_event_cutoff(lookback_hours)
 
     rows = state.conn.execute(
         """
         SELECT event_id, title, category, updated_at, article_count, created_at, keywords_json
         FROM events
-        WHERE status = 'active' AND updated_at >= ?
+        WHERE status IN ('active', 'stale') AND updated_at >= ?
         ORDER BY category, updated_at DESC
         """,
         (since,),

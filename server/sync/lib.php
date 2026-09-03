@@ -117,14 +117,14 @@ final class SyncStore
         }
     }
 
-    /** @param array<string, int> $reads
-     *  @return array{token: string, reads: array<string, int>, revision: int, server_time: int}
+    /** @param array<string, mixed> $clientState
+     *  @return array<string, mixed>
      */
-    public function createGroup(array $reads): array
+    public function createGroup(array $clientState): array
     {
         $nowSeconds = time();
         $nowMilliseconds = $nowSeconds * 1000;
-        $reads = $this->normalizeReads($reads, $nowMilliseconds);
+        $state = $this->normalizeState($clientState, $nowMilliseconds);
         $token = sync_base64url_encode(random_bytes(32));
         $tokenHash = hash('sha256', $token);
         $day = gmdate('Y-m-d', $nowSeconds);
@@ -160,7 +160,7 @@ final class SyncStore
             );
             $insertGroup->execute([
                 'token_hash' => $tokenHash,
-                'reads_json' => $this->encodeReads($reads),
+                'reads_json' => $this->encodeState($state),
                 'created_at' => $nowSeconds,
                 'updated_at' => $nowSeconds,
                 'expires_at' => $nowSeconds + $this->config->groupRetentionSeconds,
@@ -179,23 +179,22 @@ final class SyncStore
             throw $error;
         }
 
-        return [
+        return array_merge([
             'token' => $token,
-            'reads' => $reads,
             'revision' => 1,
             'server_time' => $nowMilliseconds,
-        ];
+        ], $this->publicState($state));
     }
 
-    /** @param array<string, int> $clientReads
-     *  @return array{reads: array<string, int>, revision: int, server_time: int}
+    /** @param array<string, mixed> $clientState
+     *  @return array<string, mixed>
      */
-    public function mergeGroup(string $token, array $clientReads): array
+    public function mergeGroup(string $token, array $clientState, ?int $knownRevision = null): array
     {
         $nowSeconds = time();
         $nowMilliseconds = $nowSeconds * 1000;
         $tokenHash = hash('sha256', $token);
-        $clientReads = $this->normalizeReads($clientReads, $nowMilliseconds);
+        $clientState = $this->normalizeState($clientState, $nowMilliseconds);
 
         $this->beginImmediate();
         try {
@@ -209,31 +208,66 @@ final class SyncStore
                 throw new SyncHttpError(404, 'sync_group_not_found', 'The sync link is invalid or expired.');
             }
 
-            $serverReads = $this->decodeReads((string) $group['reads_json'], $nowMilliseconds);
-            foreach ($clientReads as $storyId => $timestamp) {
-                $serverReads[$storyId] = max($serverReads[$storyId] ?? 0, $timestamp);
+            $storedEncoded = (string) $group['reads_json'];
+            $serverState = $this->decodeState($storedEncoded, $nowMilliseconds);
+            $serverRevision = (int) $group['revision'];
+            foreach ($clientState['reads'] as $storyId => $timestamp) {
+                $serverState['reads'][$storyId] = max(
+                    $serverState['reads'][$storyId] ?? 0,
+                    $timestamp,
+                );
+                if (isset($clientState['read_orders'][$storyId])) {
+                    $serverState['read_orders'][$storyId] = $clientState['read_orders'][$storyId];
+                }
             }
-            $mergedReads = $this->normalizeReads($serverReads, $nowMilliseconds, rejectOversized: false);
-            $revision = (int) $group['revision'] + 1;
+            if ($clientState['read_before'] !== null
+                && ($serverState['read_before'] === null
+                    || strcmp($clientState['read_before'], $serverState['read_before']) > 0)) {
+                $serverState['read_before'] = $clientState['read_before'];
+            }
+            $mergedState = $this->normalizeState($serverState, $nowMilliseconds, rejectOversized: false);
+            $stateChanged = $this->encodeState($mergedState) !== $storedEncoded;
+            $revision = $serverRevision + ($stateChanged ? 1 : 0);
 
-            $update = $this->database->prepare(
-                'UPDATE sync_groups SET reads_json = :reads_json, revision = :revision, '
-                . 'updated_at = :updated_at, expires_at = :expires_at WHERE token_hash = :token_hash',
-            );
-            $update->execute([
-                'reads_json' => $this->encodeReads($mergedReads),
-                'revision' => $revision,
-                'updated_at' => $nowSeconds,
-                'expires_at' => $nowSeconds + $this->config->groupRetentionSeconds,
-                'token_hash' => $tokenHash,
-            ]);
+            if ($stateChanged) {
+                $update = $this->database->prepare(
+                    'UPDATE sync_groups SET reads_json = :reads_json, revision = :revision, '
+                    . 'updated_at = :updated_at, expires_at = :expires_at WHERE token_hash = :token_hash',
+                );
+                $update->execute([
+                    'reads_json' => $this->encodeState($mergedState),
+                    'revision' => $revision,
+                    'updated_at' => $nowSeconds,
+                    'expires_at' => $nowSeconds + $this->config->groupRetentionSeconds,
+                    'token_hash' => $tokenHash,
+                ]);
+            } else {
+                $touch = $this->database->prepare(
+                    'UPDATE sync_groups SET updated_at = :updated_at, expires_at = :expires_at '
+                    . 'WHERE token_hash = :token_hash',
+                );
+                $touch->execute([
+                    'updated_at' => $nowSeconds,
+                    'expires_at' => $nowSeconds + $this->config->groupRetentionSeconds,
+                    'token_hash' => $tokenHash,
+                ]);
+            }
             $this->commit();
         } catch (Throwable $error) {
             $this->rollback();
             throw $error;
         }
 
-        return ['reads' => $mergedReads, 'revision' => $revision, 'server_time' => $nowMilliseconds];
+        $response = [
+            'state_version' => 2,
+            'revision' => $revision,
+            'server_time' => $nowMilliseconds,
+        ];
+        if ($knownRevision === $serverRevision) {
+            $response['unchanged'] = !$stateChanged;
+            return $response;
+        }
+        return array_merge($response, $this->publicState($mergedState));
     }
 
     public function deleteGroup(string $token): bool
@@ -271,22 +305,24 @@ final class SyncStore
             $groups = $select->fetchAll();
             foreach ($groups as $group) {
                 $cursor = (string) $group['token_hash'];
-                $storedReads = $this->decodeReadsUnpruned((string) $group['reads_json']);
-                $currentReads = $this->normalizeReads(
-                    $storedReads,
+                $storedEncoded = (string) $group['reads_json'];
+                $storedState = $this->decodeStateUnpruned($storedEncoded);
+                $storedReadCount = $this->rawStateReadCount($storedState);
+                $currentState = $this->normalizeState(
+                    $storedState,
                     $nowMilliseconds,
                     rejectOversized: false,
                 );
-                if (count($storedReads) === count($currentReads)) {
+                if ($storedEncoded === $this->encodeState($currentState)) {
                     continue;
                 }
                 $update->execute([
-                    'reads_json' => $this->encodeReads($currentReads),
+                    'reads_json' => $this->encodeState($currentState),
                     'revision' => (int) $group['revision'] + 1,
                     'token_hash' => $cursor,
                 ]);
                 $groupsPruned++;
-                $readsDeleted += count($storedReads) - count($currentReads);
+                $readsDeleted += max(0, $storedReadCount - count($currentState['reads']));
             }
         } while (count($groups) === 100);
 
@@ -322,15 +358,39 @@ final class SyncStore
         );
     }
 
-    /** @param array<mixed, mixed> $reads
-     *  @return array<string, int>
+    /** @param array<string, mixed> $state
+     *  @return array{reads: array<string, int>, read_orders: array<string, string>, read_before: ?string}
      */
-    private function normalizeReads(
-        array $reads,
+    private function normalizeState(
+        array $state,
         int $nowMilliseconds,
         bool $rejectOversized = true,
     ): array
     {
+        $reads = $state['reads'] ?? [];
+        if (!is_array($reads) || (array_is_list($reads) && $reads !== [])) {
+            throw new SyncHttpError(400, 'invalid_reads', 'The reads field must be a JSON object.');
+        }
+        $rawOrders = $state['read_orders'] ?? [];
+        if (!is_array($rawOrders) || (array_is_list($rawOrders) && $rawOrders !== [])) {
+            throw new SyncHttpError(400, 'invalid_read_orders', 'The read-order field must be a JSON object.');
+        }
+        $orderedReads = $state['ordered_reads'] ?? [];
+        if (!is_array($orderedReads) || !array_is_list($orderedReads)) {
+            throw new SyncHttpError(400, 'invalid_ordered_reads', 'The ordered reads field must be a JSON list.');
+        }
+        foreach ($orderedReads as $row) {
+            if (!is_array($row) || !array_is_list($row) || count($row) !== 3
+                || !is_string($row[0])
+                || preg_match('/\A[a-zA-Z0-9._-]{1,128}\z/D', $row[0]) !== 1
+                || (!is_int($row[1]) && !is_float($row[1]))
+                || !is_int($row[2])) {
+                throw new SyncHttpError(400, 'invalid_ordered_read', 'An ordered read entry is invalid.');
+            }
+            $storyId = $row[0];
+            $reads[$storyId] = max((int) ($reads[$storyId] ?? 0), (int) $row[1]);
+            $rawOrders[$storyId] = sprintf('%013d:%s', $row[2], $storyId);
+        }
         if ($rejectOversized && count($reads) > $this->config->maxReads) {
             throw new SyncHttpError(413, 'too_many_reads', 'The read-history list is too large.');
         }
@@ -356,21 +416,45 @@ final class SyncStore
             $normalized = array_slice($normalized, 0, $this->config->maxReads, preserve_keys: true);
         }
         ksort($normalized, SORT_STRING);
-        return $normalized;
+
+        $orders = [];
+        foreach ($rawOrders as $storyId => $order) {
+            if (!isset($normalized[$storyId])) {
+                continue;
+            }
+            $normalizedOrder = $this->normalizeStoryOrder($order, $storyId, $nowMilliseconds);
+            if ($normalizedOrder !== null) {
+                $orders[$storyId] = $normalizedOrder;
+            }
+        }
+        ksort($orders, SORT_STRING);
+
+        $readBefore = $state['read_before'] ?? null;
+        if ($readBefore !== null) {
+            $readBefore = $this->normalizeStoryOrder($readBefore, null, $nowMilliseconds);
+        }
+        if ($readBefore !== null) {
+            foreach ($orders as $storyId => $order) {
+                if (strcmp($order, $readBefore) <= 0) {
+                    unset($normalized[$storyId], $orders[$storyId]);
+                }
+            }
+        }
+        return ['reads' => $normalized, 'read_orders' => $orders, 'read_before' => $readBefore];
     }
 
-    /** @return array<string, int> */
-    private function decodeReads(string $encoded, int $nowMilliseconds): array
+    /** @return array{reads: array<string, int>, read_orders: array<string, string>, read_before: ?string} */
+    private function decodeState(string $encoded, int $nowMilliseconds): array
     {
-        return $this->normalizeReads(
-            $this->decodeReadsUnpruned($encoded),
+        return $this->normalizeState(
+            $this->decodeStateUnpruned($encoded),
             $nowMilliseconds,
             rejectOversized: false,
         );
     }
 
-    /** @return array<string, int> */
-    private function decodeReadsUnpruned(string $encoded): array
+    /** @return array{reads: array<mixed, mixed>, read_orders: array<mixed, mixed>, ordered_reads: array<mixed>, read_before: mixed} */
+    private function decodeStateUnpruned(string $encoded): array
     {
         try {
             $decoded = json_decode($encoded, true, 16, JSON_THROW_ON_ERROR);
@@ -380,17 +464,88 @@ final class SyncStore
         if (!is_array($decoded) || (array_is_list($decoded) && $decoded !== [])) {
             throw new RuntimeException('stored sync state has an invalid shape');
         }
-        return $decoded;
+        if (($decoded['state_version'] ?? null) === 2) {
+            return [
+                'reads' => $decoded['reads'] ?? [],
+                'read_orders' => $decoded['read_orders'] ?? [],
+                'ordered_reads' => $decoded['ordered_reads'] ?? [],
+                'read_before' => $decoded['read_before'] ?? null,
+            ];
+        }
+        return [
+            'reads' => $decoded,
+            'read_orders' => [],
+            'ordered_reads' => [],
+            'read_before' => null,
+        ];
     }
 
-    /** @param array<string, int> $reads */
-    private function encodeReads(array $reads): string
+    /** @param array{reads: array<string, int>, read_orders: array<string, string>, read_before: ?string} $state */
+    private function encodeState(array $state): string
     {
-        $encoded = json_encode($reads, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+        $plainReads = $state['reads'];
+        $orderedReads = [];
+        foreach ($state['read_orders'] as $storyId => $order) {
+            $orderedReads[] = [$storyId, $state['reads'][$storyId], (int) substr($order, 0, 13)];
+            unset($plainReads[$storyId]);
+        }
+        $encoded = json_encode([
+            'state_version' => 2,
+            'reads' => (object) $plainReads,
+            'ordered_reads' => $orderedReads,
+            'read_before' => $state['read_before'],
+        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
         if (strlen($encoded) > $this->config->maxStateBytes) {
             throw new SyncHttpError(413, 'sync_state_too_large', 'The merged read history is too large.');
         }
         return $encoded;
+    }
+
+    /** @param array{reads: array<string, int>, read_orders: array<string, string>, read_before: ?string} $state
+     *  @return array<string, mixed>
+     */
+    private function publicState(array $state): array
+    {
+        return [
+            'state_version' => 2,
+            'reads' => (object) $state['reads'],
+            'read_before' => $state['read_before'],
+        ];
+    }
+
+    /** @param array<string, mixed> $state */
+    private function rawStateReadCount(array $state): int
+    {
+        $storyIds = [];
+        foreach (($state['reads'] ?? []) as $storyId => $_timestamp) {
+            if (is_string($storyId)) {
+                $storyIds[$storyId] = true;
+            }
+        }
+        foreach (($state['ordered_reads'] ?? []) as $row) {
+            if (is_array($row) && isset($row[0]) && is_string($row[0])) {
+                $storyIds[$row[0]] = true;
+            }
+        }
+        return count($storyIds);
+    }
+
+    private function normalizeStoryOrder(mixed $value, ?string $storyId, int $nowMilliseconds): ?string
+    {
+        if (!is_string($value)
+            || preg_match('/\A([0-9]{13}):([a-zA-Z0-9._-]{1,128})\z/D', $value, $matches) !== 1
+            || ($storyId !== null && $matches[2] !== $storyId)) {
+            throw new SyncHttpError(400, 'invalid_story_order', 'A story read-order value is invalid.');
+        }
+        $timestamp = (int) $matches[1];
+        $minimumTimestamp = $nowMilliseconds - $this->config->readRetentionSeconds * 1000;
+        if ($timestamp < $minimumTimestamp) {
+            return null;
+        }
+        if ($timestamp > $nowMilliseconds + 5 * 60 * 1000) {
+            throw new SyncHttpError(400, 'future_story_order', 'A story read-order value is in the future.');
+        }
+        return $value;
     }
 
     private function deleteExpiredGroups(int $nowSeconds): int

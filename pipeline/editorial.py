@@ -23,14 +23,14 @@ EDITORIAL_PROMPT_VERSION = "editorial-v2"
 EDITORIAL_FRAMING_PROMPT_VERSION = "editorial-framing-v1"
 EDITORIAL_COMPACT_PROMPT_VERSION = "editorial-v2-compact"
 EDITORIAL_FRAMING_COMPACT_PROMPT_VERSION = "editorial-framing-v1-compact"
-HOMEPAGE_CURATION_PROMPT_VERSION = "homepage-curation-v4"
+HOMEPAGE_CURATION_PROMPT_VERSION = "homepage-curation-v5"
 DEFAULT_ARTICLE_CHAR_LIMIT = 12_000
 DEFAULT_EVENT_CHAR_LIMIT = 60_000
 DEFAULT_CURATION_TOP_STORIES = 12
 DEFAULT_CURATION_MAX_SECTIONS = 180
 DEFAULT_CURATION_MAX_SECTIONS_PER_CATEGORY = 12
 DEFAULT_CURATION_TOP_CANDIDATES = 150
-DEFAULT_CURATION_STORIES_PER_SECTION_CALL = 100
+DEFAULT_CURATION_STORIES_PER_CATEGORY = 100
 CURATION_COVERAGE_WINDOW_HOURS = 24
 CURATION_EDITORIAL_WEIGHT = 10.0
 POLITICAL_CATEGORIES = frozenset({"politics", "us", "world"})
@@ -1061,17 +1061,17 @@ def generate_homepage_curation(
 
     section_specs: list[tuple[str, int, list[dict[str, Any]]]] = []
     for category in sorted(contexts_by_category):
-        category_stories = contexts_by_category[category]
-        for start in range(0, len(category_stories), DEFAULT_CURATION_STORIES_PER_SECTION_CALL):
-            section_specs.append(
-                (
-                    category,
-                    start // DEFAULT_CURATION_STORIES_PER_SECTION_CALL + 1,
-                    category_stories[
-                        start : start + DEFAULT_CURATION_STORIES_PER_SECTION_CALL
-                    ],
-                )
-            )
+        category_stories = sorted(
+            contexts_by_category[category],
+            key=lambda story: (
+                _safe_score(story.get("category_rank")),
+                float(story.get("coverage_priority") or 0.0),
+                -float(story.get("hours_old") or 0.0),
+            ),
+            reverse=True,
+        )[:DEFAULT_CURATION_STORIES_PER_CATEGORY]
+        if len(category_stories) >= 2:
+            section_specs.append((category, 1, category_stories))
     section_results: list[GeminiResult | None] = [None] * len(section_specs)
     worker_count = min(2, len(section_specs))
     if worker_count <= 1:
@@ -1160,15 +1160,19 @@ def _build_category_sections_prompt(
 ) -> str:
     return (
         f"Organize these {category} story cards into useful topic sections for a rolling news "
-        "homepage. Group cards only when at least two distinct stories belong under a useful, "
+        "homepage. Concentrate on the highest-ranked, best-supported cards in the supplied set. "
+        "Group cards only when at least two distinct stories belong under a useful, "
         "specific ongoing subject such as 'Ukraine War', 'Canada/US Relations', or 'New Car "
-        "Releases'. Use concise 2-5 word headings, order sections by current news value, and put "
-        "each story in at most one section. Related but distinct developments can share a section; "
+        "Releases'. Prefer coherent sections with three or more stories. When a narrow heading "
+        "would contain only one or two cards, broaden it to a still-meaningful regional or subject "
+        "desk such as 'Middle East' rather than 'Saudi Arabia', but never combine unrelated news. "
+        "Use concise 2-5 word headings, order sections by current news value, and put each story "
+        "in at most one section. Related but distinct developments can share a section; "
         "cards covering the exact same event should still be treated as one subject, not used to "
         "manufacture a grouping. "
         "Do not create generic category headings, force weak relationships, or include singleton "
         "sections. Leave stories that do not fit a meaningful group unassigned; the site will place "
-        "them under Everything Else. Coverage fields are normalized for category feed availability; "
+        "them in a category-specific remainder section. Coverage fields are normalized for category feed availability; "
         "use them as supporting evidence when deciding which useful groups to retain. Return at most "
         f"{DEFAULT_CURATION_MAX_SECTIONS_PER_CATEGORY} sections.\n\n"
         "Return only the requested JSON. Story cards:\n"
