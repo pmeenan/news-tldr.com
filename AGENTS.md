@@ -24,13 +24,48 @@ This file serves as the coordinator and handoff state for AI agents working on t
 - [README.md](file:///home/pmeenan/src/news-tldr.com/README.md) - Public project description and user guides.
 - [AGENTS.md](file:///home/pmeenan/src/news-tldr.com/AGENTS.md) - This file. Contains rules, structure, and current agent state.
 - [docs/design.md](file:///home/pmeenan/src/news-tldr.com/docs/design.md) - System architecture and data flow.
+- [docs/pipeline.md](file:///home/pmeenan/src/news-tldr.com/docs/pipeline.md) - Current stage execution, concurrency, artifact ownership, and failure behavior.
 - [docs/plan.md](file:///home/pmeenan/src/news-tldr.com/docs/plan.md) - Living build plan and checklists.
+- [docs/style.md](file:///home/pmeenan/src/news-tldr.com/docs/style.md) - Enforced Python and generated-frontend conventions.
 - [config/feeds.json](file:///home/pmeenan/src/news-tldr.com/config/feeds.json) - Seed RSS/Atom feed list.
 - [config/categories.json](file:///home/pmeenan/src/news-tldr.com/config/categories.json) - Category definitions and sort order.
 
 ---
 
 ## Current State & Handoff
+
+### State on September 3, 2026 (Documentation Architecture Refresh)
+
+- **Scope**: Audited every repository Markdown file against source, checked-in
+  configuration, deployment files, and current artifacts. No pipeline, runtime,
+  generated-site, or production behavior changed.
+- **Documentation structure**: `README.md` remains the public setup and operator
+  entrypoint; `docs/design.md` is the canonical architecture, data-contract, and
+  trust-boundary reference; new `docs/pipeline.md` is the concise current
+  execution reference; `docs/plan.md` retains milestones/backlog without volatile
+  production counts; and `docs/style.md` now describes the generated vanilla
+  frontend instead of the abandoned Astro plan.
+- **Accuracy fixes**: Documented HTTP/1.1 collection/Gemini transports,
+  deterministic event IDs and numeric collision suffixes, progressive article
+  JSON enrichment/compaction, three-day staging retention, active/stale story
+  indexing, the full-Flash editorial fallback chain, current schema-v9 tables,
+  one-second/60%-visible read detection, and the sync order/watermark/revision
+  state. The architecture diagram now includes backlog-first concurrent
+  collection, homepage curation, static publishing, and the isolated sync origin.
+- **Pipeline reference**: Added stage inputs/outputs, combined-run snapshot and
+  backlog behavior, LLM allocation, deterministic guardrails, failure/idempotency
+  semantics, deployment ordering, operational commands, and configuration map.
+- **Current code facts audited**: base commit `695bf99`, presentation v22,
+  schema v9, 69 enabled feeds, and 282 collected tests. Volatile story and health
+  counts are intentionally kept out of evergreen documentation.
+- **Verification**: `validate-data --verbose` passed with 0 errors across 18,746
+  articles, 14,369 digests, 5,807 events, 4,856 stories, and 9,722 static files;
+  `ruff check .`, `git diff --check`, Markdown fence-balance checks, CLI help
+  smoke checks, and `pytest --collect-only -q` passed. The full test suite was
+  not run because all changes are documentation-only.
+- **Files touched**: `README.md`, `docs/{design,pipeline,plan,style}.md`, and this
+  handoff.
+- **Not committed.** Documentation changes are in the working tree.
 
 ### State on September 1, 2026 (Contained Anonymous Reader Sync)
 

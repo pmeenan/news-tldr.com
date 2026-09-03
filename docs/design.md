@@ -13,7 +13,7 @@ news-tldr.com is a filesystem-backed RSS aggregator that collects source article
 
 ## Technology Stack
 
-- **Pipeline**: Python. Libraries: `feedparser`, `httpx` (HTTP/2-enabled collection client and pooled HTTP/1.1 Gemini client), `h2`, `trafilatura` (article extraction), `beautifulsoup4` (custom scrapers), hosted LLM API client (Gemini Developer API by default). SQLite is accessed through Python's standard-library `sqlite3` module.
+- **Pipeline**: Python. Libraries: `feedparser`, pooled `httpx` HTTP/1.1 clients for collection and direct Gemini Developer API calls, `trafilatura` (article extraction), and `beautifulsoup4` (custom scrapers). SQLite is accessed through Python's standard-library `sqlite3` module. `h2` remains as a legacy declared dependency, but production deliberately disables HTTP/2 after shared-connection failures under collection concurrency.
 - **Presentation**: Dependency-free Python renderer in `pipeline/present.py`. Generates static HTML, content-fingerprinted CSS/JavaScript, and JSON from published story artifacts.
 - **State**: SQLite database for pipeline state, incremental processing tracking, and fast lookups. JSON files remain the human-readable artifacts for each stage.
 - **Reader sync**: Optional same-origin PHP 8.4 endpoint in a dedicated resource-bounded PHP-FPM pool. It stores hashed capability groups and three days of story-ID/read-time state in `/var/lib/news-tldr-sync/sync.sqlite`, separate from pipeline state and outside the document root.
@@ -22,32 +22,42 @@ news-tldr.com is a filesystem-backed RSS aggregator that collects source article
 ## High-Level Architecture
 
 ```mermaid
-graph TD
-    Maintenance[0. Maintenance & Retention] --> Collect[1. Data Collection]
-    Feeds[config/feeds.json] --> Collect[1. Data Collection]
-    Collect --> Articles[data/staging/articles/]
-    Articles --> Digest[2a. Article Digest]
-    Digest --> Aggregate[2b. Story Aggregation]
-    Aggregate --> Events[data/events/]
-    Events --> Editorial[3. Editorial]
-    Editorial --> Stories[data/published/stories/]
-    Stories --> Present[4. Presentation Build]
-    Present --> Site[dist/ — Static HTML/CSS/JSON]
-    Site --> Publish[/var/www/news-tldr.com/]
-    Publish --> Nginx[news-tldr.com]
-    Browser[Reader browser] -->|POST/DELETE /api/sync/v1| SyncAPI[Dedicated PHP-FPM sync API]
-    SyncAPI --> SyncState[(sync.sqlite outside document root)]
+flowchart TD
+    Cron[Hourly cron] --> Runner[pipeline.cli run]
+    Runner --> Lock[Single-host pipeline lock]
+    Lock --> Maintenance[0. Maintenance and retention]
+    Maintenance --> Snapshot[Snapshot maximum article rowid]
 
-    State[(data/state/pipeline.db)] -.-> Collect
-    State -.-> Maintenance
+    Snapshot -->|parallel branch| Collect[1. Collect feeds and pages]
+    Feeds[config/feeds.json] --> Collect
+    Collect --> Articles[data/staging/articles/]
+
+    Snapshot -->|bounded existing work| Backlog[Drain editorial and upstream backlog]
+    Backlog --> Interim[Publish safe backlog progress when needed]
+
+    Articles --> Digest[2a. Article digest]
+    Digest --> Aggregate[2b. Aggregation and deduplication]
+    Aggregate --> Events[data/events/]
+    Events --> Editorial[3. Story editorial]
+    Editorial --> Stories[data/published/stories/]
+    Editorial --> Curation[Homepage curation]
+    Stories --> Present[4. Static presentation]
+    Curation --> Present
+    Present --> Site[dist static HTML, CSS, JS, and JSON]
+    Site --> Publish[/var/www/news-tldr.com/]
+    Publish --> Nginx[Nginx and Cloudflare]
+    Nginx --> Browser[Reader browser]
+
+    Browser -->|POST or DELETE /api/sync/v1| SyncAPI[Dedicated PHP-FPM sync API]
+    SyncAPI --> SyncState[(Separate sync.sqlite)]
+
+    State[(data/state/pipeline.db)] -.-> Maintenance
+    State -.-> Snapshot
+    State -.-> Collect
+    State -.-> Backlog
     State -.-> Digest
     State -.-> Aggregate
     State -.-> Editorial
-
-    Collect -->|HTTP + readability| Pages[Article pages]
-    Digest -->|Article LLM| ArticleDigest[Summaries, key facts & impact]
-    Aggregate -->|Window LLM| Classify[Grouping & classification]
-    Editorial -->|Per-event LLM| Summarize[Summary & framing]
 ```
 
 ## Filesystem Layout
@@ -70,7 +80,7 @@ data/
     <event_id>.json          # One file per durable event with article list and metadata.
   published/
     stories/<event_id>.json  # Editorial story JSON, one per event.
-    active-stories.json      # Index of currently active stories for the presentation layer.
+    active-stories.json      # Index of active/stale stories plus presentation ranks and curation.
 
 pipeline/present.py          # Static renderer and production deployment logic.
 server/sync/                 # Origin sync API, SQLite store, cleanup, local router.
@@ -80,7 +90,13 @@ dist/                        # Ignored generated static output; only this tree i
 
 Article staging directories use the article's **publish date** (from the feed or page metadata). When publish date is missing or unparseable, fall back to **fetch date** and set a `publish_date_estimated: true` flag in the article JSON. Collection is text-only and does not download publisher images. Historical same-stem image sidecars may remain in existing staging data; cleanup continues to recognize them when deleting their corresponding historical article artifacts.
 
-Each stage owns clear input and output directories. Stages write new files atomically (write to a temp file, then rename), never mutate upstream artifacts, and record enough metadata to explain later decisions.
+Artifact writes are atomic: code writes a temporary sibling and then renames it.
+Ownership is progressive rather than strictly immutable. Collection creates an
+article JSON file, Digest atomically enriches that same file with `llm_digest`,
+and Maintenance may later compact its full text. Aggregation owns event JSON,
+Editorial owns story JSON and the active index, and Presentation owns `dist/`.
+Every mutation retains enough metadata and prompt provenance to explain the
+result.
 
 ## Stable IDs
 
@@ -88,10 +104,14 @@ Use deterministic IDs wherever possible.
 
 - `source_id`: short stable slug from `config/feeds.json`, such as `ap`, `reuters`, `ars-technica`.
 - `article_id`: SHA-256 hash of the canonical URL. Fallback: hash of `source_id` + feed GUID when canonical URL is unavailable. The chosen input is recorded in the article JSON so collisions can be investigated.
-- `event_id`: `YYYY-MM-DD-slug`, where the date is when the event was first observed and the slug is LLM-suggested and code-validated for uniqueness. Example: `2026-05-24-iran-talks-resume`.
+- `event_id`: `YYYY-MM-DD-slug`, where the date comes from the earliest article publication time and the slug is derived deterministically from the selected source headline. Example: `2026-05-24-iran-talks-resume`.
 - `story_id`: matches the `event_id` of the event it covers. One story per event.
 
-Event IDs should survive title changes, daily reruns, and duplicate articles. The LLM can suggest slugs, but code validates uniqueness against existing events in the state database. On slug collision within the same date, progressively refine the date component: try `YYYY-MM-DD-HH-slug`, then `YYYY-MM-DD-HHMM-slug`, until unique. All IDs (`source_id`, `article_id`, `event_id`) must be strictly sanitized to strip directory traversal sequences (like `../`) and invalid characters before being used in file paths.
+Event IDs survive later title changes and ordinary reruns because existing event
+assignments are reused. Code validates uniqueness against SQLite and appends a
+numeric suffix (`-2`, `-3`, and so on) on collision. The grouping model does not
+generate IDs or slugs. All IDs (`source_id`, `article_id`, `event_id`) are
+strictly sanitized before they are used in file paths.
 
 Events can carry an optional `thread` tag (e.g., `iran-conflict-2026`) for linking related events over time. Threads are free-form metadata strings, not a separate registry. The presentation layer can use thread tags to build "related coverage" links.
 
@@ -106,11 +126,15 @@ The completed local pipeline starts with an idempotent maintenance stage before 
 Responsibilities:
 
 - Advance event lifecycle state from `active` to `stale` after `aggregation.stale_threshold_hours` without updates, and from `stale` to `archived` after `retention.archived_event_days`. Archived events are excluded from active-event aggregation context.
-- Expire old unassigned, unfiltered articles outside the default current/previous-day aggregation horizon by setting `aggregation_status = filtered_expired` and `is_filtered = 1`. The article rows remain in SQLite for auditability and dedup/source history.
+- Expire old unassigned, unfiltered articles outside the configured staging-retention horizon—three UTC days by default—by setting `aggregation_status = filtered_expired` and `is_filtered = 1`. The article rows remain in SQLite for auditability and dedup/source history.
 - Reconcile active/stale event artifacts against SQLite by rebuilding `article_ids`, `article_count`, status, event path, keywords, and newsworthiness from current unfiltered article assignments. Empty active/stale events are deleted from SQLite and `data/events/`.
 - Compact old article JSON only when the article is already filtered or belongs to an archived event: remove `content_text`, keep a compact `content_excerpt`, preserve digest/source metadata, and record `content_text_compacted_at`.
 
-The stage records its own `pipeline_runs` entry, supports `--dry-run`, and uses `--verbose` progress output to stderr. The top-level `run` command executes maintenance under the shared pipeline lock before `collect`, `digest`, `aggregate`, `editorial`, and presentation/publish.
+The stage records its own `pipeline_runs` entry, supports `--dry-run`, and uses
+`--verbose` progress output to stderr. In the top-level command it completes
+under the shared lock before collection begins concurrently with any bounded
+pre-existing backlog work. See the [pipeline reference](pipeline.md) for the
+exact orchestration.
 
 ## Stage 1: Data Collection
 
@@ -124,7 +148,10 @@ Inputs:
 Responsibilities:
 
 - Fetch each feed with conditional headers (`If-Modified-Since`, `ETag`) where supported. The pipeline bypasses robots.txt checks for feed URLs configured by the operator but strictly enforces robots.txt for all article page fetches.
-- Parse publication time, updated time, headline, summary, feed content, GUID, canonical URL, author/byline, tags, and source metadata. Configure the XML parser (`feedparser` / `lxml`) to disable external entity expansion and DTD processing to protect against XXE injection and XML bomb DoS attacks.
+- Parse publication time, updated time, headline, summary, feed content, GUID,
+  canonical URL, author/byline, tags, and source metadata. Reject feeds that
+  contain DTD or entity declarations before passing their bytes to `feedparser`,
+  preventing external-entity expansion and related XML attacks.
 - Fetch full article text when feed content is incomplete, using HTTP GET with readability-style extraction (`trafilatura` or similar). Feed content is deemed incomplete if it is less than 600 characters, equal to the summary, or not substantially longer than the summary (less than or equal to `len(summary) + 200` characters). Extraction should favor recall for full article coverage, fall back through alternate extractor modes, and keep the existing feed text when page extraction does not improve on it.
 - Ignore image metadata and media enclosures in feeds, scraper results, and article pages; do not issue image requests or store image metadata in article JSON.
 - Detect likely paywalls and store a `paywall` flag with supporting signals.
@@ -267,12 +294,12 @@ Responsibilities:
 - Query the state database for articles not yet assigned to an event.
 - Use completed article digests instead of site-provided teaser summaries where available.
 - Filter out non-news, promotional/affiliate/product/deals, puzzle/game help, gambling picks, archive/index, video-carousel, and no-substantive-content artifacts before grouping. Remaining low-impact articles are filtered using the article digest's category/vertical impact score and `aggregation.min_category_impact` from `config/pipeline.json`. Filtered articles are marked with `aggregation_status = filtered_*` so completed windows do not rerun forever on intentionally skipped rows.
-- Video/carousel exclusion should not rely only on the digest model. Aggregation should also apply deterministic URL/path and collection-signal checks for obvious media pages (for example `/videos/`, `/video/`, gallery/carousel paths, and untitled pages whose extracted text is dominated by video listings) before grouping.
+- Video/carousel exclusion does not rely only on the digest model. Aggregation also applies deterministic URL/path and collection-signal checks for obvious media pages (for example `/videos/`, `/video/`, gallery/carousel paths, and untitled pages whose extracted text is dominated by video listings) before grouping.
 - Deduplicate near-identical exact article reprints (e.g., wire service stories) using content and canonical URL hashes during digest and aggregation stages. Headline and summary hashes remain available in `article_fingerprints` for collection-time near-duplicate suppression, but are not used to short-circuit digest generation.
 - Classify each article's content type: news, opinion, analysis, review, or unknown.
 - Assign each article to a category from `config/categories.json`.
 - Group articles into durable story clusters: either match an existing event or create a new one. A cluster may include multiple angles on the same developing news subject, such as updates, reactions, analysis, and local/international framing. The editorial stage is responsible for separating those angles in the summary. Match using the headline and a brief paragraph summary, not the full article text.
-- Maintain event matching metadata (`keywords` and major named entities) for future aggregation context.
+- Maintain lightweight event keywords for matching. The schema preserves optional entity and thread fields, but production does not currently generate them automatically.
 - Score each cluster's initial newsworthiness on two axes: global homepage impact and impact within its own category/vertical.
 - Update event files and the state database with new article assignments.
 - Filter standalone opinion pieces from event creation (opinion articles can be attached to an existing event but should not create one alone).
@@ -307,14 +334,20 @@ structured output (`responseMimeType: application/json` plus a JSON schema).
 API keys must not be written to logs, command output, JSON artifacts, or
 committed files.
 
-Aggregation runs over fixed UTC publish-time chunks with a short overlap lookahead. The default aggregation chunk is 3 hours with an additional 1-hour overlap, so actual LLM windows are 4 hours wide and anchored to UTC boundaries (`00:00-04:00`, `03:00-07:00`, `06:00-10:00`, `09:00-13:00`, `12:00-16:00`, `15:00-19:00`, `18:00-22:00`, `21:00-01:00`). Hourly cron runs keep returning to those same fixed windows rather than shifting the window start based on the current hour or first unassigned article. The default planning horizon matches `retention.staging_article_days` (three days), so late-arriving articles accepted by collection are not outside digest/aggregation coverage. The digest stage should run before aggregation; aggregation then filters non-news/spammy/video-carousel artifacts and articles whose digest category/vertical impact score is below the configured threshold. The state database records completed aggregation windows; normal pipeline runs use sparse planning, selecting only fixed window starts that have unassigned articles in that publish-time bucket, plus the latest completed window when it falls in range. This avoids rerunning every intervening old window when late-arriving articles appear with older publication timestamps. Forced aggregation remains continuous so reset coverage is explicit. For each aggregation window, we load all eligible articles published within those hours (both assigned and unassigned) and send their metadata (headline + digest summary/key facts when available, otherwise collected summary + source + publish date) to the LLM to:
+Aggregation runs over fixed UTC publish-time chunks with a short overlap lookahead. The default aggregation chunk is 3 hours with an additional 1-hour overlap, so actual LLM windows are 4 hours wide and anchored to UTC boundaries (`00:00-04:00`, `03:00-07:00`, `06:00-10:00`, `09:00-13:00`, `12:00-16:00`, `15:00-19:00`, `18:00-22:00`, `21:00-01:00`). Hourly cron runs keep returning to those same fixed windows rather than shifting the window start based on the current hour or first unassigned article. The default planning horizon matches `retention.staging_article_days` (three days), so late-arriving articles accepted by collection are not outside digest/aggregation coverage. The digest stage runs before aggregation; aggregation then filters non-news/spammy/video-carousel artifacts and articles whose digest category/vertical impact score is below the configured threshold. The state database records completed aggregation windows; normal pipeline runs use sparse planning, selecting only fixed window starts that have unassigned articles in that publish-time bucket, plus the latest completed window when it falls in range. This avoids rerunning every intervening old window when late-arriving articles appear with older publication timestamps. Forced aggregation remains continuous so reset coverage is explicit.
 
-1. Classify each article's content type and category.
-2. Group articles into story clusters (matching and referencing existing event IDs where applicable) by identifying multiple outlets and angles reporting on the same developing news subject.
-3. Suggest new event IDs and slugs for novel events.
-4. Suggest optional `thread` tags for linking related events.
+For each aggregation window, the pipeline loads all eligible articles published
+within those hours—both assigned and unassigned—and sends headline, digest
+summary/key facts, source, and publication metadata to the LLM. The model
+classifies content type and category, groups article indexes into clusters, and
+may attach a cluster to one of the existing event IDs explicitly offered in the
+prompt. It does not generate new IDs, slugs, entities, or thread tags.
 
-Prompt shape is part of the contract. The first aggregation pass should avoid free-text fields and ask for compact, order-preserving structured output using numeric enum codes rather than copied article IDs. Deterministic code maps each output row back to the input article by position. This reduces malformed JSON, repeated text inside string fields, and ID-copying errors. Event naming, keyword/entity generation, and slug suggestions should happen in a second smaller call after candidate event assignments are known.
+Prompt shape is part of the contract. The grouping pass avoids free-text output
+and returns compact, order-preserving structured data using article indexes.
+Deterministic code maps rows back to inputs, verifies that every index appears
+exactly once, derives new event titles, IDs, slugs, and keywords from source
+headlines, and rejects unoffered existing-event IDs.
 
 #### Category Group Partitioning
 
@@ -343,7 +376,7 @@ complete homepage window:
 
 1. **Slug / title heuristics** — base-slug equality, title-word overlap (`_titles_similar`), and highly similar individual article headlines (catches reprints with different lead facts).
 2. **Keyword-overlap gate** (`_keyword_overlap_candidates`) — within a single category-group batch, pairs events that share at least 2 distinctive event-level keywords after stripping a global static stopword list and a per-batch *dynamic* hot-keyword stopword list (`_dynamic_keyword_stopwords`). The dynamic list flags any keyword appearing in ≥20% of the batch's events AND in ≥4 events (an absolute floor that prevents tiny batches from stopwording distinctive entities like "ferrari" that only appear in the 2 candidate duplicates).
-3. **LLM pre-screen gate** (`_llm_prescreen_candidates`) — loose-recall LLM calls over category-group batches (`politics_gov`, `news_business_{us,world,business}`, `sci_tech`, `leisure`), sending each event's id, title, top-6 filtered keywords, and top-3 article headlines. The model is instructed to err on the side of inclusion; false positives are filtered by the strict per-pair merge call. Each call is bounded to `DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH = 40` events and chunked when batches exceed that. For oversized batches, the top high-article-count anchor events are repeated into every prescreen chunk so large ongoing stories can still be compared with later singleton updates that would otherwise land in a different chunk. `news_business` also gets an additional parent-level cross-category prescreen because market, business, U.S., and world framings often describe the same underlying event from different verticals. All prescreen chunks across all category-group batches share one worker pool up to `aggregation.deduplication_concurrency` (default: 16). Prompt version: `deduplication-prescreen-v1`. Token usage and errors are recorded under stage `deduplication_prescreen`.
+3. **LLM pre-screen gate** (`_llm_prescreen_candidates`) — loose-recall LLM calls over category-group batches (`politics_gov`, `news_business_{us,world,business}`, `sci_tech`, `leisure`), sending each event's id, title, top-6 filtered keywords, and top-3 article headlines. The model is instructed to err on the side of inclusion; false positives are filtered by the strict per-pair merge call. Each call is bounded to `DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH = 40` events and chunked when batches exceed that. For oversized batches, the top high-article-count anchor events are repeated into every prescreen chunk so large ongoing stories can still be compared with later singleton updates that would otherwise land in a different chunk. `news_business` also gets an additional parent-level cross-category prescreen because market, business, U.S., and world framings often describe the same underlying event from different verticals. All prescreen chunks across all category-group batches share one worker pool up to `aggregation.deduplication_concurrency` (4 in the checked-in production configuration; the code fallback is 16). Prompt version: `deduplication-prescreen-v1`. Token usage and errors are recorded under stage `deduplication_prescreen`.
 4. **Per-pair merge LLM** — for every unique candidate pair from the union of (1)–(3), `_build_event_merge_prompt` decides `should_merge` with confidence ≥ `DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD` (0.8). Prompt version `deduplication-review-v2` treats immediate reactions, consequences, implementation details, and alternate reporting angles as one evolving homepage story when they share the same core development, while explicitly keeping separate incidents and materially distinct developments apart. This is the single source of truth for actually merging; over-merging risk lives here only. Candidate-pair reviews run concurrently in rounds of disjoint event IDs, then accepted merges are applied serially in deterministic order so one merge cannot race another merge touching the same event. Full-Flash decisions are cached against both event `updated_at` values and the prompt version, so unchanged negative pairs are not paid for or retried every hour. The bounded 40-pair queue orders exact/base-slug and strong title/headline candidates before keyword-overlap candidates, which in turn precede broad LLM-prescreen candidates; recency breaks ties within each confidence tier. This prevents obvious same-headline splits from being crowded out by a burst of newer loose-recall candidates. A changed event invalidates its cached pair decisions automatically.
 
 Over-merging protection comes from the strict per-pair call; recall comes from the diversity of candidate gates. Adding a new gate cannot weaken the merge decision — at worst it adds extra per-pair LLM calls that return `should_merge=false`.
@@ -363,9 +396,12 @@ Scores are normalized from `0.0` to `1.0`, validated by deterministic code, stor
 
 ### Stage 2 Implementation
 
-The initial aggregation implementation lives in `pipeline/aggregate.py` and is exposed by `./.venv/bin/python -m pipeline.cli aggregate`. It plans 3-hour aggregation chunks with a 1-hour overlap lookahead (4-hour LLM windows fixed to `00/03/06/09/12/15/18/21` UTC starts), skips completed windows using `aggregation_windows`, loads category-impact-eligible articles in each planned window, calls Gemini with headline + digest/summary metadata in category-bounded batches, validates that every article index appears exactly once, scores resulting groups for newsworthiness from digest impact or fallback scoring, writes `data/events/<event_id>.json`, upserts the `events` table, assigns `articles.event_id`, and records completed windows. Windows remain sequential because each window should see event state from earlier windows; within a window the LLM-only category batch work is concurrent. The command supports `--range-start`, `--range-end`, `--limit-windows`, `--dry-run`, `--force`, and `--verbose`. By default, if no range is specified, aggregation bounds cover the configured staging-retention horizon, while non-force planning sparsely selects only fixed UTC windows that have unassigned articles in their publish-time bucket, plus the latest completed window when applicable. If no unassigned articles exist within this horizon, the run plans no windows but still drains bounded deduplication review work. With `--force`, default planning instead uses completed digests in the same retention horizon, clears prior event assignments and aggregation-stage filter decisions for the actual planned window coverage, deletes or trims affected event artifacts, and then reruns the continuous window range even if windows were previously marked completed.
+The production aggregation implementation lives in `pipeline/aggregate.py` and is exposed by `./.venv/bin/python -m pipeline.cli aggregate`. It plans 3-hour aggregation chunks with a 1-hour overlap lookahead (4-hour LLM windows fixed to `00/03/06/09/12/15/18/21` UTC starts), skips completed windows using `aggregation_windows`, loads category-impact-eligible articles in each planned window, calls Gemini with headline + digest/summary metadata in category-bounded batches, validates that every article index appears exactly once, scores resulting groups for newsworthiness from digest impact or fallback scoring, writes `data/events/<event_id>.json`, upserts the `events` table, assigns `articles.event_id`, and records completed windows. Windows remain sequential because each window should see event state from earlier windows; within a window the LLM-only category batch work is concurrent. The command supports `--range-start`, `--range-end`, `--limit-windows`, `--dry-run`, `--force`, and `--verbose`. By default, if no range is specified, aggregation bounds cover the configured staging-retention horizon, while non-force planning sparsely selects only fixed UTC windows that have unassigned articles in their publish-time bucket, plus the latest completed window when applicable. If no unassigned articles exist within this horizon, the run plans no windows but still drains bounded deduplication review work. With `--force`, default planning instead uses completed digests in the same retention horizon, clears prior event assignments and aggregation-stage filter decisions for the actual planned window coverage, deletes or trims affected event artifacts, and then reruns the continuous window range even if windows were previously marked completed.
 
-Event naming in this first pass is deterministic and intentionally simple: existing event IDs are reused when a group contains already-assigned articles; otherwise code derives a stable date + headline slug and stores lightweight keyword metadata. Richer title/slug/entity generation remains a follow-up LLM pass.
+Event naming is deterministic and intentionally simple: existing event IDs are
+reused when a group contains already-assigned articles; otherwise code derives a
+stable date plus headline slug and stores lightweight keyword metadata. A richer
+metadata-generation pass remains an optional backlog item.
 
 Digest regeneration and review on May 25, 2026 (article-digest-v3) verified the layered cap system and controlled-vocabulary rationale codes against a stratified sample (39 across all 11 categories + 6 edge cases). Compared with v2: `paywalled` started being used (0 → 27 articles), `extraction_noise` doubled (23 → 52), `novelty=low_signal` nearly tripled (40 → 116), `novelty=breaking` dropped from 294 → 246 (research papers no longer auto-tagged as breaking), `novelty=analysis` more than doubled (60 → 156), `impact_capped` events roughly quadrupled (~40 → 176) as the new vendor_announcement / multi-topic / unconfirmed_injury / recycled_content rationales started firing, and `study_stage` was populated on 49 research articles with the full enum spread. Asymmetric caps (vendor_announcement, unconfirmed_injury) and HIGH-rationale cap bypass (public_health Ebola wires) were both confirmed working on sampled articles. Known residual minor issues: the date-leak rule against inserting `published_at` year/month/day into the summary is followed most of the time but still drifts occasionally, and one paywalled WaPo article was tagged `thin` despite the prompt explicitly naming "Democracy Dies in Darkness" as a paywall signal (caps still fired correctly via the noise-cap path so downstream behavior is unaffected).
 
@@ -445,7 +481,7 @@ Responsibilities:
 - For clearly political events where sources frame the story in divergent ways, extract left-perspective and right-perspective summaries with source attribution.
 - Rank stories by importance using the Stage 2 newsworthiness scores plus freshness, source quality, source count, and editorial judgment.
 - Write or update story JSON files.
-- Update `data/published/active-stories.json` with the current set of active stories.
+- Update `data/published/active-stories.json` with eligible active and stale stories, ranks, and homepage curation.
 
 ### LLM Integration for Editorial
 
@@ -605,13 +641,16 @@ unchanged stories, `--limit` bounds an evaluation batch, and repeatable
 `--event-id` arguments select exact events. The top-level `run` command invokes
 editorial after aggregation while retaining the shared pipeline lock.
 
-Each event is one `gemini-3.7-flash` structured-output call using prompt version
-`editorial-v2` and low thinking. Politically eligible mixed-source events use the
-explicit framing-decision variant `editorial-framing-v1`. Article context is bounded per article and per
-event by `config/pipeline.json`, while all source records remain available for
-citation. The article query always requires `is_filtered = 0`. Generated key
-facts and uncertainties must cite at least one article ID offered in that call;
-unknown IDs fail validation rather than reaching published JSON.
+Each changed event gets one editorial generation operation using the ordered
+`gemini-3.7-flash` → `gemini-3.6-flash` → `gemini-3.5-flash` fallback chain and
+low thinking. General stories use `editorial-v2`; politically eligible
+mixed-source events use `editorial-framing-v1`. Safety-sensitive empty responses
+may trigger the compact-context variant of the same full-Flash chain. Article
+context is bounded per article and per event by `config/pipeline.json`, while all
+source records remain available for citation. The article query always requires
+`is_filtered = 0`. Generated key facts and uncertainties must cite at least one
+article ID offered in that operation; unknown IDs fail validation rather than
+reaching published JSON.
 
 Political framing is eligible only for `politics`, `us`, or `world` events that
 contain both a left/center-left and a right/center-right source according to
@@ -639,7 +678,7 @@ Inputs:
 Responsibilities:
 
 - Build static pages from story JSON with the standard-library renderer in `pipeline/present.py`. All JSON strings are treated as untrusted and HTML-escaped; external links are restricted to HTTP/HTTPS URLs and raw upstream HTML is never rendered.
-- The main page shows all active stories in a **rolling time window**, editorially ranked by importance. Category tabs (one per category from `config/categories.json`, plus an "All" default) filter the same ranked list client-side — they are not separate pages with independent layouts.
+- The main page shows eligible active/stale stories in a **rolling time window**, editorially ranked by importance. Category tabs (one per category from `config/categories.json`, plus an "All" default) filter the same ranked list client-side — they are not separate pages with independent layouts.
 - Category navigation uses the optional concise `short_name` from category
   config so all sections fit in one desktop row; full names remain in story
   labels and metadata. The category row and Latest Briefing controls share one
@@ -681,7 +720,7 @@ Responsibilities:
   preference uses `newsTldrCoverageModeV1`, remains global across category views
   and later visits, and appears in the URL only as the non-default
   `coverage=all` state.
-- The compact homepage status line combines the visible count with a semantic
+- The compact homepage status line combines the live unread count with a semantic
   build-time `<time>` element. Same-origin JavaScript converts its ISO timestamp
   to the card-style `Updated Xm/h/d ago` label and refreshes it once per minute,
   so a static page still communicates its current age without a server runtime.
@@ -829,11 +868,13 @@ functions, and confines PHP filesystem access to the installed code, sync state,
 and `/tmp`.
 
 Requests require JSON and an exact allowed `Origin`; cross-origin access is never
-enabled. Only story IDs and read timestamps are retained. Daily cleanup and every
-mutation remove expired groups; active merges remove expired reads. The sync
-database should not enter general backups, because backup retention would defeat
-the reader-facing expiry promise. Local reading remains fully functional during
-API failure.
+enabled. Retained read state consists of story IDs, millisecond read timestamps,
+immutable first-publication order values for compactable IDs, a read-prefix
+watermark, and a monotonic revision; the service stores no account, article text,
+or browsing history outside that state. Daily cleanup and every mutation remove
+expired groups; active merges remove expired reads. The sync database should not
+enter general backups, because backup retention would defeat the reader-facing
+expiry promise. Local reading remains fully functional during API failure.
 
 `scripts/install-sync-origin.sh` installs the PHP source, pool, cron file, and
 Nginx virtual host, initializes the database as `www-data`, validates both service
@@ -844,7 +885,11 @@ the host's Nginx configuration, and reloads PHP-FPM/Nginx.
 
 ### CLI Output Contract
 
-Pipeline commands that can run long enough to feel idle in an interactive shell must support `--verbose`. Verbose progress/status is written to stderr, while final machine-readable output remains on stdout. The collection command currently implements this contract with `./.venv/bin/python -m pipeline.cli collect --verbose`.
+Pipeline commands that can run long enough to feel idle in an interactive shell
+support `--verbose`. Progress and status go to stderr while the final
+machine-readable JSON remains on stdout. This applies to the combined run and
+the maintenance, collection, digest, aggregation, editorial, presentation,
+validation, and health commands.
 
 The `clean-data` command removes local generated pipeline state for a fresh run: the SQLite database and sidecars, staged article files, event JSON, published JSON, and fetch logs by default. It requires `--yes`, refuses to run while `data/state/pipeline.lock` exists, and can keep fetch logs with `--keep-fetch-log` or override the lock guard with `--ignore-lock`. It does not remove `dist/` or the production document root.
 
@@ -938,16 +983,25 @@ SQLite schema changes are versioned. The database stores the current schema vers
 
 Migrations are organized as an append-only list of `(version, sql)` pairs in `pipeline/state.py::MIGRATIONS`. Each migration is the SQL needed to bring the database from the previous version up to its own version. Once released, a migration is immutable; later schema changes are added as new entries with higher version numbers. `migrate()` reads the highest recorded version from `schema_version` and runs every newer migration in order, then records each applied version. Fresh installs run all migrations; existing databases only run the deltas.
 
-Initial tables:
+Current schema tables (schema version 9):
 
 - `schema_version`: current schema version and applied timestamp.
-- `feeds`: source ID, feed URL, conditional request metadata (`etag`, `last_modified`), last fetch status, and timestamps.
-- `articles`: article ID, source ID, canonical URL, URL hash input, headline, summary, file path, publish/fetch timestamps, language, content type, paywall status, retry/error state, `is_filtered` (global exclusion flag), and `event_id` nullable until aggregation (articles can only belong to one event).
-- `article_fingerprints`: article ID, normalized headline fingerprint, content hash, compact text fingerprint, and near-duplicate metadata retained after full staging cleanup.
+- `feeds`: current source configuration keyed by source ID.
+- `feed_state`: conditional request metadata (`etag`, `last_modified`), last fetch status, and failure state.
+- `articles`: article/source identity, URLs, headline/summary, artifact path,
+  publish/fetch timestamps, content type/language, collection metadata JSON,
+  digest status/provenance/error, aggregation status/reason, collection run ID,
+  `is_filtered` (the global exclusion flag), and nullable `event_id` (an article
+  can belong to only one event). Full text and paywall signals remain in article
+  JSON rather than dedicated columns.
+- `article_fingerprints`: article ID plus canonical-URL, headline, summary, and content hashes retained after full staging cleanup.
 - `events`: event ID, title, category, thread, keywords/entities JSON, status, created/updated timestamps, last editorial timestamp, article count, and confidence.
+- `aggregation_windows`: fixed-window completion, prompt/model provenance, and per-window statistics used for sparse idempotent planning.
+- `deduplication_reviews`: final event-pair decisions cached against both event input versions and the review prompt version.
+- `source_run_stats`: durable per-source collection yield, skip, failure, and HTTP accounting for each run.
 - `pipeline_runs`: run ID, stage, start/end timestamps, status, counters, and error summary.
 - `item_errors`: per-feed, per-article, or per-event errors with retry counts and last error details.
-- `llm_usage`: run ID, stage, backend/model, prompt version, token counts, cost fields when available, and input/output artifact references.
+- `llm_usage`: run ID, stage, model, prompt version, input/output token counts, optional cost, and occurrence time.
 
 Indexes must cover common incremental queries: articles with `event_id is null`, events by status and `updated_at`, events needing editorial regeneration, articles by canonical URL/hash input, and errors eligible for retry.
 
@@ -970,7 +1024,7 @@ Configurable retention windows (defaults in `config/pipeline.json`):
 - **Expired pending work**: Digest, aggregation, and maintenance use the same full staging-retention horizon. Unassigned articles older than that horizon are marked `filtered_expired`; maintenance restores `filtered_expired` rows that are still inside the horizon, which self-heals earlier horizon changes or premature expiration.
 - **Stale events**: Events transition from `active` to `stale` after the configured stale threshold, then to `archived` after the retention window. Archived events are excluded from aggregation context and active story generation.
 - **Event artifacts**: Maintenance reconciles active/stale event JSON against SQLite article assignments and deletes empty active/stale events.
-- **Published stories**: Stories for archived events are removed from `active-stories.json` but story JSON files are retained indefinitely for archive pages.
+- **Published stories**: Stories for archived events are removed from `active-stories.json`, but story JSON files are retained for auditability and possible future permanent archive pages.
 
 Cleanup is idempotent and safe to skip (the pipeline grows slowly between runs), but the top-level pipeline runs it first so active aggregation context stays bounded. Retention values are tunable in `config/pipeline.json`.
 
@@ -990,34 +1044,35 @@ LLMs suggest and draft; deterministic code owns:
 
 ### Auditability
 
-Every LLM-generated artifact stores:
+LLM-generated artifacts store:
 
 - Model name and version.
 - Prompt version identifier.
 - Generation timestamp.
-- Input artifact references (which article IDs or event IDs were used as input).
+- Input identity in the artifact contract: article IDs on events, event and
+  source-article IDs on stories, and story IDs in homepage curation.
 
 This keeps decisions auditable and makes reruns straightforward when prompts change.
 
 ### Model Flexibility
 
-The LLM integration should abstract the model backend. The Stage 2 aggregation
-default is the Gemini Developer API with `gemini-3.5-flash-lite` for bulk work
-and selective `gemini-3.7-flash` adjudication; other
-backends remain swappable behind the same interface. The system may use:
-
-- Hosted API models for aggregation and high-quality editorial summaries.
-- Local models for fallback, development, or privacy-sensitive experiments when latency is acceptable.
-- Different models for different stages (e.g., inexpensive hosted model for aggregation, stronger model for editorial).
-
-The abstraction should support swapping backends without changing pipeline logic.
+Pipeline stages depend on a small `JsonGenerator`-style boundary instead of a
+vendor SDK. Production currently implements that boundary with the Gemini
+Developer API: 3.5 Flash-Lite for bulk work and the ordered full-Flash chain for
+selective review, destructive merge decisions, editorial, and curation. Local
+models were evaluated during development but are not a configured runtime
+fallback. Adding another hosted or local backend remains a backlog item and can
+use the same structured-output boundary without changing stage logic.
 
 ### Cost Awareness
 
 - Aggregation uses fixed chunk-plus-overlap window calls with short summaries (headline + lead) to minimize token usage.
 - Editorial uses **per-event** calls with full article text where quality matters most.
 - Track token usage per run in the pipeline state database for monitoring.
-- Support dry-run mode that processes everything except LLM calls (useful for testing collection and aggregation logic).
+- Use `run --dry-run` for a non-mutating preflight with no network or LLM calls,
+  database changes, artifact writes, static build, or publish. Use
+  `aggregate --dry-run` to inspect window and category-batch planning without an
+  LLM client or mutations.
 
 ## Open Design Questions
 

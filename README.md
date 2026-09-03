@@ -19,9 +19,11 @@ news-tldr.com is a filesystem-backed RSS aggregator that parses web feeds, extra
 
 For developers and agents working on the project, refer to these documents:
 
-- **[AGENTS.md](file:///home/pmeenan/src/news-tldr.com/AGENTS.md)**: Rules of engagement, agent workspace instructions, and current task state.
-- **[docs/design.md](file:///home/pmeenan/src/news-tldr.com/docs/design.md)**: System architecture and data flow.
-- **[docs/plan.md](file:///home/pmeenan/src/news-tldr.com/docs/plan.md)**: Development milestones and backlog.
+- **[docs/design.md](docs/design.md)**: Canonical system architecture, data contracts, trust boundaries, and deployment design.
+- **[docs/pipeline.md](docs/pipeline.md)**: Current pipeline execution model, stage ownership, concurrency, and failure behavior.
+- **[docs/plan.md](docs/plan.md)**: Completed milestones and remaining backlog.
+- **[docs/style.md](docs/style.md)**: Python and generated-frontend coding conventions.
+- **[AGENTS.md](AGENTS.md)**: Agent working agreements and chronological handoff history.
 
 ## Getting Started
 
@@ -45,7 +47,8 @@ Any scripts or pipeline executions should run using the Python interpreter insid
 
 ### Hosted LLM Setup
 
-Article digestion and Stage 2 story aggregation use the Gemini Developer API.
+Article digestion, story aggregation, editorial generation, and homepage curation
+use the Gemini Developer API through the project's `httpx`-based client.
 Create a local `.env` file with an AI Studio API key and the two model tiers:
 
 ```bash
@@ -79,12 +82,13 @@ Run stage 1 data collection:
 ./.venv/bin/python -m pipeline.cli collect
 ```
 
-Run the complete pipeline in order (`maintenance`, `collect`, `digest`,
-`aggregate`, `editorial`, then `presentation`). Presentation builds `dist/` and,
-with the checked-in production configuration, publishes it to
-`/var/www/news-tldr.com/`. The command holds the shared pipeline lock for the
-full duration so scheduled invocations do not interleave with each other or
-with individual stage commands:
+Run the complete logical pipeline (`maintenance`, `collect`, `digest`,
+`aggregate`, `editorial`, then `presentation`). After maintenance, the runner
+overlaps collection with bounded pre-existing backlog work before continuing
+through the ordinary downstream pass. Presentation builds `dist/` and, with the
+checked-in production configuration, publishes it to `/var/www/news-tldr.com/`.
+The command holds the shared pipeline lock for the full duration so scheduled
+invocations do not interleave with each other or with individual stage commands:
 ```bash
 ./.venv/bin/python -m pipeline.cli run --verbose
 ```
@@ -162,8 +166,9 @@ those windows even if they were already marked completed:
 ./.venv/bin/python -m pipeline.cli aggregate --verbose --force
 ```
 
-Run stage 3 editorial generation. Editorial uses one Gemini 3.7 Flash call per
-changed active/stale event, validates source citations, writes
+Run stage 3 editorial generation. Editorial performs one generation operation
+per changed active/stale event through the ordered full-Flash fallback chain,
+validates source citations, writes
 `data/published/stories/<event_id>.json`, and regenerates the active story index:
 ```bash
 ./.venv/bin/python -m pipeline.cli editorial --verbose

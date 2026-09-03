@@ -4,13 +4,13 @@ This document tracks the phased buildout of the filesystem-backed RSS aggregator
 
 ## Current Direction
 
-- **Pipeline**: Python with `feedparser`, pooled `httpx` HTTP/1.1 clients for collection and Gemini calls, `trafilatura`, `beautifulsoup4`, standard-library `sqlite3`, and LLM client libraries.
+- **Pipeline**: Python with `feedparser`, pooled `httpx` HTTP/1.1 clients for collection and direct Gemini API calls, `trafilatura`, `beautifulsoup4`, and standard-library `sqlite3`.
 - **Presentation**: Dependency-free Python static renderer in `pipeline/present.py`.
 - **State**: SQLite for pipeline state and incremental processing. JSON files for human-readable stage artifacts.
 - **No database server**. Published news content remains static; the optional anonymous reader-sync endpoint is an isolated PHP-FPM/SQLite origin service.
-- Filesystem JSON artifacts are the source of truth between stages.
+- SQLite is the source of truth for incremental selection and checkpoints; filesystem JSON carries the full inspectable article, event, and story payloads between stages.
 - Pipeline stages: maintenance/retention, data collection, article digestion, story aggregation, editorial, presentation, production publish.
-- All executable stages through production publish are implemented. The retained dataset, 433 editorial stories, and production presentation were refreshed through August 24, 2026; optional metadata/thread enhancements remain open.
+- All executable stages through production publish are implemented and run hourly. Volatile production counts belong in `data/state/health.json` and dated `AGENTS.md` handoffs rather than this plan; optional metadata/thread enhancements remain open.
 - Article digest generation is now its own runnable stage before story aggregation.
 - A maintenance stage now runs before collection in `pipeline run` to expire old pending work outside the configured staging horizon, restore prematurely expired in-horizon work, advance event lifecycle state, reconcile event artifacts, and compact old filtered/archived article JSON.
 - The configured source catalog has 69 enabled sources, including AP News and MotorTrend custom scrapers.
@@ -152,7 +152,7 @@ gantt
 
 - [x] Implement state database query for events with new articles since last editorial run.
 - [x] Design per-event LLM prompt for neutral TL;DR generation with bounded full-article context.
-- [x] Generate story JSON from event article groups (one Gemini 3.7 Flash call per event).
+- [x] Generate story JSON from event article groups using one editorial operation per event through the ordered full-Flash fallback chain.
 - [x] Include validated source references for each key fact and uncertainty.
 - [x] Implement political framing extraction for clearly political events, gated on both meaningful divergence and left/right source-policy coverage.
 - [x] Refine story importance ranking using Stage 2 newsworthiness, source count, freshness, source quality, and editorial judgment.
@@ -163,7 +163,7 @@ gantt
 ### [x] Milestone 4: Presentation
 
 - [x] Implement a dependency-free Python static renderer in `pipeline/present.py` with build output to ignored `dist/`; no new dependency scan was needed.
-- [x] Build the main page with all active stories in a configurable rolling window, editorially ranked by importance.
+- [x] Build the main page with eligible active/stale stories in a configurable rolling window, editorially ranked by importance.
 - [x] Implement category tabs (one per `config/categories.json` entry + "All" default) as client-side filters on the main story list.
 - [x] Build individual story pages with TL;DR, key facts, uncertainties, sources, and political framing, with strict HTML escaping and URL allowlisting for XSS prevention.
 - [x] Render source links with paywall indicators.
@@ -174,7 +174,7 @@ gantt
 - [x] Keep the pipeline environment and state database isolated; publish only managed files from `dist/` to the public web root.
 - [x] Add build, XSS/path validation, safe deployment, stale managed-file cleanup, and CLI integration tests.
 - [x] Keep generated `dist/` ignored by git.
-- [x] Publish the current 433-story site to `/var/www/news-tldr.com/` and verify the homepage, story pages, and JSON API over HTTPS.
+- [x] Publish the initial 433-story presentation milestone to `/var/www/news-tldr.com/` and verify the homepage, story pages, and JSON API over HTTPS.
 
 ### [x] Milestone 5: Operations & Quality
 
@@ -201,7 +201,7 @@ gantt
 
 - [x] Add concise category navigation labels that fit in one desktop row while preserving full category names elsewhere.
 - [x] Add freshness-aware homepage and category-specific display ranks, with category views re-sorted by vertical impact.
-- [x] Add a device-local New/All revisit control using a 10-second visibility threshold and three-day retention.
+- [x] Add a device-local New/All revisit control using a one-second, 60%-title-visibility threshold and three-day retention.
 - [x] Add restrained source/category tinting with depth informed by story rank and distinct source count.
 - [x] Default the global New/All preference to New and persist the reader's choice across visits and category sections.
 - [x] Keep focused sections neutral while grouping combined-view colors into muted category families with source-count depth.
