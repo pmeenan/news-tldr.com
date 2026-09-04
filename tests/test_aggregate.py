@@ -202,7 +202,7 @@ def test_group_articles_with_gemini_validates_and_summarizes_response() -> None:
     assert result["usage"] == {"promptTokenCount": 30, "candidatesTokenCount": 12}
     assert '"summary"' in client.prompts[0]
     assert "reader-facing story clusters" in client.prompts[0]
-    assert "The editorial stage will separate those angles later" in client.prompts[0]
+    assert "Editorial cannot repair mixed event boundaries" in client.prompts[0]
 
 
 def test_titles_mode_omits_summaries_from_prompt() -> None:
@@ -1717,27 +1717,15 @@ def test_apply_grouping_result_event_merging(tmp_path, monkeypatch) -> None:
             },
         )
 
-        # Assert e-B is deleted, e-A has all merged articles
-        assert not (event_dir / "event-B.json").exists()
+        # Overlap articles cannot implicitly merge existing events. Only reviewed deduplication can.
+        assert (event_dir / "event-B.json").exists()
         assert (event_dir / "event-A.json").exists()
-
-        with (event_dir / "event-A.json").open("r", encoding="utf-8") as f:
-            winner_event = json.load(f)
-
-        # Expected articles: historical a0, historical b0, current a1, current a2, current a3
-        assert set(winner_event["article_ids"]) == {"a0", "b0", "a1", "a2", "a3"}
-
-        # Verify SQLite reassignments
-        assigned_A = {
-            row["article_id"]
-            for row in state.conn.execute("SELECT article_id FROM articles WHERE event_id = 'event-A'")
-        }
-        assert "a1" in assigned_A
-        assert "a2" in assigned_A
-        assert "a3" in assigned_A
-
-        # Verify e-B row is deleted
-        assert state.conn.execute("SELECT 1 FROM events WHERE event_id = 'event-B'").fetchone() is None
+        assert state.conn.execute("SELECT event_id FROM articles WHERE article_id = 'a1'").fetchone()[0] == "event-A"
+        assert state.conn.execute("SELECT event_id FROM articles WHERE article_id = 'a2'").fetchone()[0] == "event-B"
+        new_event = state.conn.execute("SELECT event_id FROM articles WHERE article_id = 'a3'").fetchone()[0]
+        assert new_event not in {None, "event-A", "event-B"}
+        assert json.loads((event_dir / "event-A.json").read_text())["article_ids"] == ["a0", "a1"]
+        assert json.loads((event_dir / "event-B.json").read_text())["article_ids"] == ["b0", "a2"]
 
 
 def test_aggregate_once_dry_run_does_not_mutate_window_or_run_state(tmp_path, monkeypatch) -> None:

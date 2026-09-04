@@ -131,11 +131,8 @@ def test_build_static_site_renders_current_stories_and_keeps_old_detail_pages(tm
         'story — news-tldr.com">'
     ) in detail
     assert '<meta name="twitter:card" content="summary_large_image">' in detail
-    assert (
-        '<a href="https://github.com/pmeenan/news-tldr.com" '
-        'rel="noopener noreferrer">About</a>'
-    ) in home
-    assert "About</a> · <a href=\"/archive/\">Archive</a>" in detail
+    assert '<a href="/methodology/">How this works &amp; corrections</a>' in home
+    assert (output_dir / "methodology" / "index.html").exists()
     assert (output_dir / "api" / "active-stories.json").exists()
     favicon = (output_dir / "favicon.ico").read_bytes()
     assert struct.unpack("<HHH", favicon[:6]) == (0, 1, 4)
@@ -192,10 +189,10 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert '>Climate</button>' in home
     assert 'data-view-filter="new" aria-pressed="true"' in home
     assert 'data-view-filter="all" aria-pressed="false"' in home
-    assert 'data-coverage-filter="top" aria-pressed="true"' in home
-    assert 'data-coverage-filter="all" aria-pressed="false"' in home
-    assert 'data-source-count="2"' in home
-    assert '<span data-count-label>unread</span></span> · <time data-site-updated' in home
+    assert 'data-coverage-filter="top" aria-pressed="false"' in home
+    assert 'data-coverage-filter="all" aria-pressed="true"' in home
+    assert 'data-source-count="1"' in home
+    assert '<span data-count-label>unread in briefing</span></span> · <time data-site-updated' in home
     assert 'role="status" aria-live="polite" aria-atomic="true"' in home
     assert 'data-generated-at="2026-08-24T01:00:00Z"' in home
     assert 'datetime="2026-08-24T01:00:00Z">Updated 1m ago</time>' in home
@@ -210,9 +207,9 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "let savedView = 'new'" in script
     assert "localStorage.setItem(VIEW_MODE_KEY, activeView)" in script
     assert "if (activeView === 'new') next.searchParams.delete('view')" in script
-    assert "let savedCoverage = 'top'" in script
+    assert "let savedCoverage = 'all'" in script
     assert "localStorage.setItem(COVERAGE_MODE_KEY, activeCoverage)" in script
-    assert "if (activeCoverage === 'top') next.searchParams.delete('coverage')" in script
+    assert "if (activeCoverage === 'all') next.searchParams.delete('coverage')" in script
     assert "cardSourceCount(card) >= MIN_TOP_SOURCE_COUNT" in script
     assert "MIN_TOP_SOURCE_COUNT = 2" in script
     assert "VIEW_THRESHOLD_MS = 1 * 1000" in script
@@ -253,7 +250,7 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "function isStoryRead(card)" in script
     assert "function compactViewedState()" in script
     assert "function updateUnreadCount()" in script
-    assert "countLabel.textContent = 'unread'" in script
+    assert "countLabel.textContent = 'unread in briefing'" in script
     assert 'data-read-order="1787529600000:2026-08-24-polish"' in home
     assert "function relativeUpdatedLabel(timestamp)" in script
     assert "window.setInterval(updateSiteFreshness, 60 * 1000)" in script
@@ -265,7 +262,7 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "title: `More ${card.dataset.categoryName || 'News'}`" in script
     assert "cardCoveragePriority" in script
     assert "COVERAGE_WINDOW_MS = 24 * 60 * 60 * 1000" in script
-    assert "const topNews = visibleCards" in script
+    assert "const topNews = briefingPool" in script
     assert "window.matchMedia('(max-width: 820px)')" in script
     assert "expandedSectionKeys" in script
     assert "toggleSectionsButton.textContent = allExpanded ? 'Collapse all' : 'Expand all'" in script
@@ -467,3 +464,29 @@ def test_deploy_static_site_retains_previous_and_legacy_site_assets(tmp_path: Pa
         "assets/site.js",
         "index.html",
     ]
+
+
+def test_revision_read_identity_is_stable_and_private_evidence_is_not_published(tmp_path: Path) -> None:
+    from pipeline.present import _story_read_order
+
+    story = _story("2026-08-24-updated", updated_at="2026-08-24T00:00:00Z")
+    original = _story_read_order(story)
+    story.update(revision=2, revision_at="2026-08-24T01:00:00Z",
+                 change_summary="Officials corrected the total.", _evidence=[{"quote": "PRIVATE SOURCE PASSAGE"}])
+    revised = _story_read_order(story)
+    assert revised > original
+    assert revised.split(":")[1] != story["story_id"]
+    story["updated_at"] = "2026-08-24T02:00:00Z"
+    assert _story_read_order(story) == revised
+    _, story_dir, active = _write_published_fixture(tmp_path, [story])
+    output = tmp_path / "dist"
+    build_static_site(output_dir=output, story_dir=story_dir, active_stories_path=active,
+                      now=datetime(2026, 8, 24, 3, tzinfo=UTC))
+    home = (output / "index.html").read_text()
+    public = (output / "api" / "stories" / f"{story['story_id']}.json").read_text()
+    assert "PRIVATE SOURCE PASSAGE" not in public + home
+    assert f'data-read-order="{revised}"' in home
+    assert "Officials corrected the total." in home
+    detail = (output / "stories" / story["story_id"] / "index.html").read_text()
+    assert "Latest update:</strong> Officials corrected the total." in detail
+    assert f'/stories/{story["story_id"]}/#sources' in home

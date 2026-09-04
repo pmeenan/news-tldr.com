@@ -13,16 +13,24 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pipeline.config import load_pipeline_config, load_source_policy
+from pipeline.evidence import (
+    EVIDENCE_VERSION,
+    REVIEW_VERSION,
+    collect_evidence,
+    validate_claim_links,
+    verify_story,
+)
 from pipeline.llm import GeminiEmptyResponseError, GeminiResult, create_gemini_client
 from pipeline.lock import PipelineLock
 from pipeline.paths import ACTIVE_STORIES_PATH, LOCK_PATH, PROJECT_ROOT, STORY_DIR
+from pipeline.sources import publisher_id, reporting_origin
 from pipeline.state import StateDB
 from pipeline.util import atomic_write_json, isoformat_z
 
-EDITORIAL_PROMPT_VERSION = "editorial-v2"
-EDITORIAL_FRAMING_PROMPT_VERSION = "editorial-framing-v1"
-EDITORIAL_COMPACT_PROMPT_VERSION = "editorial-v2-compact"
-EDITORIAL_FRAMING_COMPACT_PROMPT_VERSION = "editorial-framing-v1-compact"
+EDITORIAL_PROMPT_VERSION = "editorial-v3"
+EDITORIAL_FRAMING_PROMPT_VERSION = "editorial-framing-v2"
+EDITORIAL_COMPACT_PROMPT_VERSION = "editorial-v3-compact"
+EDITORIAL_FRAMING_COMPACT_PROMPT_VERSION = "editorial-framing-v2-compact"
 HOMEPAGE_CURATION_PROMPT_VERSION = "homepage-curation-v5"
 DEFAULT_ARTICLE_CHAR_LIMIT = 12_000
 DEFAULT_EVENT_CHAR_LIMIT = 60_000
@@ -66,6 +74,8 @@ class EditorialArticle:
     digest_key_facts: tuple[str, ...]
     bias_label: str
     reliability: str
+    publisher_id: str = ""
+    reporting_origin: str | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +193,7 @@ def generate_editorial_stories(
         "candidates": len(rows),
         "completed": 0,
         "failed": 0,
+        "rejected_event_ids": [],
         "forced": force,
         "model": client.model,
         "prompt_versions": [
@@ -220,7 +231,10 @@ def generate_editorial_stories(
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         future_to_event = {
-            executor.submit(generate_story, event, client=client): event for event in events
+            executor.submit(
+                generate_story, event, client=client,
+                previous=_read_json(story_dir / f"{event.event_id}.json"),
+            ): event for event in events
         }
         processed = 0
         for future in as_completed(future_to_event):
@@ -239,14 +253,9 @@ def generate_editorial_stories(
                 atomic_write_json(path, story)
                 state.mark_event_editorial_completed(event.event_id, generated_at)
                 usage = generated["usage"]
-                state.record_llm_usage(
-                    run_id=run_id,
-                    stage="editorial",
-                    model=generated["model"],
-                    prompt_version=generated["prompt_version"],
-                    input_tokens=usage.get("promptTokenCount"),
-                    output_tokens=usage.get("candidatesTokenCount"),
-                )
+                _record_editorial_usage(state, run_id, generated.get("usage_records") or [{
+                    "model": generated["model"], "prompt_version": generated["prompt_version"], "usage": usage,
+                }])
                 for key in stats["usage"]:
                     stats["usage"][key] += int(usage.get(key) or 0)
                 stats["completed"] += 1
@@ -256,12 +265,24 @@ def generate_editorial_stories(
                     )
             except Exception as exc:
                 stats["failed"] += 1
+                if getattr(exc, "editorial_validation_rejected", False):
+                    stats["rejected_event_ids"].append(event.event_id)
+                _record_editorial_usage(state, run_id, getattr(exc, "editorial_usage_records", []))
                 state.record_error(run_id, "editorial", "event", event.event_id, None, exc)
                 if progress:
                     progress(
                         f"editorial: {processed}/{len(events)} failed {event.event_id}: {exc}"
                     )
     return stats
+
+
+def _record_editorial_usage(state: StateDB, run_id: str, records: list[dict[str, Any]]) -> None:
+    for record in records:
+        usage = record["usage"]
+        state.record_llm_usage(
+            run_id=run_id, stage="editorial", model=record["model"], prompt_version=record["prompt_version"],
+            input_tokens=usage.get("promptTokenCount"), output_tokens=usage.get("candidatesTokenCount"),
+        )
 
 
 def editorial_candidate_rows(
@@ -320,9 +341,23 @@ def _load_editorial_event(
     if not article_rows:
         raise ValueError("event has no unfiltered source articles")
 
-    per_article_limit = min(article_char_limit, max(1, event_char_limit // len(article_rows)))
+    # Give relevant, diverse reports useful passages instead of tiny slices of every source.
+    title_words = set(re.findall(r"[a-z]{4,}", str(row["title"]).lower()))
+    ranked_rows = sorted(article_rows, key=lambda r: len(title_words & set(
+        re.findall(r"[a-z]{4,}", r["headline"].lower()))), reverse=True)
+    selected_rows = []
+    seen_publishers: set[str] = set()
+    for candidate in ranked_rows:
+        identity = publisher_id(dict(candidate))
+        if identity not in seen_publishers:
+            selected_rows.append(candidate)
+            seen_publishers.add(identity)
+    selected_ids = {r["article_id"] for r in selected_rows}
+    selected_rows.extend(r for r in ranked_rows if r["article_id"] not in selected_ids)
+    selected_rows = selected_rows[:max(1, min(8, event_char_limit // 3000))]
+    per_article_limit = min(article_char_limit, max(1, event_char_limit // len(selected_rows)))
     articles: list[EditorialArticle] = []
-    for article_row in article_rows:
+    for article_row in selected_rows:
         path = PROJECT_ROOT / article_row["article_path"]
         data = _read_json(path)
         if data is None:
@@ -352,6 +387,8 @@ def _load_editorial_event(
                 digest_key_facts=tuple(str(fact) for fact in facts if str(fact).strip()),
                 bias_label=str(policy.get("bias_label") or "unknown"),
                 reliability=str(policy.get("reliability") or "unknown"),
+                publisher_id=publisher_id(dict(article_row)),
+                reporting_origin=reporting_origin(str(raw_content or ""), publisher_id(dict(article_row))),
             )
         )
     try:
@@ -377,42 +414,75 @@ def _load_editorial_event(
     )
 
 
-def generate_story(event: EditorialEvent, *, client: JsonGenerator) -> dict[str, Any]:
-    framing_eligible = _political_framing_eligible(event)
-    selected_event = event
-    compact_retry = False
+def generate_story(
+    event: EditorialEvent, *, client: JsonGenerator, previous: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
+    def record(result: GeminiResult, version: str) -> None:
+        records.append({"model": result.model, "prompt_version": version, "usage": result.usage})
     try:
-        result = _request_editorial_story(
-            event,
-            client=client,
-            framing_eligible=framing_eligible,
-        )
-    except GeminiEmptyResponseError:
-        selected_event = _compact_editorial_event(event)
-        compact_retry = True
-        result = _request_editorial_story(
-            selected_event,
-            client=client,
-            framing_eligible=framing_eligible,
-            compact=True,
-        )
-    validated = validate_editorial_response(result.payload, selected_event)
-    if compact_retry:
-        prompt_version = (
-            EDITORIAL_FRAMING_COMPACT_PROMPT_VERSION
-            if framing_eligible
-            else EDITORIAL_COMPACT_PROMPT_VERSION
-        )
-    else:
-        prompt_version = (
-            EDITORIAL_FRAMING_PROMPT_VERSION if framing_eligible else EDITORIAL_PROMPT_VERSION
-        )
-    return {
-        "payload": validated,
-        "model": result.model,
-        "prompt_version": prompt_version,
-        "usage": result.usage,
-    }
+        try:
+            ledger, evidence_result = collect_evidence(event, client)
+        except ValueError as exc:
+            if pending := getattr(exc, "editorial_unrecorded_result", None):
+                record(*pending)
+            ledger, evidence_result = collect_evidence(event, client, feedback=str(exc))
+        record(evidence_result, EVIDENCE_VERSION)
+        supported_ids = {e["article_id"] for c in ledger for e in c["evidence"]}
+        selected_event = replace(event, articles=tuple(a for a in event.articles if a.article_id in supported_ids))
+        framing_eligible = _political_framing_eligible(selected_event)
+        compact_retry = False
+        feedback = ""
+        for attempt in range(2):
+            try:
+                result = _request_editorial_story(
+                    selected_event, client=client, framing_eligible=framing_eligible,
+                    ledger=ledger, feedback=feedback,
+                )
+            except GeminiEmptyResponseError:
+                selected_event = _compact_editorial_event(selected_event)
+                compact_retry = True
+                result = _request_editorial_story(
+                    selected_event, client=client, framing_eligible=framing_eligible,
+                    compact=True, ledger=ledger, feedback=feedback,
+                )
+            prompt_version = (
+                EDITORIAL_FRAMING_COMPACT_PROMPT_VERSION if framing_eligible else EDITORIAL_COMPACT_PROMPT_VERSION
+            ) if compact_retry else (EDITORIAL_FRAMING_PROMPT_VERSION if framing_eligible else EDITORIAL_PROMPT_VERSION)
+            record(result, prompt_version)
+            try:
+                validate_claim_links(result.payload, ledger)
+                supported_ids = {e["article_id"] for c in ledger for e in c["evidence"]}
+                validation_event = replace(selected_event, articles=tuple(
+                    a for a in selected_event.articles if a.article_id in supported_ids))
+                validated = validate_editorial_response(result.payload, validation_event)
+                review, review_result = verify_story(validated, ledger, previous, client)
+                record(review_result, REVIEW_VERSION)
+            except ValueError as exc:
+                if pending := getattr(exc, "editorial_unrecorded_result", None):
+                    record(*pending)
+                    del exc.editorial_unrecorded_result
+                feedback = str(exc)
+                if attempt == 0:
+                    continue
+                raise
+            if review["approved"]:
+                break
+            feedback = str(review.get("reason") or "Draft is not supported by the evidence")
+        else:
+            raise ValueError(f"editorial evidence verification failed: {feedback}")
+        return {
+            "payload": validated, "model": result.model, "prompt_version": prompt_version,
+            "usage": {key: sum(int(r["usage"].get(key) or 0) for r in records)
+                      for key in ("promptTokenCount", "candidatesTokenCount")},
+            "usage_records": records, "evidence": ledger, "review": review,
+        }
+    except Exception as exc:
+        if pending := getattr(exc, "editorial_unrecorded_result", None):
+            record(*pending)
+        exc.editorial_usage_records = records
+        exc.editorial_validation_rejected = isinstance(exc, ValueError)
+        raise
 
 
 def _request_editorial_story(
@@ -421,6 +491,8 @@ def _request_editorial_story(
     client: JsonGenerator,
     framing_eligible: bool,
     compact: bool = False,
+    ledger: list[dict[str, Any]] | None = None,
+    feedback: str = "",
 ) -> GeminiResult:
     system_instruction = (
         "You are the neutral editorial desk for a concise news product. Synthesize only the "
@@ -433,8 +505,14 @@ def _request_editorial_story(
         )
     return client.generate_json(
         system_instruction=system_instruction,
-        prompt=_build_editorial_prompt(event),
-        response_schema=_editorial_response_schema(framing_decision=framing_eligible),
+        prompt=_build_editorial_prompt(event) + "\nUse ONLY claims supported by this verified ledger. "
+        "Return headline_claim_ids, dek_claim_ids, tldr_claim_ids and briefing_claim_ids linking every "
+        "summary assertion to its claim IDs (c1, c2, etc.). In key_facts, uncertainties and framing, "
+        "source_article_ids must instead contain the exact article_id strings from supporting evidence, "
+        "never claim IDs.\n" + json.dumps(ledger or [], ensure_ascii=False)
+        + ("\nCorrect this verifier finding: " + feedback if feedback else ""),
+        response_schema=_editorial_response_schema(
+            framing_decision=framing_eligible, article_ids=[a.article_id for a in event.articles]),
         max_output_tokens=8192,
         thinking_level="low",
     )
@@ -475,7 +553,8 @@ def _build_editorial_prompt(event: EditorialEvent) -> str:
         "in praise versus criticism, causal interpretation, legitimacy, consequences emphasized, or proposed "
         "response; different wording alone is not enough. When true, include political_framing and cite only "
         "left-labeled article IDs under left_perspective and only right-labeled IDs under right_perspective. "
-        "When false, omit political_framing."
+        "When false, omit political_framing. Compare actual article assertions, not presumed outlet ideology. "
+        "Never invent symmetry or treat unequal evidence as equally supported."
         if framing_allowed
         else "Omit political_framing; this event does not have the source mix required for a balanced comparison."
     )
@@ -491,10 +570,15 @@ def _build_editorial_prompt(event: EditorialEvent) -> str:
     return (
         "Create one concise story from this event and its source articles.\n"
         "Requirements:\n"
-        "- Headline and dek must be neutral, specific, and supported. Avoid clickbait and outlet framing. "
+        "- Headline and dek must be neutral, specific, and supported. Aim for 8-14 headline words. "
+        "Avoid clickbait and outlet framing. For a rumor, leak or unconfirmed claim, the HEADLINE "
+        "must explicitly retain attribution (for example reportedly, report says, or officials allege). "
         "Write the headline in sentence case, preserving normal capitalization for proper names and acronyms.\n"
         "- tldr must contain 2-4 standalone bullets explaining what happened, who is affected, what changed, "
         "and the most important next step or unknown.\n"
+        "- briefing must contain exactly two concise standalone bullets (aim for 20-35 words each): "
+        "what happened, then the consequence or most material qualification/unknown. Do not repeat the headline. "
+        "Include essential uncertainty even when it occurs late in the full TLDR.\n"
         "- key_facts must contain 2-8 factual claims. Every claim must cite one or more provided article_id values.\n"
         "- uncertainties should include disputed, preliminary, unverified, or genuinely unknown points; omit it "
         "when nothing material remains uncertain. Every uncertainty must cite its basis.\n"
@@ -511,12 +595,15 @@ def _build_editorial_prompt(event: EditorialEvent) -> str:
     )
 
 
-def _editorial_response_schema(*, framing_decision: bool = False) -> dict[str, Any]:
+def _editorial_response_schema(
+    *, framing_decision: bool = False, article_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    article_id_schema = {"type": "STRING", **({"enum": article_ids} if article_ids else {})}
     cited_item = {
         "type": "OBJECT",
         "properties": {
             "text": {"type": "STRING"},
-            "source_article_ids": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "source_article_ids": {"type": "ARRAY", "items": article_id_schema},
         },
         "required": ["text", "source_article_ids"],
     }
@@ -524,7 +611,7 @@ def _editorial_response_schema(*, framing_decision: bool = False) -> dict[str, A
         "type": "OBJECT",
         "properties": {
             "summary": {"type": "STRING"},
-            "source_article_ids": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "source_article_ids": {"type": "ARRAY", "items": article_id_schema},
         },
         "required": ["summary", "source_article_ids"],
     }
@@ -534,6 +621,11 @@ def _editorial_response_schema(*, framing_decision: bool = False) -> dict[str, A
             "headline": {"type": "STRING"},
             "dek": {"type": "STRING"},
             "tldr": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "briefing": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "headline_claim_ids": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "dek_claim_ids": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "tldr_claim_ids": {"type": "ARRAY", "items": {"type": "ARRAY", "items": {"type": "STRING"}}},
+            "briefing_claim_ids": {"type": "ARRAY", "items": {"type": "ARRAY", "items": {"type": "STRING"}}},
             "key_facts": {"type": "ARRAY", "items": cited_item},
             "uncertainties": {"type": "ARRAY", "items": cited_item},
             "political_framing": {
@@ -551,7 +643,7 @@ def _editorial_response_schema(*, framing_decision: bool = False) -> dict[str, A
         "required": [
             "headline",
             "dek",
-            "tldr",
+            "tldr", "briefing", "headline_claim_ids", "dek_claim_ids", "tldr_claim_ids", "briefing_claim_ids",
             "key_facts",
             "uncertainties",
             "editorial_score",
@@ -603,6 +695,10 @@ def validate_editorial_response(payload: Any, event: EditorialEvent) -> dict[str
         "headline": headline,
         "dek": dek,
         "tldr": tldr,
+        "briefing": _text_list(payload.get("briefing", tldr[:2]), "briefing",
+                               minimum=2, maximum=2, max_chars=350),
+        "claim_links": {key: payload.get(key, []) for key in
+                        ("headline_claim_ids", "dek_claim_ids", "tldr_claim_ids", "briefing_claim_ids")},
         "key_facts": key_facts,
         "uncertainties": uncertainties,
         "political_framing": framing,
@@ -667,7 +763,9 @@ def _cited_items(
 def _citation_ids(value: Any, allowed_ids: set[str], field: str) -> list[str]:
     if not isinstance(value, list):
         raise ValueError(f"{field}.source_article_ids must be a list")
-    citations = sorted({str(item) for item in value if str(item) in allowed_ids})
+    if any(not isinstance(item, str) or item not in allowed_ids for item in value):
+        raise ValueError(f"{field} must cite only valid source article IDs")
+    citations = sorted(set(value))
     if not citations:
         raise ValueError(f"{field} must cite at least one valid source article")
     return citations
@@ -677,7 +775,9 @@ def _required_text(value: Any, field: str, max_chars: int) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if not text:
         raise ValueError(f"{field} must not be empty")
-    return text[:max_chars]
+    if len(text) > max_chars:
+        raise ValueError(f"{field} exceeds {max_chars} characters; shorten without losing qualifications")
+    return text
 
 
 def _text_list(value: Any, field: str, *, minimum: int, maximum: int, max_chars: int) -> list[str]:
@@ -706,16 +806,38 @@ def build_story_payload(
 ) -> dict[str, Any]:
     payload = generated["payload"]
     importance = _importance(event, payload, now=_parse_datetime(generated_at))
+    used_ids = {e["article_id"] for c in generated.get("evidence", []) for e in c["evidence"]}
     sources = [
         {
             "article_id": article.article_id,
             "source_name": article.source_name,
+            "source_id": article.source_id,
+            "publisher_id": article.publisher_id or publisher_id(article.__dict__),
+            "reporting_origin": article.reporting_origin,
             "headline": article.headline,
             "url": article.url,
         }
-        for article in event.articles
+        for article in event.articles if not used_ids or article.article_id in used_ids
     ]
+    previous = existing_story or {}
+    claim_sources = {claim["claim_id"]: sorted({e["article_id"] for e in claim["evidence"]})
+                     for claim in generated.get("evidence", [])}
+    material_update = bool(previous and generated.get("review", {}).get("material_update"))
+    revision = int(previous.get("revision") or 1) + int(material_update)
+    revision_at = (generated_at if material_update else
+                   previous.get("revision_at") or previous.get("created_at") or generated_at)
     return {
+        "revision": revision,
+        "revision_at": revision_at,
+        "change_summary": generated.get("review", {}).get("change_summary", "") if material_update
+        else previous.get("change_summary", ""),
+        "_evidence": generated.get("evidence", []),
+        "evidence_verification": {
+            "version": REVIEW_VERSION, "approved": bool(generated.get("review", {}).get("approved")),
+        },
+        "claim_links": payload.get("claim_links", {}),
+        "claim_sources": claim_sources,
+        "briefing": payload.get("briefing", payload["tldr"][:2]),
         "story_id": event.event_id,
         "event_id": event.event_id,
         "category": event.category,
@@ -743,7 +865,7 @@ def _importance(event: EditorialEvent, payload: dict[str, Any], *, now: datetime
     global_score = _safe_score(event.newsworthiness.get("global"))
     category_score = _safe_score(event.newsworthiness.get("category"))
     editorial_score = _safe_score(payload.get("editorial_score"))
-    source_count = len({article.source_id for article in event.articles})
+    source_count = len({article.publisher_id or publisher_id(article.__dict__) for article in event.articles})
     source_score = min(1.0, 0.2 + 0.2 * max(0, source_count - 1))
     reliability_score = sum(
         RELIABILITY_SCORES.get(article.reliability, 0.4) for article in event.articles
@@ -847,7 +969,7 @@ def write_active_stories_index(
     missing = 0
     for row in rows:
         story = _read_json(story_dir / f"{row['event_id']}.json")
-        if story is None:
+        if story is None or story.get("_pending_coherence"):
             missing += 1
             continue
         story_details[row["event_id"]] = story
@@ -1278,7 +1400,7 @@ def _source_coverage_metrics(
     for index, source in enumerate(sources):
         if not isinstance(source, dict) or not source.get("source_name"):
             continue
-        source_name = str(source["source_name"])
+        source_name = publisher_id(source)
         article_key = str(
             source.get("article_id") or source.get("url") or f"source-entry-{index}"
         )
@@ -1296,6 +1418,10 @@ def _source_coverage_metrics(
                 1 for value in articles_by_source.values() if len(value) > 1
             ),
             "source_coverage_score": round(len(source_names) + 0.5 * angle_count, 2),
+            "known_reporting_origins": sorted({str(s["reporting_origin"]) for s in sources
+                                                if isinstance(s, dict) and s.get("reporting_origin")}),
+            "reporting_provenance_complete": bool(sources) and all(
+                isinstance(s, dict) and s.get("reporting_origin") for s in sources),
         },
         source_names,
     )

@@ -72,8 +72,10 @@ The top-level runner is backlog-first and has a bounded finish line:
    - Drain pending Editorial work first and publish the resulting safe progress.
    - If upstream backlog exists, run snapshot-bounded Digest, Aggregation,
      Editorial, and Presentation, then publish that progress.
-   - If bounded backlog remains, wait for Collection to finish, checkpoint its
+   - If blocking bounded backlog remains, wait for Collection to finish, checkpoint its
      results, exit nonzero, and defer newly collected downstream work.
+     Editorial validation rejections stay queued but do not block unrelated work;
+     capacity/transport failures retain the backlog gate.
 6. Wait for Collection. Its newly inserted rows can now enter the normal pass.
 7. Run Digest → Aggregation → Editorial → Presentation and production publish.
 8. Release the lock in `finally`-style cleanup.
@@ -172,8 +174,15 @@ Deterministic code derives new titles, IDs, slugs, and keywords from source
 headlines. It also splits weakly connected model groups and filters standalone
 opinion and low-signal material.
 
+Before assigning new articles to existing events, a full-Flash membership review
+rejects unrelated attachments. Sliding-window overlap cannot implicitly merge
+existing events. Whole-event coherence reviews inspect up to 10 clusters per
+run, cache unchanged membership, and may split a high-confidence complete
+partition atomically in SQLite. Filtered articles stay excluded. Event JSON is
+reconciled from SQLite if interrupted.
+
 Post-aggregation deduplication runs even when no new window is planned. Candidate
-pairs come from slug/title/headline heuristics, distinctive keyword overlap, and
+pairs come from slug/title/headline heuristics (including current published headlines), distinctive keyword overlap, and
 a Flash-Lite prescreen. Strict full-Flash review is the only authority that can
 approve a merge. Reviews are cached against both event update timestamps and the
 prompt version; production reviews at most 40 new pairs in one pass per run.
@@ -187,8 +196,8 @@ Command:
 ```
 
 Editorial selects active/stale events whose `updated_at` is newer than
-`last_editorial_at`. Each event gets one generation operation through the
-ordered full-Flash chain:
+`last_editorial_at`. Each event gets evidence extraction, drafting, and a separate
+verification operation through the ordered full-Flash chain:
 
 ```text
 gemini-3.7-flash -> gemini-3.6-flash -> gemini-3.5-flash
@@ -198,7 +207,15 @@ Retryable transport, 429, and 5xx failures open a five-minute in-process circuit
 for the failing model tier. Safety-sensitive empty responses may receive one
 compact digest/key-fact retry through the same chain. Editorial never uses Lite.
 
-The result must pass deterministic schema and citation validation before
+Invalid evidence extraction receives one retry with validation feedback.
+The result must pass exact-passage, claim-link, schema and citation validation,
+then an independent semantic verification call. A rejected draft gets one repair
+attempt; a remaining failure retains the previous artifact/checkpoint. Validation
+rejections remain pending for retry and health reporting, but are excluded from
+the combined run's editorial backlog gate so unrelated news can continue.
+Transport/capacity failures still block that gate. All calls
+retain model/prompt usage records. Only verified output advances a meaningful
+revision when new facts or corrections warrant it. Validation happens before
 `data/published/stories/<event_id>.json` is replaced and the event checkpoint
 advances. Political framing is considered only for eligible politics/U.S./world
 events with both left and right source-policy coverage, and each perspective can
@@ -220,8 +237,16 @@ Command:
 
 The standard-library renderer treats all editorial text as untrusted, escapes
 HTML, and allows only HTTP/HTTPS source links. It generates the homepage, story
-pages, active archive, 404 page, robots policy, sitemap, social metadata, and
+pages, active archive, methodology/corrections page, 404 page, robots policy, sitemap, social metadata, and
 public JSON APIs. CSS and JavaScript use content-fingerprinted filenames.
+
+The main briefing fixes up to 12 candidates before applying read history; it does
+not refill when items become read. Top News opens on mobile, with additional
+coverage behind an explicit expansion. All outlets is the new-browser default;
+2+ outlets counts canonical publishers, not feed identities. The one-second
+headline-read rule is unchanged. Meaningful revisions get new opaque read IDs
+and immutable publication orders compatible with the existing sync protocol.
+Private evidence passages are excluded from public JSON.
 
 The build is created in a temporary sibling directory and atomically replaces
 `dist/` only after validation succeeds. Deployment accepts only a safe absolute
@@ -240,7 +265,8 @@ production.
 | Active-event filtering, grouping, scoring | Gemini 3.5 Flash-Lite | Deterministic scoring fallback where supported |
 | Deduplication prescreen | Gemini 3.5 Flash-Lite | Candidate discovery only |
 | Deduplication decision | Gemini 3.7 → 3.6 → 3.5 Flash | Lite may reject/defer but can never approve a merge |
-| Editorial and political framing | Gemini 3.7 → 3.6 → 3.5 Flash | Compact full-Flash retry for eligible empty responses; never Lite |
+| Membership/coherence review | Full-Flash review chain | Lite cannot authorize attachment or partition |
+| Evidence, editorial drafting and verification | Gemini 3.7 → 3.6 → 3.5 Flash | Compact full-Flash retry for eligible empty responses; never Lite |
 | Homepage curation | Same full-Flash client | Deterministic ranked fallback |
 
 All LLM responses use structured JSON schemas. Deterministic code owns ID
@@ -259,8 +285,9 @@ usage, optional cost, and time in `llm_usage`.
   refresh `updated_at`.
 - `is_filtered = 1` is a global exclusion. Every downstream article query must
   require `is_filtered = 0`.
-- A partial or blocked run exits nonzero so cron can alert, while already written
-  valid artifacts remain usable.
+- A blocked combined run exits nonzero. Per-item failures remain in stage stats
+  and health reporting; the scheduled wrapper also exits nonzero when health
+  fails. Already written valid artifacts remain usable.
 - The watchdog verifies hostname, boot ID, PID, and process start time before it
   can terminate an expired lock owner.
 
@@ -290,7 +317,7 @@ pipeline or health check fails. The latest health report is written atomically t
 
 - `config/feeds.json`: source registry, category hints, scraper modules, and
   source-specific fetch behavior.
-- `config/source-policy.json`: paywall, reliability, and political-bias metadata;
+- `config/source-policy.json`: publisher identity, paywall, reliability, and political-bias metadata;
   IDs must exactly match the feed registry.
 - `config/categories.json`: category IDs, labels, descriptions, and sort order.
 - `config/pipeline.json`: concurrency, timeouts, retention, thresholds,

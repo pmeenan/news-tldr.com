@@ -19,11 +19,11 @@ from pipeline.paths import EVENT_DIR, LOCK_PATH, PROJECT_ROOT, STORY_DIR
 from pipeline.state import StateDB
 from pipeline.util import atomic_write_json, isoformat_z, sanitize_id
 
-AGGREGATION_PROMPT_VERSION = "aggregation-v6"
+AGGREGATION_PROMPT_VERSION = "aggregation-v7"
 AGGREGATION_EXPERIMENT_PROMPT_VERSION = "aggregation-experiment-v6"
 NEWSWORTHINESS_PROMPT_VERSION = "newsworthiness-v1"
 DEDUPLICATION_PRESCREEN_PROMPT_VERSION = "deduplication-prescreen-v1"
-DEDUPLICATION_REVIEW_PROMPT_VERSION = "deduplication-review-v2"
+DEDUPLICATION_REVIEW_PROMPT_VERSION = "deduplication-review-v3"
 GROUPING_MODES = ("titles", "titles_summaries")
 DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD = 0.8
 DEDUPLICATION_KEYWORD_OVERLAP_MIN = 2
@@ -1229,6 +1229,7 @@ def aggregate_once(
                                 applied = apply_grouping_result(
                                     articles=group_articles,
                                     groups=result["groups"],
+                                    review_client=review_generator,
                                     state=state,
                                     scores_by_group_index=batch_result.scores_by_group_index,
                                     article_classifications=result.get("article_classifications"),
@@ -1351,6 +1352,11 @@ def aggregate_once(
                                 stats={"error": str(exc)},
                             )
                 if not dry_run:
+                    from pipeline.coherence import review_event_coherence
+                    stats["coherence"] = review_event_coherence(
+                        state=state, client=review_generator, run_id=run_id,
+                        limit=int(config.aggregation.get("coherence_reviews_per_run", 10)), progress=progress,
+                    )
                     try:
                         stats["events_merged"] = deduplicate_active_events_llm(
                             state=state,
@@ -1408,6 +1414,7 @@ def apply_grouping_result(
     feeds_by_source: dict[str, Any] | None = None,
     run_id: str | None = None,
     progress: Callable[[str], None] | None = None,
+    review_client: JsonGenerator | None = None,
 ) -> dict[str, int]:
     if article_classifications:
         for idx, classification in article_classifications.items():
@@ -1440,6 +1447,24 @@ def apply_grouping_result(
     if feeds_by_source is None:
         feeds_by_source = {feed.source_id: feed for feed in load_feeds(enabled_only=False)}
     stats = {"events_created": 0, "events_updated": 0, "article_assignments": 0}
+    guarded_groups = []
+    for group in groups:
+        known = {articles[i].event_id for i in group["article_indexes"] if articles[i].event_id}
+        target = _normalize_existing_event_id(group.get("existing_event_id"))
+        if len(known | ({target} if target else set())) <= 1:
+            guarded_groups.append(group)
+            continue
+        buckets: dict[str | None, list[int]] = {}
+        for i in group["article_indexes"]:
+            owner = articles[i].event_id or target
+            buckets.setdefault(owner, []).append(i)
+        for owner, indexes in buckets.items():
+            guarded_groups.append({**group, "article_indexes": indexes, "existing_event_id": owner})
+    groups = guarded_groups
+    if review_client is not None:
+        from pipeline.coherence import guard_event_extensions
+        groups = guard_event_extensions(groups=groups, articles=articles, state=state,
+                                         client=review_client, run_id=run_id)
     for fallback_group_index, group in enumerate(groups):
         group_articles = [articles[index] for index in group["article_indexes"]]
         group_index = int(group.get("group_index", fallback_group_index))
@@ -1811,10 +1836,6 @@ def _split_weakly_connected_groups(
     for group in groups:
         indexes = group["article_indexes"]
         existing_event_id = group.get("existing_event_id")
-        if len(indexes) <= 1:
-            split_groups.append(group)
-            continue
-
         components = _headline_cohesion_components(indexes, articles)
         if len(components) <= 1:
             if existing_event_id and not _component_matches_existing_event(
@@ -2106,11 +2127,11 @@ def _build_grouping_prompt(
 
     return (
         "Group articles into reader-facing story clusters for summarization, and classify their metadata.\n"
-        "A story cluster may include multiple angles on the same developing news subject: the core report, "
-        "updates, official statements, reactions, analysis, explainers, market impact, political criticism, "
-        "and local/international framing. The editorial stage will separate those angles later.\n"
-        "Be eager to group articles when a reader would expect one combined story page linking all sources, "
-        "especially inside this time window.\n"
+        "A cluster must describe ONE specific real-world development, decision, announcement or incident. "
+        "Direct reactions and consequences belong with that development, but a shared company, person, "
+        "country or topic is insufficient. Editorial cannot repair mixed event boundaries. "
+        "A product rumor, CEO transition and investment are separate events even when all mention Apple. "
+        "One payroll release and its reactions belong together; fuel prices do not belong to that event.\n"
         "A cluster still needs a specific shared news anchor. Ask whether a human editor could write one concrete "
         "headline for the combined cluster. If the only possible headline is a generic roundup like 'AI news', "
         "'French Open updates', 'Premier League stories', or 'Iran developments', split into smaller clusters.\n"
@@ -2885,6 +2906,7 @@ def merge_events(
     winner_path = EVENT_DIR / f"{winner_id}.json"
     loser_path = EVENT_DIR / f"{loser_id}.json"
     winner_event = _read_event(winner_path)
+    loser_event = _read_event(loser_path) or {}
     if not winner_event:
         return
 
@@ -2934,8 +2956,11 @@ def merge_events(
         existing=existing_for_payload,
         feeds_by_source=feeds_by_source,
     )
+    event_payload["updated_at"] = max(winner_event["updated_at"], loser_event.get("updated_at", ""))
     atomic_write_json(winner_path, event_payload)
     state.upsert_event(event_payload, winner_path)
+    with state.conn:
+        state.conn.execute("UPDATE events SET last_editorial_at = NULL WHERE event_id = ?", (winner_id,))
 
 
 def _load_event_articles_summary(event_id: str, state: StateDB) -> list[dict[str, str]]:
@@ -2983,6 +3008,8 @@ def _build_event_merge_prompt(event1: dict[str, Any], event2: dict[str, Any]) ->
         "incident, including immediate reaction, consequences, implementation details, or a "
         "different reporting angle that can be summarized accurately in one entry. Do not require "
         "matching headlines or identical emphasis.\n"
+        "A pair is mergeable only if ALL constituent reports fit that core development. "
+        "Reject a merge that would absorb unrelated reports from an already contaminated cluster. "
         "They should remain separate if they are different incidents, "
         "unrelated actions by the same actor, or materially distinct developments in a broader "
         "topic that deserve separate headlines (e.g., separate attacks, policy announcements, "
@@ -3658,6 +3685,10 @@ def _deduplicate_active_events_llm_pass(
     if len(events) < 2:
         return 0
     for event in events:
+        published = _read_event(STORY_DIR / f"{event['event_id']}.json")
+        if published and isinstance(published.get("headline"), str):
+            event["original_title"] = event["title"]
+            event["title"] = published["headline"]
         try:
             event["keywords"] = json.loads(event.get("keywords_json") or "[]") or []
         except (TypeError, ValueError):

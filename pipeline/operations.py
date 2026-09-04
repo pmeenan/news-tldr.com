@@ -264,6 +264,33 @@ def validate_artifacts(
                 elif not set(citations) <= source_ids:
                     report(path, f"{section} cites an article absent from sources")
 
+        if "revision" in data:
+            if type(data["revision"]) is not int or data["revision"] < 1:
+                report(path, "revision must be a positive integer")
+            _required_string(data, "revision_at", path, report)
+            if not isinstance(data.get("briefing"), list) or len(data["briefing"]) != 2:
+                report(path, "briefing must contain exactly two bullets")
+            verification = data.get("evidence_verification") or {}
+            if not isinstance(verification, dict) or verification.get("approved") is not True:
+                report(path, "new editorial artifact lacks approved evidence verification")
+            ledger = data.get("_evidence")
+            claim_sources = data.get("claim_sources")
+            links = data.get("claim_links")
+            if not isinstance(ledger, list) or not ledger or not isinstance(claim_sources, dict):
+                report(path, "new editorial artifact lacks its evidence ledger/source mapping")
+            elif not isinstance(links, dict):
+                report(path, "new editorial artifact lacks summary claim links")
+            else:
+                from pipeline.evidence import validate_claim_links
+                try:
+                    validate_claim_links({**links, "tldr": data.get("tldr"), "briefing": data.get("briefing")}, ledger)
+                    for claim in ledger:
+                        cited = {e["article_id"] for e in claim["evidence"]}
+                        if not cited <= source_ids or cited != set(claim_sources.get(claim["claim_id"], [])):
+                            report(path, "evidence claim has inconsistent public source mapping")
+                except (ValueError, KeyError, TypeError) as exc:
+                    report(path, f"invalid evidence contract: {exc}")
+
     index_count, indexed_story_ids = _validate_active_index(
         active_stories_path,
         stories=stories,

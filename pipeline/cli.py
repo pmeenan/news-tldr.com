@@ -103,7 +103,9 @@ def _stderr_progress(message: str) -> None:
     print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
 
 
-def _pending_editorial_count() -> int:
+def _pending_editorial_count(*, excluded_event_ids: list[str] | None = None) -> int:
+    excluded = sorted(set(excluded_event_ids or []))
+    exclusion = f" AND event_id NOT IN ({','.join('?' for _ in excluded)})" if excluded else ""
     with StateDB() as state:
         row = state.conn.execute(
             """
@@ -111,9 +113,16 @@ def _pending_editorial_count() -> int:
             FROM events
             WHERE status IN ('active', 'stale')
               AND (last_editorial_at IS NULL OR updated_at > last_editorial_at)
-            """
+            """ + exclusion,
+            excluded,
         ).fetchone()
         return int(row[0]) if row else 0
+
+
+def _blocking_editorial_count(stats: dict) -> int:
+    # Validation failures remain pending and unhealthy, but do not starve unrelated news.
+    rejected = stats.get("rejected_event_ids")
+    return _pending_editorial_count(excluded_event_ids=rejected) if rejected else _pending_editorial_count()
 
 
 def _recover_stale_pipeline_runs() -> int:
@@ -223,7 +232,7 @@ def run_completed_pipeline(
                     progress=progress,
                     acquire_lock=False,
                 )
-                remaining_backlog = _pending_editorial_count()
+                remaining_backlog = _blocking_editorial_count(backlog_editorial_stats)
                 if progress:
                     progress("run: publishing editorial backlog progress")
                 backlog_presentation_stats = presentation_once(
@@ -283,7 +292,7 @@ def run_completed_pipeline(
                 remaining_upstream = _pending_upstream_counts(
                     max_article_rowid=backlog_article_rowid
                 )
-                remaining_editorial = _pending_editorial_count()
+                remaining_editorial = _blocking_editorial_count(prior_work_stages["prior_editorial"])
                 if any(remaining_upstream.values()) or remaining_editorial:
                     collect_stats = collection_future.result()
                     if progress:

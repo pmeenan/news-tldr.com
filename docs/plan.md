@@ -217,7 +217,7 @@ gantt
 - [x] Limit topic curation to one high-ranked candidate set per category, encourage
   coherent three-story groups and broader meaningful desk labels, and fold topic
   groups reduced to one visible card into their category remainder.
-- [x] Collapse curated sections behind tappable, counted headings on mobile and
+- [x] Keep secondary curated sections behind tappable, counted headings on mobile (Top News now opens) and
   provide an Expand All/Collapse All action for the current view.
 - [x] Order recent topic groups with category-normalized source breadth, capped
   same-publisher angle depth, and a smaller editorial-rank allowance; preserve
@@ -227,8 +227,8 @@ gantt
 - [x] Run bounded deduplication even without new aggregation-window work, cover
   active and stale events across the 72-hour homepage, and treat immediate
   follow-up angles on one core development as one evolving story.
-- [x] Add a device-local Top/All source-coverage filter, default it to Top, and
-  define Top as stories covered by at least two distinct sources.
+- [x] Add a device-local Top/All source-coverage filter, retain saved preferences, and
+  define the optional 2+ outlets view by canonical publisher identity (new browsers now default to all outlets).
 - [x] Keep the category and Latest Briefing rows in one sticky toolbar and
   return to the page top when the selected category changes.
 - [x] Check in the production Nginx virtual host and give generated HTML a
@@ -247,12 +247,24 @@ gantt
 - [x] Contain the sync origin with daily/total group ceilings, bounded reads and
   payloads, a 256 MiB SQLite page cap, layered Nginx rate/connection/body limits,
   and a dedicated three-worker PHP-FPM pool.
-- [x] Replace the masthead's visible/new story count with a live unread count for
-  the current category/source view.
+- [x] Show a live unread count for the fixed main-briefing cohort in the current category/source view.
 - [x] Compress contiguous read history behind an immutable story-publication
   watermark while retaining sparse newer read IDs and legacy-map compatibility.
 - [x] Make sync revisions content-sensitive and let returning browsers skip the
   complete state response when their last applied revision is still current.
+
+### [x] September 4 Editorial and Briefing Quality
+
+- [x] Replace broad topic clustering guidance with explicit event anchors; review incoming attachments and reserve merges for full-Flash adjudication.
+- [x] Add bounded, cached whole-event coherence reviews and atomic SQLite partitions that preserve every unfiltered article.
+- [x] Include published headlines in duplicate discovery and reject contaminated merges.
+- [x] Map feed identities to publishers; distinguish known wire provenance from unknown independence.
+- [x] Add private passage-backed evidence, summary claim links, independent draft verification, and one bounded repair attempt.
+- [x] Preserve meaningful revision identities across local read history and existing anonymous sync.
+- [x] Keep the intentional one-second/60%-title-visible read rule.
+- [x] Open a finite 12-story mobile briefing; expose deeper coverage explicitly, improve controls, remove repetitive card deks, and link sources directly.
+- [x] Add methodology/correction guidance and a synthetic evaluation runner with an explicit human-review rubric.
+- [ ] Obtain human sign-off on the evaluation fixtures and compare human quality scores across future prompt/model revisions.
 
 ## Backlog
 

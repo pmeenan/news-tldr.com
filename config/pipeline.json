@@ -19,7 +19,8 @@
     "deduplication_max_pairs_per_run": 40,
     "deduplication_max_passes_per_run": 1,
     "deduplication_lookback_hours": 72,
-    "min_category_impact": 0.25
+    "min_category_impact": 0.25,
+    "coherence_reviews_per_run": 10
   },
   "digest": {
     "concurrency": 10,

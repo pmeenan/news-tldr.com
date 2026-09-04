@@ -6,483 +6,552 @@
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Technology news and reviews."
+      "notes": "Technology news and reviews.",
+      "publisher_id": "engadget"
     },
     {
       "source_id": "hacker-news",
       "bias_label": "center",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "User-submitted tech and startup news."
+      "notes": "User-submitted tech and startup news.",
+      "publisher_id": "hacker-news"
     },
     {
       "source_id": "slashdot",
       "bias_label": "center",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "News for nerds, stuff that matters."
+      "notes": "News for nerds, stuff that matters.",
+      "publisher_id": "slashdot"
     },
     {
       "source_id": "wapo-national",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "metered",
-      "notes": "US national news from The Washington Post."
+      "notes": "US national news from The Washington Post.",
+      "publisher_id": "the-washington-post"
     },
     {
       "source_id": "wapo-politics",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "metered",
-      "notes": "Political and policy coverage from The Washington Post."
+      "notes": "Political and policy coverage from The Washington Post.",
+      "publisher_id": "the-washington-post"
     },
     {
       "source_id": "wapo-world",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "metered",
-      "notes": "International news from The Washington Post."
+      "notes": "International news from The Washington Post.",
+      "publisher_id": "the-washington-post"
     },
     {
       "source_id": "cnn-us",
       "bias_label": "left",
       "reliability": "high",
       "paywall": "none",
-      "notes": "US domestic news from CNN."
+      "notes": "US domestic news from CNN.",
+      "publisher_id": "cnn"
     },
     {
       "source_id": "abc-news-top",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Top national and international stories from ABC News."
+      "notes": "Top national and international stories from ABC News.",
+      "publisher_id": "abc-news"
     },
     {
       "source_id": "abc-news-us",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "US domestic news headlines from ABC News."
+      "notes": "US domestic news headlines from ABC News.",
+      "publisher_id": "abc-news"
     },
     {
       "source_id": "abc-news-business",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Business and financial news from ABC News."
+      "notes": "Business and financial news from ABC News.",
+      "publisher_id": "abc-news"
     },
     {
       "source_id": "abc-news-tech",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Technology news headlines from ABC News."
+      "notes": "Technology news headlines from ABC News.",
+      "publisher_id": "abc-news"
     },
     {
       "source_id": "techcrunch",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Startup and technology industry news."
+      "notes": "Startup and technology industry news.",
+      "publisher_id": "techcrunch"
     },
     {
       "source_id": "car-and-driver",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Automotive news, reviews, and features."
+      "notes": "Automotive news, reviews, and features.",
+      "publisher_id": "car-and-driver"
     },
     {
       "source_id": "the-verge",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Tech, science, art, and culture coverage."
+      "notes": "Tech, science, art, and culture coverage.",
+      "publisher_id": "the-verge"
     },
     {
       "source_id": "business-insider",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "metered",
-      "notes": "Business, financial, and industry news."
+      "notes": "Business, financial, and industry news.",
+      "publisher_id": "business-insider"
     },
     {
       "source_id": "fox-news",
       "bias_label": "right",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "Latest headlines from Fox News."
+      "notes": "Latest headlines from Fox News.",
+      "publisher_id": "fox-news"
     },
     {
       "source_id": "fox-news-politics",
       "bias_label": "right",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "Political coverage from Fox News."
+      "notes": "Political coverage from Fox News.",
+      "publisher_id": "fox-news"
     },
     {
       "source_id": "fox-news-us",
       "bias_label": "right",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "US domestic news from Fox News."
+      "notes": "US domestic news from Fox News.",
+      "publisher_id": "fox-news"
     },
     {
       "source_id": "fox-news-world",
       "bias_label": "right",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "International news from Fox News."
+      "notes": "International news from Fox News.",
+      "publisher_id": "fox-news"
     },
     {
       "source_id": "bbc-news-top",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Top headlines from BBC News."
+      "notes": "Top headlines from BBC News.",
+      "publisher_id": "bbc-news"
     },
     {
       "source_id": "bbc-news-world",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "International news from BBC News."
+      "notes": "International news from BBC News.",
+      "publisher_id": "bbc-news"
     },
     {
       "source_id": "npr-top",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Top news from National Public Radio."
+      "notes": "Top news from National Public Radio.",
+      "publisher_id": "npr"
     },
     {
       "source_id": "npr-world",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "none",
-      "notes": "World news from NPR."
+      "notes": "World news from NPR.",
+      "publisher_id": "npr"
     },
     {
       "source_id": "ars-technica",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "In-depth technology and science reporting."
+      "notes": "In-depth technology and science reporting.",
+      "publisher_id": "ars-technica"
     },
     {
       "source_id": "wired",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "metered",
-      "notes": "Technology, science, and culture."
+      "notes": "Technology, science, and culture.",
+      "publisher_id": "wired"
     },
     {
       "source_id": "ap-news",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Custom scraper for AP News."
+      "notes": "Custom scraper for AP News.",
+      "publisher_id": "associated-press"
     },
     {
       "source_id": "motortrend",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Custom scraper for MotorTrend."
+      "notes": "Custom scraper for MotorTrend.",
+      "publisher_id": "motortrend"
     },
     {
       "source_id": "bbc-news-business",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Business and economy headlines from BBC News."
+      "notes": "Business and economy headlines from BBC News.",
+      "publisher_id": "bbc-news"
     },
     {
       "source_id": "bbc-news-health",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Health news from BBC News."
+      "notes": "Health news from BBC News.",
+      "publisher_id": "bbc-news"
     },
     {
       "source_id": "bbc-news-science-environment",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Science and environment headlines from BBC News."
+      "notes": "Science and environment headlines from BBC News.",
+      "publisher_id": "bbc-news"
     },
     {
       "source_id": "bbc-news-entertainment",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Entertainment and arts headlines from BBC News."
+      "notes": "Entertainment and arts headlines from BBC News.",
+      "publisher_id": "bbc-news"
     },
     {
       "source_id": "abc-news-politics",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Political headlines from ABC News."
+      "notes": "Political headlines from ABC News.",
+      "publisher_id": "abc-news"
     },
     {
       "source_id": "abc-news-international",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "International headlines from ABC News."
+      "notes": "International headlines from ABC News.",
+      "publisher_id": "abc-news"
     },
     {
       "source_id": "abc-news-health",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Health headlines from ABC News."
+      "notes": "Health headlines from ABC News.",
+      "publisher_id": "abc-news"
     },
     {
       "source_id": "abc-news-entertainment",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Entertainment headlines from ABC News."
+      "notes": "Entertainment headlines from ABC News.",
+      "publisher_id": "abc-news"
     },
     {
       "source_id": "cbs-news-top",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Top headlines from CBS News."
+      "notes": "Top headlines from CBS News.",
+      "publisher_id": "cbs-news"
     },
     {
       "source_id": "cbs-news-us",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "US headlines from CBS News."
+      "notes": "US headlines from CBS News.",
+      "publisher_id": "cbs-news"
     },
     {
       "source_id": "cbs-news-world",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "World headlines from CBS News."
+      "notes": "World headlines from CBS News.",
+      "publisher_id": "cbs-news"
     },
     {
       "source_id": "cbs-news-health",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Health headlines from CBS News."
+      "notes": "Health headlines from CBS News.",
+      "publisher_id": "cbs-news"
     },
     {
       "source_id": "cbs-news-entertainment",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Entertainment headlines from CBS News."
+      "notes": "Entertainment headlines from CBS News.",
+      "publisher_id": "cbs-news"
     },
     {
       "source_id": "pbs-newshour-politics",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Political headlines from PBS NewsHour."
+      "notes": "Political headlines from PBS NewsHour.",
+      "publisher_id": "pbs-newshour"
     },
     {
       "source_id": "pbs-newshour-world",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "World headlines from PBS NewsHour."
+      "notes": "World headlines from PBS NewsHour.",
+      "publisher_id": "pbs-newshour"
     },
     {
       "source_id": "guardian-world",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "none",
-      "notes": "World news from The Guardian."
+      "notes": "World news from The Guardian.",
+      "publisher_id": "the-guardian"
     },
     {
       "source_id": "guardian-us",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "none",
-      "notes": "US news from The Guardian."
+      "notes": "US news from The Guardian.",
+      "publisher_id": "the-guardian"
     },
     {
       "source_id": "guardian-environment",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Environment and climate coverage from The Guardian."
+      "notes": "Environment and climate coverage from The Guardian.",
+      "publisher_id": "the-guardian"
     },
     {
       "source_id": "guardian-science",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Science coverage from The Guardian."
+      "notes": "Science coverage from The Guardian.",
+      "publisher_id": "the-guardian"
     },
     {
       "source_id": "al-jazeera",
       "bias_label": "center",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "International headlines from Al Jazeera."
+      "notes": "International headlines from Al Jazeera.",
+      "publisher_id": "al-jazeera"
     },
     {
       "source_id": "propublica",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Investigative reporting from ProPublica."
+      "notes": "Investigative reporting from ProPublica.",
+      "publisher_id": "propublica"
     },
     {
       "source_id": "stat-news",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "metered",
-      "notes": "Health, medicine, and life sciences news from STAT."
+      "notes": "Health, medicine, and life sciences news from STAT.",
+      "publisher_id": "stat"
     },
     {
       "source_id": "science-daily-science",
       "bias_label": "center",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "Top science research news from ScienceDaily."
+      "notes": "Top science research news from ScienceDaily.",
+      "publisher_id": "sciencedaily"
     },
     {
       "source_id": "science-daily-health",
       "bias_label": "center",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "Top health and medicine research news from ScienceDaily."
+      "notes": "Top health and medicine research news from ScienceDaily.",
+      "publisher_id": "sciencedaily"
     },
     {
       "source_id": "science-daily-environment",
       "bias_label": "center",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "Top environment and climate research news from ScienceDaily."
+      "notes": "Top environment and climate research news from ScienceDaily.",
+      "publisher_id": "sciencedaily"
     },
     {
       "source_id": "nbc-news",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Top stories from NBC News."
+      "notes": "Top stories from NBC News.",
+      "publisher_id": "nbc-news"
     },
     {
       "source_id": "politico",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "US political news from Politico."
+      "notes": "US political news from Politico.",
+      "publisher_id": "politico"
     },
     {
       "source_id": "the-hill",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "US political news from The Hill."
+      "notes": "US political news from The Hill.",
+      "publisher_id": "the-hill"
     },
     {
       "source_id": "cnbc",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Business and financial news from CNBC."
+      "notes": "Business and financial news from CNBC.",
+      "publisher_id": "cnbc"
     },
     {
       "source_id": "scientific-american",
       "bias_label": "center-left",
       "reliability": "high",
       "paywall": "metered",
-      "notes": "Science news and analysis from Scientific American."
+      "notes": "Science news and analysis from Scientific American.",
+      "publisher_id": "scientific-american"
     },
     {
       "source_id": "mit-tech-review",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "metered",
-      "notes": "Emerging technology coverage from MIT Technology Review."
+      "notes": "Emerging technology coverage from MIT Technology Review.",
+      "publisher_id": "mit-technology-review"
     },
     {
       "source_id": "nasa",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Official news releases from NASA."
+      "notes": "Official news releases from NASA.",
+      "publisher_id": "nasa-news"
     },
     {
       "source_id": "variety",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "metered",
-      "notes": "Entertainment industry trade coverage from Variety."
+      "notes": "Entertainment industry trade coverage from Variety.",
+      "publisher_id": "variety"
     },
     {
       "source_id": "hollywood-reporter",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "metered",
-      "notes": "Entertainment industry trade coverage from The Hollywood Reporter."
+      "notes": "Entertainment industry trade coverage from The Hollywood Reporter.",
+      "publisher_id": "the-hollywood-reporter"
     },
     {
       "source_id": "billboard",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Music industry news and charts from Billboard."
+      "notes": "Music industry news and charts from Billboard.",
+      "publisher_id": "billboard"
     },
     {
       "source_id": "dw",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "International news from Germany's public broadcaster DW."
+      "notes": "International news from Germany's public broadcaster DW.",
+      "publisher_id": "deutsche-welle"
     },
     {
       "source_id": "france-24",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "International news from France 24."
+      "notes": "International news from France 24.",
+      "publisher_id": "france-24"
     },
     {
       "source_id": "electrek",
       "bias_label": "center",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "Electric vehicle and clean energy news from Electrek."
+      "notes": "Electric vehicle and clean energy news from Electrek.",
+      "publisher_id": "electrek"
     },
     {
       "source_id": "jalopnik",
       "bias_label": "center-left",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "Automotive news and culture from Jalopnik."
+      "notes": "Automotive news and culture from Jalopnik.",
+      "publisher_id": "jalopnik"
     },
     {
       "source_id": "cnet",
       "bias_label": "center",
       "reliability": "high",
       "paywall": "none",
-      "notes": "Consumer technology news and reviews from CNET."
+      "notes": "Consumer technology news and reviews from CNET.",
+      "publisher_id": "cnet"
     },
     {
       "source_id": "9to5mac",
       "bias_label": "center",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "Apple ecosystem news and analysis from 9to5Mac."
+      "notes": "Apple ecosystem news and analysis from 9to5Mac.",
+      "publisher_id": "9to5mac"
     },
     {
       "source_id": "9to5google",
       "bias_label": "center",
       "reliability": "medium",
       "paywall": "none",
-      "notes": "Google ecosystem news and analysis from 9to5Google."
+      "notes": "Google ecosystem news and analysis from 9to5Google.",
+      "publisher_id": "9to5google"
     }
   ]
 }

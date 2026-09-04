@@ -34,6 +34,62 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on September 4, 2026 (Evidence-Grounded Editorial and Finite Briefing)
+
+- **Scope**: Implemented the requested editorial and presentation review changes.
+  The intentional one-second/60%-visible headline read rule remains unchanged.
+- **Editorial**: Added exact-passage evidence extraction, claim links, a separate
+  full-Flash verification call, bounded extraction/draft repairs, per-call usage
+  records, and meaningful revisions. Rejected drafts retain their prior artifact
+  and checkpoint. New drafts cite only articles represented in the ledger.
+  Private evidence is excluded from the public JSON API.
+  Validation rejections remain queued and unhealthy but no longer block unrelated
+  downstream news; transport/capacity failures retain backlog-first gating.
+- **Clustering**: New attachments require specific-event membership review;
+  existing-event merges require explicit adjudication. Bounded, cached coherence
+  reviews split contaminated clusters atomically in SQLite. Repair preserves
+  source freshness and the original story's creation/revision metadata; pending
+  contaminated summaries stay out of the active index until regenerated.
+- **Publishers**: Source policy maps feed IDs to canonical publishers. Outlet
+  counts no longer count category feeds separately. Explicit wire provenance is
+  recorded where recognized; multiple outlets do not imply independent evidence.
+- **Presentation v23**: A fixed 12-story briefing opens on mobile, with deeper
+  coverage explicitly expandable. Cards use two briefing bullets, smaller
+  headlines, direct source links and material-update explanations. Controls wrap
+  on narrow screens. The default source view includes single-outlet reporting;
+  existing preferences are retained. Meaningful revisions can return to New
+  using immutable read identities compatible with the existing sync service.
+- **Documentation**: Updated README, architecture, pipeline, plan and style
+  references. Added `/methodology/` and correction guidance, five synthetic
+  editorial fixtures, two event-boundary fixtures and a private evaluation CLI.
+  Human fixture sign-off remains an explicit follow-up; automated verification
+  does not establish factual accuracy or freedom from bias.
+- **Verification**: 301 tests passed; Ruff and JavaScript syntax checks passed.
+  Chromium checks at 1440, 390 and 320 pixels verified the finite briefing,
+  no horizontal overflow, read persistence, no automatic refill, and read
+  observation after expanding deeper coverage. All five live synthetic
+  editorial evaluations passed automatic checks. A browser regression also
+  verified meaningful revisions returning to New with the same story URL.
+  No dependency was added.
+- **Rollout**: Presentation v23 is live, serving 5,512 story pages and 11,035
+  managed files. The initial migration produced 116 evidence-checked stories
+  and six meaningful revisions, and repaired nine contaminated clusters.
+  Existing stories continue migrating incrementally rather than being
+  automatically reverified by presentation builds. Two initial rollout
+  processes were stopped before publication to correct repair freshness and
+  stable read identity; affected original metadata was restored from the prior
+  public artifacts. A SQLite backup is retained under ignored
+  `data/state/upgrade-backups/`.
+- **Final live checks**: Homepage/API HTTP 200, SQLite quick check, all artifact
+  checks and live Chromium desktop/mobile checks passed. Health remains
+  `unhealthy` because two editorial events still fail exact-passage validation
+  and one Variety article receives an empty Gemini digestion response. These
+  are recorded failures, not successfully migrated content. No coherence repair
+  marker remains pending. Inspect `data/state/health.json` and normal hourly
+  logs for retries; validation rejections do not block unrelated editorial work.
+- **Not committed**: Source changes remain in the working tree; runtime data,
+  evaluation reports, browser previews and production files are untracked.
+
 ### State on September 3, 2026 (Documentation Architecture Refresh)
 
 - **Scope**: Audited every repository Markdown file against source, checked-in

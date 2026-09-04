@@ -37,8 +37,17 @@ class FakeEditorialClient:
 
     def generate_json(self, **kwargs: Any) -> GeminiResult:
         self.calls.append(kwargs)
+        properties = kwargs["response_schema"]["properties"]
+        payload = self.payload
+        if "claims" in properties:
+            articles = json.loads(kwargs["prompt"].rsplit("\n", 1)[1])
+            payload = {"claims": [{"text": "A supported claim.", "status": "reported", "evidence": [
+                {"article_id": a["article_id"], "quote": a["text"][:80]} for a in articles
+            ]}]}
+        elif "approved" in properties:
+            payload = {"approved": True, "reason": "", "material_update": False, "change_summary": ""}
         return GeminiResult(
-            payload=self.payload,
+            payload=payload,
             model=self.model,
             elapsed_ms=25,
             usage={"promptTokenCount": 100, "candidatesTokenCount": 40},
@@ -88,6 +97,9 @@ def _response(*article_ids: str) -> dict[str, Any]:
             "Officials announced a policy change.",
             "Implementation details remain unresolved.",
         ],
+        "briefing": ["Officials announced a policy change.", "Implementation details remain unresolved."],
+        "headline_claim_ids": ["c1"], "dek_claim_ids": ["c1"],
+        "tldr_claim_ids": [["c1"], ["c1"]], "briefing_claim_ids": [["c1"], ["c1"]],
         "key_facts": [
             {"text": "The policy takes effect next month.", "source_article_ids": ids}
         ],
@@ -242,22 +254,19 @@ def test_generate_story_retries_empty_responses_with_compact_digest_context() ->
 
     class CompactRetryClient(FakeEditorialClient):
         def generate_json(self, **kwargs: Any) -> GeminiResult:
-            self.calls.append(kwargs)
             if len(self.calls) == 1:
+                self.calls.append(kwargs)
                 raise GeminiEmptyResponseError("no candidates")
-            return GeminiResult(
-                payload=self.payload,
-                model="gemini-3.6-flash",
-                elapsed_ms=25,
-                usage={"promptTokenCount": 50, "candidatesTokenCount": 20},
-            )
+            result = super().generate_json(**kwargs)
+            return GeminiResult(payload=result.payload, model="gemini-3.6-flash", elapsed_ms=25, usage=result.usage)
 
     client = CompactRetryClient(_response("a1"))
     generated = generate_story(event, client=client)
 
-    assert len(client.calls) == 2
-    assert "Sensitive full article text" in client.calls[0]["prompt"]
-    assert "Sensitive full article text" not in client.calls[1]["prompt"]
+    assert len(client.calls) == 4
+    assert "Sensitive full article text" in client.calls[1]["prompt"]
+    # The compact draft retains the verified quote but excludes the full repeated input.
+    assert len(client.calls[2]["prompt"]) < len(client.calls[1]["prompt"])
     assert generated["model"] == "gemini-3.6-flash"
     assert generated["prompt_version"] == EDITORIAL_COMPACT_PROMPT_VERSION
 
@@ -353,7 +362,8 @@ def test_generate_stories_persists_checkpoint_usage_and_ignores_filtered_article
             "SELECT last_editorial_at FROM events WHERE event_id = 'event-1'"
         ).fetchone()["last_editorial_at"]
         usage = state.conn.execute(
-            "SELECT stage, model, prompt_version FROM llm_usage WHERE run_id = 'run-1'"
+            "SELECT stage, model, prompt_version FROM llm_usage WHERE run_id = 'run-1' "
+            "AND prompt_version = ?", (EDITORIAL_PROMPT_VERSION,)
         ).fetchone()
 
     assert stats["completed"] == 1
@@ -547,3 +557,81 @@ def test_homepage_coverage_priority_normalizes_category_supply_and_expires() -> 
         expired_story,
         generated_at=generated_at,
     )
+
+
+def test_meaningful_revisions_preserve_history_and_ignore_cosmetic_refreshes() -> None:
+    event = _event()
+    generated = {"payload": validate_editorial_response(_response(), event), "model": "test", "usage": {},
+                 "review": {"approved": True, "material_update": False, "change_summary": ""}}
+    first = build_story_payload(event, generated, generated_at="2026-08-24T02:00:00Z")
+    refreshed = build_story_payload(event, generated, generated_at="2026-08-24T03:00:00Z", existing_story=first)
+    assert refreshed["revision"] == first["revision"] == 1
+    assert refreshed["revision_at"] == first["created_at"]
+    generated["review"].update(material_update=True, change_summary="Officials published implementation dates.")
+    updated = build_story_payload(event, generated, generated_at="2026-08-24T04:00:00Z", existing_story=refreshed)
+    assert updated["revision"] == 2
+    assert updated["revision_at"] == "2026-08-24T04:00:00Z"
+    assert updated["created_at"] == first["created_at"]
+
+
+def test_verifier_rejection_keeps_previous_artifact_and_checkpoint(tmp_path: Path) -> None:
+    class RejectingClient(FakeEditorialClient):
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            result = super().generate_json(**kwargs)
+            if "approved" in kwargs["response_schema"]["properties"]:
+                result.payload["approved"] = False
+                result.payload["reason"] = "Unsupported date in headline"
+            return result
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    story_dir = tmp_path / "stories"
+    story_dir.mkdir()
+    path = story_dir / "event-1.json"
+    path.write_text('{"headline": "Previous verified story"}')
+    with StateDB(db_path) as state:
+        _insert_event_and_articles(state, tmp_path)
+        state.start_run("review-failure", "editorial")
+        stats = generate_editorial_stories(state=state, run_id="review-failure", concurrency=1,
+                                          client=RejectingClient(_response()), story_dir=story_dir)
+        assert stats["completed"] == 0 and stats["failed"] == 1
+        assert stats["rejected_event_ids"] == ["event-1"]
+        assert state.conn.execute("SELECT last_editorial_at FROM events").fetchone()[0] is None
+        assert state.conn.execute("SELECT COUNT(*) FROM llm_usage").fetchone()[0] == 5
+    assert json.loads(path.read_text())["headline"] == "Previous verified story"
+
+
+def test_mixed_valid_and_unknown_citations_are_rejected() -> None:
+    response = _response("a1", "invented")
+    with pytest.raises(ValueError, match="only valid source"):
+        validate_editorial_response(response, _event())
+
+
+def test_evidence_retry_preserves_usage_and_constrains_draft_citations() -> None:
+    class RepairClient(FakeEditorialClient):
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            if "Repair the previous extraction:" in kwargs["prompt"]:
+                kwargs = {**kwargs, "prompt": kwargs["prompt"].split("\nRepair the previous extraction:")[0]}
+            result = super().generate_json(**kwargs)
+            if len(self.calls) == 1:
+                result.payload["claims"][0]["evidence"][0]["quote"] = "Invented passage that must fail."
+            return result
+
+    client = RepairClient(_response())
+    result = generate_story(_event(), client=client)
+    assert len(result["usage_records"]) == 4
+    draft_schema = client.calls[2]["response_schema"]
+    citation_schema = draft_schema["properties"]["key_facts"]["items"]["properties"]["source_article_ids"]
+    assert citation_schema["items"]["enum"] == ["a1"]
+
+
+def test_malformed_verifier_retry_is_accounted_for() -> None:
+    class MalformedClient(FakeEditorialClient):
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            result = super().generate_json(**kwargs)
+            if len(self.calls) == 3:
+                result.payload["approved"] = "yes"
+            return result
+
+    result = generate_story(_event(), client=MalformedClient(_response()))
+    assert len(result["usage_records"]) == 5

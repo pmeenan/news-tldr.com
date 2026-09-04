@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "description": "Synthetic regression cases; expected judgments require human sign-off before serving as a quality benchmark.",
+  "stories": [
+    {
+      "id": "numeric-attribution",
+      "title": "Water agency reports elevated reservoir readings",
+      "category": "environment",
+      "reports": ["The North Valley Water Agency reported elevated readings at 12 monitoring sites on Friday. The agency said testing is preliminary and has not established whether household supplies are affected. It will publish confirmatory results on Monday. The agency did not report 120 affected sites."],
+      "expected": "Attribute preliminary measurements to the agency, retain 12, and state household impact is unknown. Do not convert monitoring sites into affected homes."
+    },
+    {
+      "id": "rumor-attribution",
+      "title": "Report describes a possible foldable-phone stylus",
+      "category": "technology",
+      "reports": ["Technology reporter Dana Reed reports that Example Devices tested a shorter stylus for a possible foldable phone. Reed cites two unnamed people familiar with prototyping. Those sources say screen damage and handling problems make release unlikely. Example Devices declined to comment and has announced neither the phone nor the stylus."],
+      "expected": "The headline and summary must retain report/rumor attribution. Testing is not a confirmed product launch; release is unlikely."
+    },
+    {
+      "id": "research-limitations",
+      "title": "Small observational study reports association with sleep",
+      "category": "health",
+      "reports": ["Researchers followed 40 adult volunteers who chose their own exercise routines. Participants who exercised more reported better sleep. The observational study cannot establish that exercise caused the difference. Sleep was self-reported, and the study did not test a treatment or randomize participants. The authors called for a larger controlled study."],
+      "expected": "Retain the small observational design and uncertainty in the compact briefing. Do not claim proven causation or treatment efficacy."
+    },
+    {
+      "id": "competing-claims",
+      "title": "Supplier disputes factory operator's delivery allegation",
+      "category": "business",
+      "reports": ["Factory operator North Works alleged that supplier East Parts missed three contracted deliveries. East Parts denied missing deliveries and said North Works changed its requirements. Neither company released delivery records. North Works said it paused one assembly line pending a review. No court or regulator has issued findings."],
+      "expected": "Distinguish the operator's allegation, the supplier's denial, and the reported production pause. Do not resolve the dispute or infer motives."
+    },
+    {
+      "id": "vendor-performance",
+      "title": "Vendor announces claimed battery improvement",
+      "category": "technology",
+      "reports": ["Battery vendor Example Energy says its prototype lasted 20 percent longer in the company's laboratory tests than its previous prototype. The company has not released test methods or independent measurements. The prototype is not commercially available. Example Energy said external testing will begin next quarter."],
+      "expected": "Attribute the 20 percent improvement to company tests. Include lack of independent measurements and avoid implying consumers can buy the product."
+    }
+  ],
+  "partitions": [
+    {
+      "id": "apple-event-contamination",
+      "headlines": ["Apple reportedly tested stylus for foldable phone", "Apple appoints new chief executive", "Report says foldable Apple stylus unlikely to launch", "Investor expands Alphabet stake"],
+      "expected_groups": [[0, 2], [1], [3]]
+    },
+    {
+      "id": "jobs-duplicate-and-unrelated-fuel",
+      "headlines": ["US employers added 162,000 jobs in August", "August payrolls rise 162,000 as unemployment holds steady", "Diesel prices climb ahead of holiday"],
+      "expected_groups": [[0, 1], [2]]
+    }
+  ]
+}

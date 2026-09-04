@@ -166,9 +166,10 @@ those windows even if they were already marked completed:
 ./.venv/bin/python -m pipeline.cli aggregate --verbose --force
 ```
 
-Run stage 3 editorial generation. Editorial performs one generation operation
-per changed active/stale event through the ordered full-Flash fallback chain,
-validates source citations, writes
+Run stage 3 editorial generation. Editorial extracts a passage-backed evidence ledger, drafts a summary, and independently
+checks it against the quoted evidence through the ordered full-Flash fallback chain.
+A rejected draft gets one repair attempt; unresolved failures retain the previous story
+and checkpoint. Successful generation writes
 `data/published/stories/<event_id>.json`, and regenerates the active story index:
 ```bash
 ./.venv/bin/python -m pipeline.cli editorial --verbose
@@ -233,59 +234,74 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-The homepage ranks the All view by fresh global impact and re-ranks each category
-by fresh category impact. Its global New/All control defaults to New and saves
-the reader's choice in local storage across visits and category sections.
-The category selector and Latest Briefing controls remain together in a sticky
-toolbar while stories scroll beneath them. Changing categories returns the
-reader to the top of the page, with reduced-motion preferences respected.
-An independent Sources control defaults to Top, showing only stories with at
-least two distinct sources; All restores every story in the rolling window.
-That preference is also device-local, and the non-default All state is reflected
-as `coverage=all` in the URL.
-Stories are marked read after their title remains visible for one second, retain
-a subtle read indicator, and are remembered for three days. The masthead reports
-the live unread count for the current category/source view and decrements it as
-stories become read without moving cards during the scan. New mode re-applies
-that local history whenever the reader changes category or view; a header action
-marks every currently visible story read. Reading history remains browser-local
-unless the reader explicitly starts anonymous synchronization from the header
-icon. Starting sync creates a private capability link; another browser that opens
-the link unions its local read state with the group. The fragment token is removed
-from the address bar immediately, including for same-page fragment navigation;
-writes are debounced and sent silently without changing the current view. A new
-page visit checks the shared revision before displaying stories and downloads
-state only when that revision changed. Contiguous read prefixes are represented
-by one immutable story-order watermark, leaving only newer out-of-order reads as
-individual IDs. Tab changes and cross-tab writes do not fetch or rerender.
-Disconnecting preserves the browser's local history.
-Anyone possessing the private link can join the group, so the UI identifies it as
-sensitive.
+The homepage opens with a finite briefing of up to 12 developments. Its cohort is
+chosen before read-history filtering, so reading a story does not pull another
+one into the briefing. Additional topic sections and category remainders sit
+behind **Explore more coverage**. Top News opens on mobile; secondary sections
+remain individually expandable. Smaller headlines and two complementary bullets
+replace the repeated headline/dek/summary treatment on cards. New editorial
+output generates those two bullets deliberately, including material uncertainty;
+legacy stories use the first TL;DR bullet and their first uncertainty when present.
 
-An editorial curation pass selects up to 12 distinct Top News stories and groups
-the highest-ranked related story cards under specific topic headings. It favors
-coherent groups of three or more and can broaden an overly narrow label to a
-meaningful regional or subject desk. Unmatched cards—and topic groups reduced to
-one visible card by the reader's filters—are collected under per-category
-remainders such as More World News or More Science instead of one Everything Else
-dump. On mobile, every section is collapsed to its heading by default;
-the heading toggles that section and an Expand All/Collapse All action controls
-the current set of sections. Top News remains visible within focused category
-views when a curated story belongs to that category. Topic sections are ordered
-by recent coverage breadth, normalized against the active source pool for each
-category, with a capped boost for multiple story angles from one publisher and
-an editorial-importance adjustment. The combined view uses quiet category-family
-tints whose depth tracks source count; focused categories retain the neutral
-white/tan card treatment.
+The paper palette and serif typography remain. The sticky toolbar provides
+category navigation, New/All read history, All/2+ outlets coverage, and Mark read.
+All outlets is the default for new browsers, allowing important single-outlet
+reporting into the briefing. Existing saved coverage preferences are honored.
+The optional `coverage=top` URL selects multiple publishers; `coverage=all` remains
+accepted. The count explicitly reports unread items **in the briefing**. Sources
+on each card links directly to the story's reporting. A public
+[/methodology/](https://news-tldr.com/methodology/) page explains selection,
+evidence checks, source counts, read behavior, and correction reporting.
 
-Generated pages carry `noindex` metadata, and `robots.txt` blocks major search
-index crawlers while leaving ordinary/social-preview access allowed. The home,
-archive, and story pages publish complete Open Graph and X card metadata with a
-same-origin 1200×630 branded poster; story shares retain their own headline and
-description. Every page also references the checked-in multi-resolution
-newspaper favicon at `site/assets/favicon.ico`. The homepage status line stays
-compact by showing the live unread count and a client-calculated relative generation
-time that refreshes every minute.
+Source policy entries have a canonical `publisher_id`. Multiple feeds from one
+publisher count as one outlet. Known AP/Reuters wire provenance is identified
+from explicit byline/origin text where available; unknown provenance is not
+assumed independent. Outlet counts measure coverage, not corroboration.
+
+A title at least 60% visible for **one second** still counts as read, intentionally
+supporting headline skimming. Read markers persist for three days; cards stay in
+place during a scan. Mark read applies to displayed cards, excluding collapsed
+coverage. Meaningful new facts or corrections increment a story's revision and
+can return in New with a short change summary. Rewording, extra citations and
+regeneration alone do not increment it. The optional private-link sync protocol
+also synchronizes these revision identities without changing its endpoints.
+
+Each revision has an immutable publication-order value. Revision 1 retains the
+legacy story ID and original creation order; later revisions use a deterministic
+opaque ID and their first revision-publication time. This keeps existing read
+watermarks compatible without letting an old read suppress a newly published
+revision. Disconnecting sync preserves local history.
+
+Generated pages remain static, cacheable, noindex, and protected by same-origin
+CSP. Fingerprinted CSS/JavaScript retain their one-year cache policy; pages retain
+the existing 10-minute policy. Story timestamps refresh in the browser alongside
+the site's build timestamp. Social previews and the newspaper favicon remain.
+
+### Editorial Quality Evaluation
+
+The synthetic fixtures in `tests/fixtures/editorial-evaluation.json` cover
+unsupported numeric claims, rumor attribution, research limitations, competing
+claims, vendor performance claims, and event-boundary regressions. Generate a
+private report for human review using the configured full-Flash model chain:
+
+```bash
+./.venv/bin/python scripts/evaluate-editorial.py --verbose
+```
+
+Reports default to ignored `data/evaluations/editorial.json`. Use `--output PATH`
+to override or `--dry-run` to list fixtures without network calls. Automatic
+validation is not a human quality score; the report leaves human judgments blank.
+See [docs/editorial-evaluation.md](docs/editorial-evaluation.md) for the rubric.
+
+Aggregation now checks incoming attachments to existing events, reserves merges
+for the full-Flash deduplication review, and reviews up to
+`aggregation.coherence_reviews_per_run` existing clusters per invocation (default
+10). Coherence decisions are cached against exact article membership and prompt
+version. High-confidence complete partitions can split contaminated clusters,
+retaining the original event ID for its original anchor. Published headlines
+also participate in duplicate discovery so stale event slugs cannot hide obvious
+reader-facing duplicates. Historical repair is incremental; a presentation-only
+build does not regenerate old editorial artifacts.
 
 ### Anonymous Read-History Sync
 
@@ -300,7 +316,7 @@ storage, transported in the `Authorization` header, and persisted on the origin
 only as a SHA-256 hash. Responses are `no-store`; requests require an allowed
 same-origin `Origin` and JSON content type. The server stores only story IDs,
 millisecond read timestamps, immutable first-publication order values for
-compactable IDs, a read-prefix watermark, and a monotonic group revision.
+compactable story/revision IDs, a read-prefix watermark, and a monotonic group revision.
 Matching revisions return a small response without the complete state.
 
 Default containment limits are 2,000 read IDs per group, 2,000 active groups,
@@ -367,7 +383,7 @@ crontab -l | grep news-tldr
   `default_category`, category/content hints, and fetch overrides. Scraper
   sources must use a module inside `pipeline.scrapers`.
 - **Source policy**: Add the same `source_id` to `config/source-policy.json`
-  with `bias_label`, `reliability`, `paywall`, and an explanatory note. Feed
+  with `publisher_id`, `bias_label`, `reliability`, `paywall`, and an explanatory note. Feed
   and policy ID sets must remain exactly symmetric; `validate-data` enforces it.
 - **Categories**: Add a sanitized `id`, display `name`, `description`, and
   unique `sort_order` to `config/categories.json`. Add a concise `short_name`

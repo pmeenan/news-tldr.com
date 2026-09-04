@@ -282,8 +282,9 @@ def test_run_completed_pipeline_runs_through_presentation(monkeypatch):
     }
 
 
+@pytest.mark.parametrize("validation_rejection", [False, True])
 def test_run_completed_pipeline_defers_new_work_while_editorial_backlog_remains(
-    monkeypatch,
+    monkeypatch, validation_rejection,
 ):
     calls = []
 
@@ -297,7 +298,12 @@ def test_run_completed_pipeline_defers_new_work_while_editorial_backlog_remains(
         def __exit__(self, *args):
             pass
 
-    backlog_counts = iter((12, 3))
+    backlog_counts = iter((12, 0 if validation_rejection else 3))
+    exclusions = []
+
+    def pending_count(**kwargs):
+        exclusions.append(kwargs.get("excluded_event_ids"))
+        return next(backlog_counts)
     collection_started = threading.Event()
 
     async def fake_collect_once(*, progress=None, acquire_lock=True):
@@ -308,12 +314,13 @@ def test_run_completed_pipeline_defers_new_work_while_editorial_backlog_remains(
     def fake_editorial_once(**kwargs):
         assert collection_started.wait(1)
         calls.append(("editorial", kwargs["force"]))
-        return {"completed": 9}
+        return {"completed": 9, **({"failed": 3, "rejected_event_ids": ["a", "b", "c"]}
+                                  if validation_rejection else {})}
 
     monkeypatch.setattr("pipeline.cli.PipelineLock", FakePipelineLock)
     monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
     monkeypatch.setattr("pipeline.cli._recover_stale_pipeline_runs", lambda: 0)
-    monkeypatch.setattr("pipeline.cli._pending_editorial_count", lambda: next(backlog_counts))
+    monkeypatch.setattr("pipeline.cli._pending_editorial_count", pending_count)
     monkeypatch.setattr(
         "pipeline.cli._pending_upstream_counts",
         lambda **kwargs: {"digest": 0, "aggregation": 0},
@@ -337,18 +344,27 @@ def test_run_completed_pipeline_defers_new_work_while_editorial_backlog_remains(
     )
     monkeypatch.setattr(
         "pipeline.cli.digest_once",
-        lambda **kwargs: pytest.fail("digestion must be deferred"),
+        lambda **kwargs: calls.append("digest") or {} if validation_rejection
+        else pytest.fail("digestion must be deferred"),
     )
     monkeypatch.setattr(
         "pipeline.cli.aggregate_once",
-        lambda **kwargs: pytest.fail("aggregation must be deferred"),
+        lambda **kwargs: calls.append("aggregate") or {} if validation_rejection
+        else pytest.fail("aggregation must be deferred"),
     )
 
     result = run_completed_pipeline(progress=lambda _message: None)
 
-    assert calls == ["maintenance", "collect", ("editorial", False), "presentation"]
-    assert result["backlog_blocked"] is True
-    assert result["pending_editorial"] == 3
+    initial_calls = ["maintenance", "collect", ("editorial", False), "presentation"]
+    if validation_rejection:
+        assert calls == initial_calls + ["digest", "aggregate", ("editorial", False), "presentation"]
+        assert not result.get("backlog_blocked")
+        assert result["stages"]["backlog_editorial"]["failed"] == 3
+        assert exclusions == [None, ["a", "b", "c"]]
+    else:
+        assert calls == initial_calls
+        assert result["backlog_blocked"] is True
+        assert result["pending_editorial"] == 3
     assert result["stages"]["collect"] == {"feeds_seen": 1}
 
 

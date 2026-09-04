@@ -59,3 +59,11 @@ artifacts:
 ./.venv/bin/python -m pipeline.cli present --verbose --build-only
 ./.venv/bin/python -m pipeline.cli validate-data --verbose
 ```
+
+## Editorial contracts
+
+- Do not publish private `_evidence` passages. Public claim IDs map only to source IDs.
+- Unknown citation IDs and oversized summary fields fail validation; never silently discard a bad citation or truncate a qualification.
+- Read identity belongs to a meaningful story revision, not every rendering timestamp. Keep the one-second headline-read rule.
+- Publisher IDs represent outlets, not proof of independent reporting. Do not relabel unknown provenance as independent.
+- New evaluation output belongs under ignored `data/evaluations/`; keep synthetic fixtures and the human-review rubric in source control.

@@ -467,355 +467,175 @@ Event `status` values:
 
 ## Stage 3: Editorial
 
-Inputs:
+Editorial selects changed active/stale events using `last_editorial_at` and
+`events.updated_at`. All article retrieval requires `is_filtered = 0`.
 
-- Event files with updated article lists (events that gained new articles since last editorial run)
-- Source article JSON files for those events
-- `config/source-policy.json` for bias/reliability metadata
+### Evidence, drafting, and verification
 
-Responsibilities:
+`pipeline/editorial.py` and `pipeline/evidence.py` implement three full-Flash
+operations per ordinary story, using the existing ordered 3.7 → 3.6 → 3.5 chain:
 
-- Generate one neutral TL;DR story per event.
-- Include the important facts, relevant uncertainty, and known missing context.
-- Attribute claims to source articles without copying article prose.
-- For clearly political events where sources frame the story in divergent ways, extract left-perspective and right-perspective summaries with source attribution.
-- Rank stories by importance using the Stage 2 newsworthiness scores plus freshness, source quality, source count, and editorial judgment.
-- Write or update story JSON files.
-- Update `data/published/active-stories.json` with eligible active and stale stories, ranks, and homepage curation.
+1. **Evidence (`editorial-evidence-v1`)**: choose essential claims, attribution,
+   contradictions, numbers, dates and qualifications. Every claim carries one
+   or more short verbatim passages and an offered article ID. Code checks each
+   passage against the supplied article text after whitespace normalization.
+   Invalid extraction receives one bounded retry with validation feedback.
+2. **Draft (`editorial-v3`, or `editorial-framing-v2`)**: generate a sentence-case
+   headline, dek, 2–4 TL;DR bullets, exactly two compact briefing bullets, cited
+   key facts and uncertainties. Headline, dek and both summary forms link to
+   ledger claim IDs. Citations containing any unknown source ID are rejected.
+   The draft schema restricts article citations to reports present in the ledger.
+   Overlong fields fail validation rather than being silently truncated.
+3. **Verification (`editorial-verification-v1`)**: a separate model call checks
+   the actual quoted evidence against every draft assertion and qualification.
+   It also compares with the previous story to distinguish substantive changes
+   from rewording or added citations. A rejected draft gets one repair and
+   verification attempt. Failure retains the previous artifact and checkpoint.
+   Validation rejections remain pending and unhealthy, but do not block unrelated
+   downstream news. Transport/capacity failures still gate backlog processing.
 
-### LLM Integration for Editorial
+These are automated checks, not a guarantee of truth or independence. The
+quoted passage can itself report an allegation or contain a publisher error;
+that distinction must survive summarization. A separate human evaluation rubric
+is maintained in [editorial-evaluation.md](editorial-evaluation.md).
 
-Editorial LLM calls are **per-event**. Each call receives:
+Input selection gives useful excerpts to relevant, diverse reports instead of
+uniformly dividing the budget over arbitrarily large clusters. Candidates rank
+by overlap with the event anchor; one report per publisher is preferred before
+additional same-publisher reports. Up to eight reports fit within the configured
+per-article/event character limits (production 12,000/40,000 characters, aiming
+for at least 3,000 per selected report). Digests remain contextual aids, not
+substitutes for quoted evidence verification. The existing compact draft retry
+uses the same verified ledger, with `editorial-v3-compact` or
+`editorial-framing-v2-compact` provenance.
 
-- The event metadata (title, category, article count).
-- Full text (or substantial excerpts) of all source articles for that event.
-- Source policy metadata (bias labels, reliability) for each source.
-- Instructions for neutral summarization and political framing extraction.
+Story files retain a private `_evidence` ledger for audit. Public JSON excludes
+underscore-prefixed fields and exposes only claim-to-source mappings, summaries,
+source links, verification version/status and revision metadata. Only reports
+represented in the ledger enter the new story's public source list. All completed
+model operations, including rejected drafts, retain per-operation model/prompt
+usage records. Files are written atomically before the editorial checkpoint moves.
 
-Each event is a separate LLM call because the model needs the full article context to produce accurate summaries and detect framing. Grouping multiple events into one call would exceed context limits and reduce quality.
+### Event boundaries and publisher identity
 
-### Editorial Rules
+Aggregation v7 requires one specific shared real-world development. The bulk
+model is no longer told that editorial will separate broad topics later.
+`event-membership-v1` reviews proposed new attachments to existing events before
+assignment. A rejected attachment becomes a separate event for later deduplication.
+Existing events cannot merge implicitly because their assigned articles appeared
+in one sliding-window group; destructive merges require the full-Flash reviewer.
 
-- Prefer "what happened, who is affected, what changed, what remains uncertain."
-- Do not amplify unsupported claims because they are repeated.
-- Do not infer motive unless sources provide evidence.
-- Do not flatten genuine disagreement into false certainty.
-- Opinion-only pieces can be cited as examples of reaction/framing but should not drive the story's factual claims.
+`pipeline/coherence.py` reviews a bounded set of existing active/stale clusters
+within the 72-hour window. The budget is `coherence_reviews_per_run` (default 10).
+The cache signature includes the coherence prompt version and ordered article
+membership. A valid partition must cover every unfiltered article exactly once,
+with confidence at least 0.90; Lite cannot authorize it. SQLite replaces all
+memberships in one transaction. The original event ID follows its original
+anchor, and split events receive deterministic IDs and recomputed scores. Split
+freshness follows the latest constituent publication time, so an old angle does
+not become today's news merely because its membership was repaired. Event JSON
+is then written. The prior original story is retained privately with
+`_pending_coherence` set and excluded from the active index until regenerated.
+Its creation/revision metadata remains available for read-history continuity.
+SQLite remains authoritative if interruption requires maintenance reconciliation.
+Failures retain recoverable state and are logged with incremental progress.
 
-### Political Framing
+Deduplication v3 includes current published headlines in candidate discovery and
+rejects a merge when the complete constituent reporting contains unrelated events.
+Broader topics remain presentation sections, not oversized event clusters.
 
-For events in categories likely to have partisan framing (primarily `politics`, `us`, and sometimes `world`), the editorial stage extracts divergent perspectives:
+`config/source-policy.json` maps feed IDs to canonical `publisher_id` values.
+Coverage and importance use publisher identity rather than feed display names.
+Explicit AP/Reuters wire attribution is retained as `reporting_origin` where
+recognized; missing provenance stays unknown. `source_count` means publisher
+count. Neither that count nor separate article URLs establish independent
+corroboration. The index also exposes known origins and provenance completeness.
 
-- The TL;DR and key facts remain **neutral**.
-- A `political_framing` section surfaces clearly left-leaning and clearly right-leaning source perspectives with brief summaries of how each side frames the story.
-- Sources are attributed to each perspective based on `config/source-policy.json` labels and article-level framing analysis.
-- This section is **only present** when meaningful divergence exists. Do not force framing onto non-political stories or stories where sources largely agree.
+### Revisions and read identity
 
-The goal is transparency: readers see the neutral summary AND can optionally see how partisan outlets are spinning the story.
+Stories have `revision`, `revision_at`, and `change_summary`. A first story starts
+at revision 1. The verifier increments the revision only for substantive new
+facts, resolved uncertainty or corrections. A cosmetic regeneration preserves
+revision/time/change summary. Existing story `created_at` is always preserved.
 
-### Published Story JSON Sketch
+Revision 1 uses the legacy story ID and original creation order. Later revisions
+use `r` plus SHA-256 of `story_id:revision` as their read ID, paired with the first
+publication time of that revision. The article's public route remains stable.
+This separate, immutable identity lets existing sync watermarks and sparse read
+maps coexist with new developments. An earlier story read cannot cover a revision
+published after that read watermark. A new revision may show “Updated since you
+read” when prior history is available, otherwise “New development.”
 
-```json
-{
-  "story_id": "2026-05-24-iran-talks-resume",
-  "event_id": "2026-05-24-iran-talks-resume",
-  "category": "world",
-  "thread": "iran-conflict-2026",
-  "headline": "Talks resume after overnight strikes",
-  "dek": "Negotiators returned to talks as officials reported new strikes and disputed casualty counts.",
-  "tldr": [
-    "Negotiators resumed talks on Sunday after overnight strikes.",
-    "Officials gave different accounts of the damage and casualties.",
-    "The next scheduled diplomatic step is expected later this week."
-  ],
-  "key_facts": [
-    {
-      "text": "Talks resumed on May 24, 2026.",
-      "source_article_ids": ["sha256-abc123"]
-    }
-  ],
-  "uncertainties": [
-    {
-      "text": "Casualty figures remain disputed across sources.",
-      "source_article_ids": ["sha256-abc123", "sha256-def456"]
-    }
-  ],
-  "political_framing": null,
-  "sources": [
-    {
-      "article_id": "sha256-abc123",
-      "source_name": "Reuters",
-      "headline": "Talks restart after strikes",
-      "url": "https://reuters.com/..."
-    }
-  ],
-  "importance": {
-    "score": 0.82,
-    "signals": ["multiple_sources", "fresh", "international_impact"]
-  },
-  "created_at": "2026-05-24T15:00:00Z",
-  "updated_at": "2026-05-24T19:00:00Z",
-  "llm_metadata": {
-    "model": "model-name",
-    "prompt_version": "editorial-v1",
-    "generated_at": "2026-05-24T19:00:00Z"
-  }
-}
-```
+### Political framing and ranking
 
-When political framing is present:
+Mixed left/right source-policy coverage still gates optional political framing.
+The prompt requires actual, attributable differences in article content and
+rejects invented symmetry; the evidence verifier checks the resulting text.
+Source labels do not prove truth or establish equal support for competing claims.
 
-```json
-"political_framing": {
-  "summary": "Coverage diverges on whether the strikes were proportionate.",
-  "left_perspective": {
-    "summary": "Coverage emphasizes civilian casualties and questions the military rationale.",
-    "source_article_ids": ["sha256-ghi789"]
-  },
-  "right_perspective": {
-    "summary": "Coverage emphasizes security threats and frames the strikes as a necessary response.",
-    "source_article_ids": ["sha256-jkl012"]
-  }
-}
-```
+Importance retains its existing weighting of global/category impact, editorial
+judgment, freshness and source quality, but publisher counts replace feed counts.
+The active index contains active/stale stories, presentation ranks and homepage
+curation. Global and category views keep their respective rank order; news
+freshness remains based on event updates rather than forced editorial timestamps.
 
-### Active Stories Index
+### Story contract additions
 
-`data/published/active-stories.json` is a lightweight index regenerated each pipeline run:
+The existing headline/dek/TL;DR/facts/uncertainties/source contract remains readable.
+New artifacts additionally contain:
 
-```json
-{
-  "generated_at": "2026-05-24T19:00:00Z",
-  "stories": [
-    {
-      "story_id": "2026-05-24-iran-talks-resume",
-      "category": "world",
-      "headline": "Talks resume after overnight strikes",
-      "importance_score": 0.82,
-      "source_count": 5,
-      "event_created_at": "2026-05-24T12:45:00Z",
-      "event_updated_at": "2026-05-24T18:30:00Z",
-      "created_at": "2026-05-24T15:00:00Z",
-      "updated_at": "2026-05-24T19:00:00Z"
-    }
-  ]
-}
-```
+- `briefing`: exactly two deliberately composed, complementary bullets.
+- `claim_links`: ledger claim IDs for headline, dek, TL;DR and briefing.
+- `claim_sources`: claim IDs mapped to source article IDs, without private quotes.
+- `_evidence`: private quoted support; excluded from public API output.
+- `evidence_verification`: verifier version and approved status.
+- `revision`, `revision_at`, `change_summary`: meaningful-update history.
+- Source `source_id`, `publisher_id`, and optional `reporting_origin`.
 
-The presentation layer reads this index to decide which stories to render and how to order them, then reads individual story JSON files for full content. The presentation layer owns the time window (e.g., "last 24 hours", "last 48 hours") and filtering logic. Rolling news windows use `event_updated_at`; story `created_at`/`updated_at` describe editorial artifact generation and must not make an old event appear newly reported after a forced regeneration.
-
-The index also carries a validated `curation` object generated once per editorial
-run from the rolling-window story headlines, deks, ranks, source counts, and
-event ages. Prompt version `homepage-curation-v5` selects up to 12 distinct Top
-News story IDs from a compact global high-rank candidate set, favoring
-consequential developments from the last 12–24 hours. Topic grouping runs once
-over the 100 highest category-ranked candidates per category, so a large 72-hour
-corpus cannot create repeated headings across arbitrary chunks. It prefers
-coherent sections of at least three stories and may broaden an overly narrow
-label to a meaningful regional or subject desk. Those results are merged into
-one ordered list of specific multi-story topic sections. A story may
-belong to at most one topic section; unmatched stories are intentionally left
-for the presentation layer's per-category remainder sections. The curation artifact
-stores model/prompt/timestamp provenance and LLM usage is recorded under
-`homepage_curation`. A failed category chunk is recorded and omitted without
-discarding successful chunks; a pass-wide failure falls back to the ranked Top
-News list with no forced topic groups. Editorial generation and publishing
-therefore remain available during model failures.
-
-The index also carries presentation ranks refreshed whenever Editorial rebuilds
-the index. `homepage_rank_score` weights global impact most heavily, while
-`category_rank_score` weights the event's category impact most heavily. Both
-reserve 20% for freshness derived from `event_updated_at` and include editorial
-judgment plus source quality/coverage. The All view is emitted in homepage-rank
-order; the client re-sorts a selected category by its category rank. This keeps
-forced story regeneration timestamps from affecting news freshness and lets a
-high-impact vertical story lead its own section without necessarily leading the
-general briefing.
-
-### Stage 3 Implementation
-
-The editorial implementation lives in `pipeline/editorial.py` and is exposed by
-`./.venv/bin/python -m pipeline.cli editorial`. Normal runs select active or stale
-events whose `updated_at` is newer than `last_editorial_at`; `--force` regenerates
-unchanged stories, `--limit` bounds an evaluation batch, and repeatable
-`--event-id` arguments select exact events. The top-level `run` command invokes
-editorial after aggregation while retaining the shared pipeline lock.
-
-Each changed event gets one editorial generation operation using the ordered
-`gemini-3.7-flash` → `gemini-3.6-flash` → `gemini-3.5-flash` fallback chain and
-low thinking. General stories use `editorial-v2`; politically eligible
-mixed-source events use `editorial-framing-v1`. Safety-sensitive empty responses
-may trigger the compact-context variant of the same full-Flash chain. Article
-context is bounded per article and per event by `config/pipeline.json`, while all
-source records remain available for citation. The article query always requires
-`is_filtered = 0`. Generated key facts and uncertainties must cite at least one
-article ID offered in that operation; unknown IDs fail validation rather than
-reaching published JSON.
-
-Political framing is eligible only for `politics`, `us`, or `world` events that
-contain both a left/center-left and a right/center-right source according to
-`config/source-policy.json`. Those calls must return an explicit framing-presence
-decision; meaningful divergence is still required and the section may be omitted.
-Deterministic validation restricts each
-perspective's citations to the matching source-policy side.
-
-Importance is an auditable weighted score combining Stage 2 global (50%) and
-category (15%) newsworthiness, editorial judgment (15%), freshness (10%), source
-quality (5%), and distinct source count (5%). Components and audit signals are
-stored with the score. Story files are written atomically before the event's
-`last_editorial_at` checkpoint advances. Per-event failures are logged and remain
-eligible for the next incremental run. The active index includes story artifacts
-for both active and stale events, ranked by importance; archived events are omitted.
+Older artifacts remain supported and are not represented as having passed the
+new verification process. A build alone does not perform an editorial migration.
 
 ## Stage 4: Presentation
 
-Inputs:
+`pipeline/present.py` remains a dependency-free static renderer. It escapes all
+untrusted text, restricts source URLs to HTTP/HTTPS, validates story paths and
+builds into a temporary sibling before replacing ignored `dist/`.
 
-- `data/published/active-stories.json`
-- Individual story JSON files
-- `config/categories.json`
+The main briefing contains at most 12 stories. The cohort is selected for the
+current category/coverage preference **before** read filtering, preferring
+curated Top News then rank. Reading a card cannot cause a replacement to enter
+that briefing. A clear stopping message precedes optional **Explore more
+coverage**, containing topic groups and category remainders. Mobile opens Top
+News by default; deeper topic sections remain collapsible.
 
-Responsibilities:
+Cards use smaller headlines and two complementary bullets, without a redundant
+dek. New artifacts supply `briefing`; older artifacts fall back to the first
+TL;DR item plus their first uncertainty, or two TL;DR items when no uncertainty
+exists. Source links jump directly to `#sources` on the story page. Story pages
+retain full TL;DR, facts, uncertainties, optional framing, and source reports;
+new TL;DR bullets have claim-backed source links. `/methodology/` explains the
+process, source-count limitations, read behavior and public correction reporting.
 
-- Build static pages from story JSON with the standard-library renderer in `pipeline/present.py`. All JSON strings are treated as untrusted and HTML-escaped; external links are restricted to HTTP/HTTPS URLs and raw upstream HTML is never rendered.
-- The main page shows eligible active/stale stories in a **rolling time window**, editorially ranked by importance. Category tabs (one per category from `config/categories.json`, plus an "All" default) filter the same ranked list client-side — they are not separate pages with independent layouts.
-- Category navigation uses the optional concise `short_name` from category
-  config so all sections fit in one desktop row; full names remain in story
-  labels and metadata. The category row and Latest Briefing controls share one
-  sticky toolbar so their relative height needs no fixed positioning offset.
-  Changing the selected category scrolls to the page top and respects the
-  browser's reduced-motion preference.
-- A device-local New/All control supports repeat reading. An Intersection
-  Observer records a story after its title remains at least 60% visible for one
-  second. Local storage retains those story IDs for three days and cards show a
-  subtle read indicator. New is the default, and the selected New/All preference
-  is global across visits and category sections. Cards remain in place while the
-  reader scans the current view; category and New/All changes re-apply the live
-  read set so newly read cards disappear from the next New view. A header action
-  marks every currently visible card read. The masthead count is always the live
-  unread total for the selected category and source-coverage filters, independent
-  of New/All, and decrements immediately as titles become read. All always restores the complete
-  rolling window. Reading history remains device-local unless the reader
-  explicitly enables anonymous synchronization from the masthead control.
-- Anonymous sync uses a shareable fragment capability (`#sync=v1.<token>`).
-  The browser stores the 256-bit token locally, immediately removes imported
-  fragments from the visible URL, handles both initial-load and same-document
-  `hashchange` navigation, and uploads the newest 2,000 retained reads. Each card
-  carries a stable order composed from the story artifact's immutable first-publication
-  timestamp and story ID. A contiguous read prefix within the retention window is
-  collapsed into one `read_before` watermark; only out-of-order reads after that
-  boundary remain individual ID/timestamp entries. Initial page display waits for
-  one bounded revision check and renders once with merged state only when the
-  server revision differs from the revision saved by this browser.
-  Later writes are debounced by four seconds and ignore the returned union, so
-  they never rerender the current view. Focus, tab, online, and cross-tab storage
-  events do not pull; a later page visit obtains the latest shared state.
-  Server and device state form a grow-only union within the three-day retention
-  window; the newest timestamp wins. Disconnecting clears only that browser's
-  token, while the separate delete action removes shared server state.
-- An independent device-local Top/All source-coverage control composes with the
-  category and New/All filters. Top is the default and requires at least two
-  distinct sources according to the active story index's `source_count`; All
-  restores single-source stories without changing their editorial rank. The
-  preference uses `newsTldrCoverageModeV1`, remains global across category views
-  and later visits, and appears in the URL only as the non-default
-  `coverage=all` state.
-- The compact homepage status line combines the live unread count with a semantic
-  build-time `<time>` element. Same-origin JavaScript converts its ISO timestamp
-  to the card-style `Updated Xm/h/d ago` label and refreshes it once per minute,
-  so a static page still communicates its current age without a server runtime.
-- The homepage renders the curated Top News list first in the All view, then
-  multi-story topic sections, then per-category remainder sections such as More
-  World News and More Science. Top News cards are removed
-  from their repeated topic position in All but keep their topic assignment in
-  focused category views. Empty sections disappear after category/read filtering;
-  a topic with fewer than two remaining visible cards is dissolved into its
-  category remainder instead of rendering as a singleton. Topic groups are
-  ordered by the strongest remaining story rank for the selected view. At mobile widths, all rendered sections begin collapsed behind
-  accessible heading buttons with story counts. Readers can toggle one section or
-  use the view-level Expand All/Collapse All control; desktop sections remain expanded.
-  Curated Top News stories remain in Top News when a focused category is selected.
-  Other topic sections are ordered by the strongest story-level coverage signal
-  updated within 24 hours. That signal combines logarithmic independent-source
-  breadth, the story's share of the active 72-hour source pool for its category,
-  and a half-weight capped credit for up to two additional angles per publisher;
-  a cubic transform of the existing editorial display rank supplies a bounded
-  judgment allowance that stays small for routine coverage and becomes material
-  only for stories already assessed as highly consequential.
-  This prevents feed-rich categories from winning on raw counts alone while still
-  distinguishing broad independent coverage from repeated same-site follow-ups.
-- Cards use restrained tinting for visual separation. The All view assigns a
-  muted category-family tint: World/U.S. use browns, Politics/Business olives,
-  Technology/Science/Environment grays, Automotive blue, Health purple, and
-  Entertainment orange. Tint depth depends only on distinct source count, so a
-  one-source World story stays effectively white and better-supported coverage
-  moves toward tan. Lead/secondary layout does not alter color. Focused
-  category views use the original neutral white/tan scale, retaining only the
-  small category kicker accent.
-- Build individual story pages with TL;DR, key facts, uncertainties, source links, and political framing sections.
-- Build an active-story archive plus sitemap, robots, 404, and JSON API files.
-  Every HTML page carries `noindex,follow,noarchive` metadata. `robots.txt`
-  disallows major search-index crawlers but leaves the wildcard policy allowed
-  so social preview agents can retrieve metadata and images. Home, archive,
-  404, and story pages include Open Graph/X metadata backed by the checked-in
-  1200×630 `site/assets/social-card.png`; story pages use their own headline and
-  dek and declare `og:type=article`. All generated pages reference the checked-in
-  `site/assets/favicon.ico`, which contains 16, 32, 48, and 64 px versions of a
-  simple newspaper mark. Historical pages for archived events remain a future
-  enhancement.
-- Render source links with paywall indicators and uncertainty notes.
-- Output fully static, cacheable HTML/CSS/JSON; the optional reader-sync API is
-  isolated from this presentation build and its document root. CSS
-  and JavaScript use the first 16 hexadecimal characters of their SHA-256 content
-  hash in the filename, so unchanged presentation assets keep a stable URL while
-  changed content produces a new URL.
-- Apply a strict Content Security Policy. CSS and JavaScript are generated locally and loaded from the same origin, so there are no external assets requiring Subresource Integrity.
+The existing warm palette, category-family tints, serif typography, same-origin
+assets, noindex/social metadata and favicon remain. Larger controls and complete
+labels improve mobile operation. The sticky toolbar contains category, New/All,
+All/2+ outlets, and Mark read controls. New browsers default to all outlets so
+consequential original reporting is not automatically hidden. Saved preferences
+remain respected. `coverage=top` explicitly requires two publishers; the legacy
+`coverage=all` URL remains accepted. The masthead counts unread briefing items.
+Both site and individual story relative timestamps refresh each minute.
 
-### Stage 4 Implementation
+A title at least 60% visible for **one second** still counts as read, intentionally
+supporting headline skimming. Cards remain stable during the scan; filters apply
+read history on the next render. Mark read affects currently displayed cards,
+excluding collapsed coverage. Optional sync keeps its existing three-day state,
+private fragment link, one bounded initial pull and silent background writes.
 
-`./.venv/bin/python -m pipeline.cli present` builds the presentation and publishes
-it by default. `present --build-only` writes only `dist/`; `--publish-dir` accepts
-an absolute override for controlled deployments. The top-level `pipeline.cli run`
-invokes presentation after a successful editorial stage while retaining the
-shared pipeline lock. With `presentation.publish_enabled: true`, that step also
-publishes automatically; `run --no-publish` is the explicit build-only escape
-hatch.
-
-Presentation settings live in `config/pipeline.json`:
-
-- `site_url`: canonical public origin, currently `https://news-tldr.com`.
-- `rolling_window_hours`: homepage event freshness window, currently 72 hours.
-- `publish_enabled`: whether ordinary top-level runs deploy after building.
-- `reader_sync_enabled`: whether the homepage exposes anonymous sync; keep false
-  until the origin API, FPM pool, cleanup cron, and Nginx route are installed.
-- `publish_dir`: absolute production document root, currently `/var/www/news-tldr.com`.
-
-The renderer validates the active story index, story IDs, story/category parity,
-and source URLs before writing into a temporary sibling directory. It replaces
-`dist/` only after the complete build succeeds. The production deploy rejects
-relative, broad, symlinked, or source-equal destinations and rejects symlinks or
-path traversal in the generated tree. It copies generated assets and story pages
-before `index.html`, then records the exact managed path set in
-`.news-tldr-managed.json`. Later deploys remove ordinary stale paths from that
-manifest and preserve unknown server-managed files. Previous content-hashed CSS
-and JavaScript remain managed and available because HTML or browser caches may
-legitimately request them during their one-year cache lifetime; the legacy
-unversioned paths are also retained for cached HTML during the initial migration.
-Public files are written with mode `0644`.
-
-The checked-in Nginx virtual host applies `expires 10m` to `.html` and `.htm`
-responses. Nginx emits `Cache-Control: max-age=600` and a matching `Expires`
-header, giving browsers and the configured Cloudflare HTML cache rule a bounded
-10-minute freshness window. The hourly build remains the source of content;
-after the freshness window, caches revalidate against Nginx's `Last-Modified`
-and `ETag` validators. Hashed `site.<fingerprint>.css` and
-`site.<fingerprint>.js` responses receive a one-year `Expires`/`max-age` policy
-plus `immutable`; a content change creates a new URL instead of invalidating an
-existing cached response.
-
-The initial production publish on August 24, 2026 generated and deployed 874
-public files for 433 stories. The homepage, a representative story page, and
-`/api/active-stories.json` all returned HTTP 200 over HTTPS.
+Publishing, CSP, noindex/social metadata and cache contracts are unchanged:
+HTML has a 10-minute freshness lifetime; fingerprinted CSS/JavaScript have one
+year immutable caching. Deployment preserves unknown files and old asset paths,
+copies assets/pages before replacing `index.html`, and removes only stale managed
+files. Presentation v23 adds the methodology route to the managed build/sitemap.
 
 ## Anonymous Reader-Sync Origin
 
@@ -852,7 +672,7 @@ returns only revision/status metadata rather than the complete state. This is
 idempotent and avoids a fetch-then-write race. Legacy flat ID/timestamp maps remain
 readable and are normalized into the versioned envelope when changed. The client
 applies returned state only during initial/link import; ordinary background writes
-use the same atomic endpoint but leave the current display unchanged. There is intentionally no unread operation;
+use the same atomic endpoint but leave the current display unchanged. There is intentionally no manual unread operation;
 adding one would require tombstones or another conflict model.
 
 ### Containment and Privacy

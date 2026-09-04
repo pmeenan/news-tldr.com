@@ -572,47 +572,74 @@ class StateDB:
 
     def upsert_event(self, event: dict[str, Any], event_path: Path) -> None:
         with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO events (
-                  event_id, title, category, thread, status, created_at, updated_at,
-                  event_path, keywords_json, entities_json, article_count, confidence,
-                  newsworthiness_global, newsworthiness_category, newsworthiness_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(event_id) DO UPDATE SET
-                  title=excluded.title,
-                  category=excluded.category,
-                  thread=excluded.thread,
-                  status=excluded.status,
-                  updated_at=excluded.updated_at,
-                  event_path=excluded.event_path,
-                  keywords_json=excluded.keywords_json,
-                  entities_json=excluded.entities_json,
-                  article_count=excluded.article_count,
-                  confidence=excluded.confidence,
-                  newsworthiness_global=excluded.newsworthiness_global,
-                  newsworthiness_category=excluded.newsworthiness_category,
-                  newsworthiness_json=excluded.newsworthiness_json
-                """,
-                (
-                    event["event_id"],
-                    event["title"],
-                    event["category"],
-                    event.get("thread"),
-                    event.get("status", "active"),
-                    event["created_at"],
-                    event["updated_at"],
-                    _relative_to_project(event_path),
-                    json.dumps(event.get("keywords", []), sort_keys=True),
-                    json.dumps(event.get("entities", []), sort_keys=True),
-                    int(event.get("article_count", 0)),
-                    event.get("confidence"),
-                    (event.get("newsworthiness") or {}).get("global"),
-                    (event.get("newsworthiness") or {}).get("category"),
-                    json.dumps(event.get("newsworthiness", {}), sort_keys=True),
-                ),
+            self._upsert_event(event, event_path)
+
+    def _upsert_event(self, event: dict[str, Any], event_path: Path) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO events (
+              event_id, title, category, thread, status, created_at, updated_at,
+              event_path, keywords_json, entities_json, article_count, confidence,
+              newsworthiness_global, newsworthiness_category, newsworthiness_json
             )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id) DO UPDATE SET
+              title=excluded.title,
+              category=excluded.category,
+              thread=excluded.thread,
+              status=excluded.status,
+              updated_at=excluded.updated_at,
+              event_path=excluded.event_path,
+              keywords_json=excluded.keywords_json,
+              entities_json=excluded.entities_json,
+              article_count=excluded.article_count,
+              confidence=excluded.confidence,
+              newsworthiness_global=excluded.newsworthiness_global,
+              newsworthiness_category=excluded.newsworthiness_category,
+              newsworthiness_json=excluded.newsworthiness_json
+            """,
+            (
+                event["event_id"],
+                event["title"],
+                event["category"],
+                event.get("thread"),
+                event.get("status", "active"),
+                event["created_at"],
+                event["updated_at"],
+                _relative_to_project(event_path),
+                json.dumps(event.get("keywords", []), sort_keys=True),
+                json.dumps(event.get("entities", []), sort_keys=True),
+                int(event.get("article_count", 0)),
+                event.get("confidence"),
+                (event.get("newsworthiness") or {}).get("global"),
+                (event.get("newsworthiness") or {}).get("category"),
+                json.dumps(event.get("newsworthiness", {}), sort_keys=True),
+            ),
+        )
+
+    def replace_event_partition(self, event_id: str, replacements: list[tuple[dict[str, Any], Path]]) -> None:
+        with self.conn:
+            current = {r[0] for r in self.conn.execute(
+                "SELECT article_id FROM articles WHERE event_id = ? AND is_filtered = 0", (event_id,),
+            )}
+            targets = [event["event_id"] for event, _ in replacements]
+            if len(targets) != len(set(targets)) or any(
+                target != event_id and self.event_exists(target) for target in targets
+            ):
+                raise ValueError("event partition targets must be unique new events")
+            assigned = [aid for event, _ in replacements for aid in event["article_ids"]]
+            if len(assigned) != len(set(assigned)) or set(assigned) != current:
+                raise ValueError("event partition must preserve all unfiltered articles exactly once")
+            if event_id not in {event["event_id"] for event, _ in replacements}:
+                raise ValueError("event partition must retain the original event ID")
+            for event, path in replacements:
+                self._upsert_event(event, path)
+                self.conn.execute("UPDATE events SET last_editorial_at = NULL WHERE event_id = ?", (event["event_id"],))
+                self.conn.executemany(
+                    "UPDATE articles SET event_id = ?, aggregation_status = 'assigned' "
+                    "WHERE article_id = ? AND event_id = ? AND is_filtered = 0",
+                    [(event["event_id"], aid, event_id) for aid in event["article_ids"]],
+                )
 
     def assign_articles_to_event(self, article_ids: list[str], event_id: str) -> int:
         if not article_ids:

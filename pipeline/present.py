@@ -28,10 +28,11 @@ from pipeline.paths import (
     SOCIAL_CARD_PATH,
     STORY_DIR,
 )
+from pipeline.sources import publisher_id
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v22"
+PRESENTATION_VERSION = "presentation-v23"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
@@ -143,7 +144,7 @@ a { color: inherit; }
 .reader-toolbar { position: sticky; top: 0; z-index: 20; background: var(--paper); }
 .reader-toolbar:not(:has(.edition)) { border-bottom: 1px solid var(--ink); }
 .category-nav { max-width: 1180px; margin: 0 auto; padding: .65rem 1.25rem; display: flex; justify-content: center; gap: .35rem; overflow: visible; }
-.category-nav button, .category-nav a { border: 1px solid var(--line); border-radius: 999px; background: transparent; padding: .43rem .62rem; white-space: nowrap; color: var(--muted); text-decoration: none; font: 700 .69rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .035em; cursor: pointer; }
+.category-nav button, .category-nav a { min-height: 2.5rem; display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; background: transparent; padding: .43rem .62rem; white-space: nowrap; color: var(--muted); text-decoration: none; font: 700 .69rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .035em; cursor: pointer; }
 .category-nav button:hover, .category-nav button[aria-pressed="true"], .category-nav a:hover { color: white; border-color: var(--ink); background: var(--ink); }
 main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 main[data-reader-pending] { position: relative; min-height: 14rem; }
@@ -160,12 +161,19 @@ main[data-reader-pending]::before { content: "Loading latest read status…"; po
 .filter-control { display: inline-flex; align-items: center; gap: .3rem; }
 .filter-label { color: var(--muted); font: 750 .58rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; }
 .view-switch { display: inline-flex; padding: .16rem; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.32); }
-.view-switch button { border: 0; border-radius: 999px; padding: .32rem .62rem; background: transparent; color: var(--muted); font: 750 .67rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .055em; cursor: pointer; }
+.view-switch button { min-height: 2.5rem; border: 0; border-radius: 999px; padding: .32rem .62rem; background: transparent; color: var(--muted); font: 750 .67rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .055em; cursor: pointer; }
 .view-switch button:hover { color: var(--ink); }
 .view-switch button[aria-pressed="true"] { color: white; background: var(--ink); }
-.mark-view-read { border: 1px solid var(--line); border-radius: 999px; padding: .42rem .65rem; background: transparent; color: var(--muted); font: 750 .67rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .035em; cursor: pointer; }
+.mark-view-read { min-height: 2.5rem; border: 1px solid var(--line); border-radius: 999px; padding: .42rem .65rem; background: transparent; color: var(--muted); font: 750 .67rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .035em; cursor: pointer; }
 .mark-view-read:hover { color: var(--ink); border-color: var(--ink); }
 .story-sections { padding-top: .25rem; }
+.briefing-finish { padding: 1.5rem 0; color: var(--muted); font: .9rem/1.5 system-ui, sans-serif; }
+.deeper-coverage > summary { cursor: pointer; padding: 1rem 0; border-block: 1px solid var(--line); font-weight: 700; }
+.story-update { border-left: 3px solid var(--accent); padding-left: .7rem; font: .85rem/1.5 system-ui, sans-serif; }
+.story-update[hidden] { display: none; }
+.story-meta a { text-underline-offset: 3px; }
+.source-explanation { color: var(--muted); font: .9rem/1.5 system-ui, sans-serif; }
+:focus-visible { outline: 2px solid var(--accent-dark); outline-offset: 3px; }
 .section-actions { display: none; }
 .section-actions[hidden] { display: none; }
 .toggle-sections { border: 0; border-bottom: 1px solid var(--line); padding: .35rem .1rem; background: transparent; color: var(--muted); font: 750 .68rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; cursor: pointer; }
@@ -212,8 +220,8 @@ main[data-reader-pending]::before { content: "Loading latest read status…"; po
 .category-automotive .kicker { color: var(--automotive); }
 .category-entertainment .kicker { color: var(--entertainment); }
 .kicker { margin: 0 0 .6rem; color: var(--accent-dark); font: 800 .7rem/1.2 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .11em; }
-.story-card h2 { margin: 0 0 .7rem; font-size: clamp(1.25rem, 2.4vw, 1.85rem); line-height: 1.08; letter-spacing: normal; }
-.story-card.lead h2 { font-size: clamp(2rem, 4.3vw, 3.6rem); }
+.story-card h2 { margin: 0 0 .7rem; font-size: clamp(1.3rem, 2vw, 1.6rem); line-height: 1.18; letter-spacing: normal; }
+.story-card.lead h2 { font-size: clamp(1.65rem, 3vw, 2.35rem); line-height: 1.15; }
 .story-card h2 a { text-decoration: none; }
 .story-card h2 a:hover { color: var(--accent-dark); }
 .dek { margin: 0 0 1rem; color: #3d4743; font-size: 1rem; line-height: 1.5; }
@@ -226,7 +234,7 @@ main[data-reader-pending]::before { content: "Loading latest read status…"; po
 .empty-state { padding: 4rem 1rem; text-align: center; color: var(--muted); }
 .story-page { max-width: 880px; }
 .story-page .back { display: inline-block; margin-bottom: 1.5rem; color: var(--muted); font: 700 .8rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .08em; }
-.story-page h1 { margin: .3rem 0 1rem; font-size: clamp(2.35rem, 7vw, 5.2rem); line-height: .98; letter-spacing: -.045em; }
+.story-page h1 { overflow-wrap: anywhere; margin: .3rem 0 1rem; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1.12; letter-spacing: -.045em; }
 .story-page .standfirst { margin: 0 0 1.2rem; color: #3d4743; font-size: clamp(1.15rem, 2vw, 1.45rem); line-height: 1.5; }
 .story-page section { margin-top: 2.4rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
 .story-page section h2 { margin: 0 0 1rem; font-size: .85rem; font-family: system-ui, sans-serif; text-transform: uppercase; letter-spacing: .12em; }
@@ -281,10 +289,16 @@ main[data-reader-pending]::before { content: "Loading latest read status…"; po
   .masthead, .category-nav { padding-inline: .85rem; }
   .story-card { padding: 1.25rem .4rem; }
   .edition { align-items: flex-start; }
-  .edition-heading { align-items: flex-start; flex-direction: column; gap: .55rem; }
-  .edition-actions { align-items: flex-start; flex-wrap: wrap; }
-  .mark-view-read { width: 2rem; overflow: hidden; white-space: nowrap; padding-inline: .52rem; }
-  .edition > p { max-width: 9.5rem; text-align: right; }
+  .edition-actions { align-items: flex-start; gap: .4rem; }
+  .mark-view-read { white-space: nowrap; }
+  .filter-label { display: none; }
+  .edition { display: grid; grid-template-columns: 1fr auto; gap: .35rem; }
+  .edition-heading { display: contents; }
+  .edition h1 { grid-column: 1; grid-row: 1; font-size: .85rem; }
+  .edition-actions { grid-column: 1 / -1; grid-row: 2; flex-wrap: wrap; }
+  .edition > p { grid-column: 2; grid-row: 1; max-width: 10rem; text-align: right; margin: 0; font-size: .65rem; }
+  .view-switch button { padding-inline: .5rem; }
+  .mark-view-read { padding-inline: .5rem; }
   .archive-list li { grid-template-columns: 1fr; gap: .2rem; }
   .site-footer div { display: block; }
 }
@@ -316,7 +330,8 @@ const categoryButtons = Array.from(document.querySelectorAll('[data-category-fil
 const viewButtons = Array.from(document.querySelectorAll('[data-view-filter]'));
 const coverageButtons = Array.from(document.querySelectorAll('[data-coverage-filter]'));
 const cards = Array.from(document.querySelectorAll('[data-story-category]'));
-const cardsByStoryId = new Map(cards.map((card) => [card.dataset.storyId, card]));
+const cardReadId = (card) => card.dataset.readId || card.dataset.storyId;
+const cardsByStoryId = new Map(cards.map((card) => [cardReadId(card), card]));
 const count = document.querySelector('[data-visible-count]');
 const countLabel = document.querySelector('[data-count-label]');
 const siteUpdated = document.querySelector('[data-site-updated]');
@@ -324,6 +339,7 @@ const sectionRoot = document.querySelector('[data-story-sections]');
 const emptyState = document.querySelector('[data-empty-state]');
 const markViewReadButton = document.querySelector('[data-mark-view-read]');
 const toggleSectionsButton = document.querySelector('[data-toggle-sections]');
+const sectionActions = toggleSectionsButton?.closest('.section-actions');
 const readerMain = document.querySelector('[data-reader-pending]');
 const syncButton = document.querySelector('[data-sync-button]');
 const syncDialog = document.querySelector('[data-sync-dialog]');
@@ -340,8 +356,11 @@ const syncDeleteButton = document.querySelector('[data-sync-delete]');
 const syncActionButtons = Array.from(document.querySelectorAll('[data-sync-action]'));
 const mobileSections = window.matchMedia('(max-width: 820px)');
 const expandedSectionKeys = new Set();
+const collapsedSectionKeys = new Set();
+let deeperExpanded = false;
 const timers = new Map();
 let visibleCards = [];
+let briefingCards = [];
 let sectionSequence = 0;
 let syncToken = '';
 let syncTimer = null;
@@ -442,10 +461,10 @@ try { savedView = localStorage.getItem(VIEW_MODE_KEY) || 'new'; } catch (_) {}
 let activeView = params.get('view') || savedView;
 if (!['new', 'all'].includes(activeView)) activeView = 'new';
 try { localStorage.setItem(VIEW_MODE_KEY, activeView); } catch (_) {}
-let savedCoverage = 'top';
-try { savedCoverage = localStorage.getItem(COVERAGE_MODE_KEY) || 'top'; } catch (_) {}
+let savedCoverage = 'all';
+try { savedCoverage = localStorage.getItem(COVERAGE_MODE_KEY) || 'all'; } catch (_) {}
 let activeCoverage = params.get('coverage') || savedCoverage;
-if (!['top', 'all'].includes(activeCoverage)) activeCoverage = 'top';
+if (!['top', 'all'].includes(activeCoverage)) activeCoverage = 'all';
 try { localStorage.setItem(COVERAGE_MODE_KEY, activeCoverage); } catch (_) {}
 
 function cardRank(card, category) {
@@ -467,6 +486,11 @@ function relativeUpdatedLabel(timestamp) {
 }
 
 function updateSiteFreshness() {
+  for (const card of cards) {
+    const time = card.querySelector('[data-story-time]');
+    const updated = Date.parse(card.dataset.eventUpdated || '');
+    if (time && Number.isFinite(updated)) time.textContent = relativeUpdatedLabel(updated);
+  }
   if (!siteUpdated) return;
   const timestamp = Date.parse(siteUpdated.dataset.generatedAt || '');
   if (Number.isFinite(timestamp)) siteUpdated.textContent = relativeUpdatedLabel(timestamp);
@@ -614,7 +638,7 @@ function mergeRemoteState(payload) {
 }
 
 function isStoryRead(card) {
-  const storyId = card.dataset.storyId;
+  const storyId = cardReadId(card);
   if (viewed[storyId]) return true;
   const order = card.dataset.readOrder || '';
   return Boolean(readBefore && validStoryOrder(order) && order <= readBefore);
@@ -630,12 +654,12 @@ function compactViewedState() {
   for (const card of ordered) {
     const order = card.dataset.readOrder;
     if (nextReadBefore && order <= nextReadBefore) continue;
-    if (!viewed[card.dataset.storyId]) break;
+    if (!viewed[cardReadId(card)]) break;
     nextReadBefore = order;
   }
   if (nextReadBefore !== readBefore) readBefore = nextReadBefore;
   for (const card of ordered) {
-    if (readBefore && card.dataset.readOrder <= readBefore) delete viewed[card.dataset.storyId];
+    if (readBefore && card.dataset.readOrder <= readBefore) delete viewed[cardReadId(card)];
   }
   persistReadBefore();
   persistViewedMap(viewed);
@@ -810,7 +834,7 @@ function updateUrl() {
   else next.searchParams.set('category', activeCategory);
   if (activeView === 'new') next.searchParams.delete('view');
   else next.searchParams.set('view', activeView);
-  if (activeCoverage === 'top') next.searchParams.delete('coverage');
+  if (activeCoverage === 'all') next.searchParams.delete('coverage');
   else next.searchParams.set('coverage', activeCoverage);
   history.replaceState(null, '', `${next.pathname}${next.search}${next.hash}`);
 }
@@ -839,17 +863,34 @@ function renderStories() {
     const show = matchesCategory && matchesCoverage && (activeView === 'all' || !isRead);
     card.hidden = !show;
     card.classList.toggle('is-read', isRead);
+    const update = card.querySelector('[data-story-update]');
+    if (update) {
+      const initialOrder = card.dataset.initialOrder || '';
+      const seenBefore = Boolean(viewed[card.dataset.storyId]
+        || (readBefore && initialOrder && initialOrder <= readBefore));
+      update.hidden = isRead;
+      const label = update.querySelector('strong');
+      if (label) label.textContent = seenBefore ? 'Updated since you read: ' : 'New development: ';
+    }
     card.classList.remove('lead', 'secondary');
     if (show) visibleCards.push(card);
   }
   if (visibleCards[0]) visibleCards[0].classList.add('lead');
   if (visibleCards[1]) visibleCards[1].classList.add('secondary');
 
-  const topNews = visibleCards
-    .filter((card) => card.dataset.topOrder !== '')
-    .sort((left, right) => Number(left.dataset.topOrder) - Number(right.dataset.topOrder));
-  const topIds = new Set(topNews.map((card) => card.dataset.storyId));
-  const sectionCandidates = visibleCards.filter((card) => !topIds.has(card.dataset.storyId));
+  // Fix the briefing cohort before applying read history so finishing it does not move the goalposts.
+  const briefingPool = ordered.filter((card) =>
+    (activeCategory === 'all' || card.dataset.storyCategory === activeCategory)
+    && (activeCoverage === 'all' || cardSourceCount(card) >= MIN_TOP_SOURCE_COUNT)
+  ).sort((a, b) => {
+    const aTop = a.dataset.topOrder === '' ? 10000 : Number(a.dataset.topOrder);
+    const bTop = b.dataset.topOrder === '' ? 10000 : Number(b.dataset.topOrder);
+    return aTop - bTop || compareCards(a, b);
+  }).slice(0, 12);
+  briefingCards = briefingPool;
+  const briefingIds = new Set(briefingPool.map((card) => card.dataset.storyId));
+  const topNews = briefingPool.filter((card) => visibleCards.includes(card));
+  const sectionCandidates = visibleCards.filter((card) => !briefingIds.has(card.dataset.storyId));
   const topicGroups = new Map();
   const categoryRemainders = new Map();
   const addToCategoryRemainder = (card) => {
@@ -900,11 +941,34 @@ function renderStories() {
 
   const fragment = document.createDocumentFragment();
   if (topNews.length) fragment.appendChild(createStorySection('Top News', topNews, true));
-  for (const topic of sortedTopicGroups) {
-    fragment.appendChild(createStorySection(topic.title, topic.cards, false));
-  }
-  for (const remainder of sortedCategoryRemainders) {
-    fragment.appendChild(createStorySection(remainder.title, remainder.cards, false));
+  const finish = document.createElement('p');
+  finish.className = 'briefing-finish';
+  finish.textContent = topNews.length ? 'That’s the main briefing. Explore more when you have time.'
+    : 'You’re caught up on the main developments.';
+  fragment.appendChild(finish);
+  if (sectionCandidates.length) {
+    const deeper = document.createElement('details');
+    deeper.className = 'deeper-coverage';
+    deeper.open = deeperExpanded;
+    const summary = document.createElement('summary');
+    summary.textContent = `Explore more coverage · ${sectionCandidates.length} stories`;
+    deeper.appendChild(summary);
+    const deeperContent = document.createElement('div');
+    deeperContent.hidden = !deeperExpanded;
+    if (sectionActions) deeperContent.appendChild(sectionActions);
+    deeper.appendChild(deeperContent);
+    deeper.addEventListener('toggle', () => {
+      deeperExpanded = deeper.open;
+      deeperContent.hidden = !deeper.open;
+      updateSectionBulkControl();
+    });
+    for (const topic of sortedTopicGroups) {
+      deeperContent.appendChild(createStorySection(topic.title, topic.cards, false));
+    }
+    for (const remainder of sortedCategoryRemainders) {
+      deeperContent.appendChild(createStorySection(remainder.title, remainder.cards, false));
+    }
+    fragment.appendChild(deeper);
   }
   sectionRoot.replaceChildren(fragment);
   updateSectionBulkControl();
@@ -920,8 +984,7 @@ function renderStories() {
     );
   }
   sectionRoot.dataset.activeCategory = activeCategory;
-  if (count) count.textContent = String(unreadStoryCount);
-  if (countLabel) countLabel.textContent = 'unread';
+  updateUnreadCount();
   if (emptyState) {
     emptyState.hidden = visibleCards.length !== 0;
     if (activeView === 'new' && coverageStoryCount > 0) {
@@ -958,7 +1021,8 @@ function createStorySection(title, sectionCards, topSection) {
   grid.className = 'story-grid';
   grid.id = `story-section-${++sectionSequence}`;
   toggle.setAttribute('aria-controls', grid.id);
-  const expanded = !mobileSections.matches || expandedSectionKeys.has(sectionKey);
+  const expanded = !mobileSections.matches || expandedSectionKeys.has(sectionKey)
+    || (topSection && !collapsedSectionKeys.has(sectionKey));
   toggle.disabled = !mobileSections.matches;
   toggle.setAttribute('aria-expanded', String(expanded));
   grid.hidden = !expanded;
@@ -981,14 +1045,15 @@ function setSectionExpanded(toggle, grid, expanded) {
   const sectionKey = toggle.dataset.sectionKey;
   toggle.setAttribute('aria-expanded', String(expanded));
   grid.hidden = !expanded;
-  if (expanded) expandedSectionKeys.add(sectionKey);
-  else expandedSectionKeys.delete(sectionKey);
+  if (expanded) { expandedSectionKeys.add(sectionKey); collapsedSectionKeys.delete(sectionKey); }
+  else { expandedSectionKeys.delete(sectionKey); collapsedSectionKeys.add(sectionKey); }
 }
 
 function updateSectionBulkControl() {
   if (!toggleSectionsButton) return;
   const toggles = Array.from(sectionRoot.querySelectorAll('[data-section-toggle]'));
-  toggleSectionsButton.hidden = !mobileSections.matches || toggles.length === 0;
+  toggleSectionsButton.hidden = !mobileSections.matches || !deeperExpanded || toggles.length === 0;
+  if (sectionActions) sectionActions.hidden = toggleSectionsButton.hidden;
   const allExpanded = toggles.length > 0
     && toggles.every((toggle) => toggle.getAttribute('aria-expanded') === 'true');
   toggleSectionsButton.setAttribute('aria-expanded', String(allExpanded));
@@ -1039,7 +1104,7 @@ for (const button of coverageButtons) {
 }
 
 function markViewed(card) {
-  const storyId = card.dataset.storyId;
+  const storyId = cardReadId(card);
   if (!storyId || isStoryRead(card)) return;
   viewed[storyId] = Date.now();
   compactViewedState();
@@ -1050,7 +1115,7 @@ function markViewed(card) {
 
 function updateUnreadCount() {
   if (!count) return;
-  const unread = cards.filter((card) => {
+  const unread = briefingCards.filter((card) => {
     const matchesCategory = activeCategory === 'all'
       || card.dataset.storyCategory === activeCategory;
     const matchesCoverage = activeCoverage === 'all'
@@ -1058,15 +1123,15 @@ function updateUnreadCount() {
     return matchesCategory && matchesCoverage && !isStoryRead(card);
   }).length;
   count.textContent = String(unread);
-  if (countLabel) countLabel.textContent = 'unread';
+  if (countLabel) countLabel.textContent = 'unread in briefing';
 }
 
 if (markViewReadButton) {
   markViewReadButton.addEventListener('click', () => {
-    const newlyRead = visibleCards.filter((card) => !isStoryRead(card));
+    const newlyRead = visibleCards.filter((card) => card.getClientRects().length && !isStoryRead(card));
     const readAt = Date.now();
     for (const card of newlyRead) {
-      viewed[card.dataset.storyId] = readAt;
+      viewed[cardReadId(card)] = readAt;
       card.classList.add('is-read');
     }
     if (newlyRead.length) {
@@ -1099,7 +1164,10 @@ function startReadObserver() {
       }
     }
   }, { threshold: [0.6] });
-  for (const title of document.querySelectorAll('[data-story-title]')) observer.observe(title);
+  for (const card of cards) {
+    const title = card.querySelector('[data-story-title]');
+    if (title) observer.observe(title);
+  }
 }
 
 function revealReader() {
@@ -1269,6 +1337,8 @@ def build_static_site(
         if not story_id or sanitize_id(story_id) != story_id:
             raise ValueError(f"invalid story_id in active index: {story_id!r}")
         story = _read_json(story_dir / f"{story_id}.json")
+        if story.get("_pending_coherence"):
+            raise ValueError(f"story awaits coherence regeneration; rebuild the editorial index: {story_id}")
         if story.get("story_id") != story_id or story.get("event_id") != story_id:
             raise ValueError(f"story artifact identity mismatch: {story_id}")
         if story.get("category") not in category_names:
@@ -1421,10 +1491,11 @@ def _write_site_files(
         root / "archive" / "index.html",
         _render_archive(stories, category_names=category_names, site_url=site_url),
     )
+    _write_text(root / "methodology" / "index.html", _render_methodology(site_url))
     _write_text(root / "404.html", _render_not_found(site_url))
     _write_text(root / "robots.txt", ROBOTS_TXT)
 
-    sitemap_urls = [f"{site_url}/", f"{site_url}/archive/"]
+    sitemap_urls = [f"{site_url}/", f"{site_url}/archive/", f"{site_url}/methodology/"]
     for story in stories:
         story_id = story["story_id"]
         route = f"/stories/{story_id}/"
@@ -1486,10 +1557,10 @@ def _render_home(
     cards = []
     for index, story in enumerate(stories):
         variant = " lead" if index == 0 else " secondary" if index == 1 else ""
-        tldr = story.get("tldr") if isinstance(story.get("tldr"), list) else []
+        tldr = _briefing_bullets(story)
         bullets = "".join(f"<li>{_e(item)}</li>" for item in tldr[:2])
         row = story["_index"]
-        source_count = int(row.get("source_count") or len(story.get("sources") or []))
+        source_count = len({publisher_id(source) for source in story.get("sources", [])})
         source_coverage = _nonnegative_number(
             row.get("source_coverage_score", source_count)
         )
@@ -1499,6 +1570,11 @@ def _render_home(
         shade_level = _shade_level(source_count=source_count)
         story_id = str(story["story_id"])
         read_order = _story_read_order(story)
+        read_id = read_order.split(":", 1)[1]
+        initial_order = _story_read_order({**story, "revision": 1})
+        change = str(story.get("change_summary") or "")
+        update = (f'<p class="story-update" data-story-update><strong>New development: </strong>{_e(change)}</p>'
+                  if int(story.get("revision") or 1) > 1 and change else "")
         topic_title, topic_order = topic_by_story.get(story_id, ("", 0))
         story_top_order = top_order.get(story_id)
         cards.append(
@@ -1513,21 +1589,20 @@ def _render_home(
             f'data-topic-title="{_e(topic_title)}" data-topic-order="{topic_order}" '
             f'data-category-name="{_e(category_names[story["category"]])}" '
             f'data-category-order="{category_order[story["category"]]}" '
-            f'data-read-order="{_e(read_order)}" '
+            f'data-read-order="{_e(read_order)}" data-read-id="{_e(read_id)}" '
+            f'data-initial-order="{_e(initial_order)}" '
             f'data-event-updated="{_e(_event_time(story).isoformat())}">'
             f'<p class="kicker">{_e(category_names[story["category"]])}</p>'
             f'<h2 data-story-title><a href="/stories/{_e(story_id)}/">{_e(story["headline"])}</a></h2>'
-            f'<p class="dek">{_e(story["dek"])}</p>'
+            f'{update}'
             f'<ul class="tldr-list">{bullets}</ul>'
-            f'<div class="story-meta"><span>{_relative_time(_event_time(story), generated_at)}</span>'
-            f'<span>{source_count} sources</span><span class="read-indicator" aria-hidden="true">✓ Read</span></div>'
+            f'<div class="story-meta"><span data-story-time>{_relative_time(_event_time(story), generated_at)}</span>'
+            f'<a href="/stories/{_e(story_id)}/#sources">'
+            f'{source_count} {"outlet" if source_count == 1 else "outlets"} · Sources</a>'
+            '<span class="read-indicator" aria-hidden="true">✓ Read</span></div>'
             "</article>"
         )
-    default_top_count = sum(
-        1
-        for story in stories
-        if int(story["_index"].get("source_count") or len(story.get("sources") or [])) >= 2
-    )
+    default_top_count = min(12, len(stories))
     empty_hidden = "" if not cards else " hidden"
     toolbar = (
         '<div class="edition"><div class="edition-heading"><h1>Latest briefing</h1><div class="edition-actions">'
@@ -1539,16 +1614,16 @@ def _render_home(
         'title="Show new and previously read stories">All</button></div></div>'
         '<div class="filter-control"><span class="filter-label">Sources</span>'
         '<div class="view-switch" role="group" aria-label="Choose source coverage filter">'
-        '<button type="button" data-coverage-filter="top" aria-pressed="true" '
-        'title="Only show stories covered by multiple sources">Top</button>'
-        '<button type="button" data-coverage-filter="all" aria-pressed="false" '
+        '<button type="button" data-coverage-filter="top" aria-pressed="false" '
+        'title="Show stories reported by at least two publishers; this does not mean independent corroboration">2+ outlets</button>'
+        '<button type="button" data-coverage-filter="all" aria-pressed="true" '
         'title="Show stories regardless of source count">All</button></div></div>'
         '<button type="button" class="mark-view-read" data-mark-view-read '
         'aria-label="Mark all visible stories as read" title="Mark visible stories read">'
         '✓ <span>Mark read</span></button></div></div>'
         f'<p><span role="status" aria-live="polite" aria-atomic="true">'
         f'<span data-visible-count>{default_top_count}</span> '
-        f'<span data-count-label>unread</span></span> · '
+        f'<span data-count-label>unread in briefing</span></span> · '
         f'<time data-site-updated data-generated-at="{_e(isoformat_z(generated_at))}" '
         f'datetime="{_e(isoformat_z(generated_at))}">Updated 1m ago</time></p></div>'
     )
@@ -1586,7 +1661,14 @@ def _render_story(
         for source in story.get("sources", [])
         if isinstance(source, dict) and source.get("article_id")
     }
-    tldr = "".join(f"<li>{_e(item)}</li>" for item in story.get("tldr", []))
+    claim_sources = story.get("claim_sources") or {}
+    links = (story.get("claim_links") or {}).get("tldr_claim_ids") or []
+    tldr_rows = []
+    for index, item in enumerate(story.get("tldr", [])):
+        ids = sorted({aid for cid in (links[index] if index < len(links) else [])
+                      for aid in claim_sources.get(cid, [])})
+        tldr_rows.append(f"<li>{_e(item)}{_citations(ids, source_lookup)}</li>")
+    tldr = "".join(tldr_rows)
     facts = "".join(
         f'<li>{_e(item["text"])}{_citations(item.get("source_article_ids"), source_lookup)}</li>'
         for item in story.get("key_facts", [])
@@ -1630,22 +1712,30 @@ def _render_story(
             '<span class="source-name">{} {}</span></li>'.format(
                 _safe_url(source.get("url")),
                 _e(source.get("headline")),
-                _e(source.get("source_name")),
+                _e(str(source.get("source_name") or "") + (
+                    " · Wire: " + str(source["reporting_origin"]) if source.get("reporting_origin") else "")),
                 badge,
             )
         )
 
     updated = _event_time(story)
+    update_note = (
+        '<p class="story-update"><strong>Latest update:</strong> '
+        + _e(story["change_summary"]) + '</p>'
+    ) if story.get("change_summary") else ""
     content = (
         '<article class="story-page"><a class="back" href="/">← Latest briefing</a>'
         f'<p class="kicker">{_e(category_name)}</p><h1>{_e(story["headline"])}</h1>'
         f'<p class="standfirst">{_e(story["dek"])}</p>'
         f'<div class="story-meta"><span>Updated {_display_datetime(updated)}</span>'
         f'<span>{len(story.get("sources") or [])} reports</span></div>'
+        f'{update_note}'
         f'<section><h2>The short version</h2><ul class="tldr-list">{tldr}</ul></section>'
         f'<section><h2>Key facts</h2><ul class="fact-list">{facts}</ul></section>'
         f'{uncertainty_section}{framing_section}'
-        f'<section><h2>Sources</h2><ul class="source-list">{"".join(source_rows)}</ul></section>'
+        '<section id="sources"><h2>Sources</h2><p class="source-explanation">Outlet counts describe coverage, '
+        'not independent confirmation. Reports may share a wire service or original source.</p>'
+        f'<ul class="source-list">{"".join(source_rows)}</ul></section>'
         "</article>"
     )
     return _page(
@@ -1685,6 +1775,53 @@ def _render_archive(
         nav='<a href="/">Latest</a><a href="/archive/">Archive</a>',
         content=content,
         social_image=f"{site_url}/assets/social-card.png",
+    )
+
+
+def _briefing_bullets(story: dict[str, Any]) -> list[str]:
+    briefing = story.get("briefing")
+    if isinstance(briefing, list) and len(briefing) == 2:
+        return briefing
+    tldr = list(story.get("tldr") or [])
+    uncertainties = story.get("uncertainties") or []
+    if tldr and uncertainties:
+        return [tldr[0], str(uncertainties[0]["text"])]
+    return tldr[:2]
+
+
+def _render_methodology(site_url: str) -> str:
+    return _page(
+        title="How this works & corrections — news-tldr.com",
+        description="How stories are selected, sourced, summarized and corrected.",
+        canonical=f"{site_url}/methodology/", nav='<a href="/">Latest briefing</a>',
+        content=(
+            '<article class="story-page"><h1>How this works</h1>'
+            '<p>news-tldr.com is an automated briefing from a selected set of news feeds. '
+            'It aims for factual, attributed summaries. Selection and summarization involve judgment; '
+            'no source list or model can guarantee the absence of bias.</p>'
+            '<section><h2>Evidence first</h2><p>New summaries are drafted from a private ledger of '
+            'supporting passages and checked against that evidence before publication. Claims, estimates '
+            'and allegations retain attribution. Important uncertainty belongs in the short briefing. '
+            'These automated checks can still miss errors; older summaries may predate this process.</p></section>'
+            '<section><h2>What source counts mean</h2><p>Multiple feeds from one publisher count as one outlet. '
+            'Different outlets may repeat the same wire report, announcement or original investigation. '
+            'Outlet count measures coverage, not independent confirmation. Source links let you inspect '
+            'the reporting; known wire provenance is identified where available.</p></section>'
+            '<section><h2>Selection and perspectives</h2><p>The main briefing prioritizes public consequence '
+            'and recent developments. Additional reporting remains available below it and by category. '
+            'An important story can have only one reporting outlet. Coverage comparisons describe attributed '
+            'differences in the articles; they are not proof that competing claims have equal support.</p></section>'
+            '<section><h2>Reading and updates</h2><p>A headline visible for one second counts as read. '
+            'Cards stay in place while you skim. New hides those stories on later views, but meaningful '
+            'new facts or corrections can return with a short explanation. Optional private-link sync '
+            'keeps reading state aligned across browsers.</p></section>'
+            '<section><h2>Corrections</h2><p>To flag an error, '
+            '<a href="https://github.com/pmeenan/news-tldr.com/issues/new" rel="noopener noreferrer">'
+            'open a project issue</a> with the story URL, disputed text and supporting source. '
+            'Issues are public; do not include your private sync link or personal information. '
+            'Verified corrections are published as material updates so returning readers can see them.</p></section>'
+            '</article>'
+        ),
     )
 
 
@@ -1792,7 +1929,7 @@ def _page(
         f'aria-label="Story categories">{nav}</nav>{toolbar}</div>'
         f"<main{main_attributes}>{content}</main><footer class=\"site-footer\"><div>"
         '<span>Automated, source-attributed news summaries. Verify important details with the linked reporting.</span>'
-        '<span><a href="https://github.com/pmeenan/news-tldr.com" rel="noopener noreferrer">About</a> · '
+        '<span><a href="/methodology/">How this works &amp; corrections</a> · '
         '<a href="/archive/">Archive</a> · <a href="/api/active-stories.json">JSON</a></span>'
         "</div></footer></body></html>\n"
     )
@@ -1882,7 +2019,8 @@ def _event_time(story: dict[str, Any]) -> datetime:
 
 
 def _story_read_order(story: dict[str, Any]) -> str:
-    value = story.get("created_at")
+    revision = int(story.get("revision") or 1)
+    value = story.get("revision_at") if revision > 1 else story.get("created_at")
     if not isinstance(value, str):
         index = story.get("_index") if isinstance(story.get("_index"), dict) else {}
         value = index.get("created_at")
@@ -1890,7 +2028,10 @@ def _story_read_order(story: dict[str, Any]) -> str:
         raise ValueError(f"story is missing a creation timestamp: {story.get('story_id')}")
     created_at = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
     milliseconds = int(created_at.timestamp() * 1000)
-    return f"{milliseconds:013d}:{story['story_id']}"
+    read_id = str(story["story_id"])
+    if revision > 1:
+        read_id = "r" + hashlib.sha256(f"{read_id}:{revision}".encode()).hexdigest()
+    return f"{milliseconds:013d}:{read_id}"
 
 
 def _relative_time(value: datetime, now: datetime) -> str:
