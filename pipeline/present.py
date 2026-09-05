@@ -387,7 +387,6 @@ const syncDeleteButton = document.querySelector('[data-sync-delete]');
 const syncActionButtons = Array.from(document.querySelectorAll('[data-sync-action]'));
 const timers = new Map();
 let visibleCards = [];
-let briefingCards = [];
 let syncToken = '';
 let syncTimer = null;
 let syncInFlight = null;
@@ -912,7 +911,6 @@ function renderStories() {
     const bTop = b.dataset.topOrder === '' ? 10000 : Number(b.dataset.topOrder);
     return aTop - bTop || compareCards(a, b);
   }).slice(0, 12);
-  briefingCards = briefingPool;
   const briefingIds = new Set(briefingPool.map((card) => card.dataset.storyId));
   const topNews = briefingPool.filter((card) => visibleCards.includes(card));
   const sectionCandidates = visibleCards.filter((card) => !briefingIds.has(card.dataset.storyId));
@@ -1072,7 +1070,8 @@ function markViewed(card) {
 
 function updateUnreadCount() {
   if (!count) return;
-  const unread = briefingCards.filter((card) => {
+  // Count every unread story in the current category/source view, not only the briefing cohort.
+  const unread = cards.filter((card) => {
     const matchesCategory = activeCategory === 'all'
       || card.dataset.storyCategory === activeCategory;
     const matchesCoverage = activeCoverage === 'all'
@@ -1080,7 +1079,7 @@ function updateUnreadCount() {
     return matchesCategory && matchesCoverage && !isStoryRead(card);
   }).length;
   count.textContent = String(unread);
-  if (countLabel) countLabel.textContent = 'unread in briefing';
+  if (countLabel) countLabel.textContent = unread === 1 ? 'unread story' : 'unread stories';
 }
 
 if (markViewReadButton) {
@@ -1618,7 +1617,7 @@ def _render_home(
             '<span class="read-indicator" aria-hidden="true">✓ Read</span></div>'
             "</article>"
         )
-    default_top_count = min(12, len(stories))
+    default_unread_count = len(stories)
     empty_hidden = "" if not cards else " hidden"
     toolbar = (
         '<div class="edition"><div class="edition-heading"><h1>Latest briefing</h1><div class="edition-actions">'
@@ -1638,8 +1637,8 @@ def _render_home(
         'aria-label="Mark all visible stories as read" title="Mark visible stories read">'
         '✓ <span>Mark read</span></button></div></div>'
         f'<p><span role="status" aria-live="polite" aria-atomic="true">'
-        f'<span data-visible-count>{default_top_count}</span> '
-        f'<span data-count-label>unread in briefing</span></span> · '
+        f'<span data-visible-count>{default_unread_count}</span> '
+        f'<span data-count-label>unread {"story" if default_unread_count == 1 else "stories"}</span></span> · '
         f'<time data-site-updated data-generated-at="{_e(isoformat_z(generated_at))}" '
         f'datetime="{_e(isoformat_z(generated_at))}">Updated 1m ago</time></p></div>'
     )

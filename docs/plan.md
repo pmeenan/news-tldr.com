@@ -249,7 +249,8 @@ gantt
 - [x] Contain the sync origin with daily/total group ceilings, bounded reads and
   payloads, a 256 MiB SQLite page cap, layered Nginx rate/connection/body limits,
   and a dedicated three-worker PHP-FPM pool.
-- [x] Show a live unread count for the fixed main-briefing cohort in the current category/source view.
+- [x] Show a live unread count for the current category/source view (briefing-only until
+  presentation v25, when secondary sections became inline).
 - [x] Compress contiguous read history behind an immutable story-publication
   watermark while retaining sparse newer read IDs and legacy-map compatibility.
 - [x] Make sync revisions content-sensitive and let returning browsers skip the

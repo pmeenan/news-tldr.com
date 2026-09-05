@@ -42,7 +42,10 @@ This file serves as the coordinator and handoff state for AI agents working on t
   briefing finish line on every viewport; section headings are plain `h2`
   text with a story count shown on mobile. The finish line reads "That's the
   main briefing. More coverage follows." when secondary sections exist.
-  `PRESENTATION_VERSION` is `presentation-v25`.
+  `PRESENTATION_VERSION` is `presentation-v25`. The toolbar counter now counts
+  every unread story in the current category/source view ("N unread stories")
+  instead of only the 12-story briefing cohort, which read "0 unread" while
+  hundreds of inline stories remained.
 - **Verification**: 332 tests pass; `ruff`, `compileall` and Node syntax
   checks of both generated scripts pass. `present --build-only` rendered 5,713
   stories; the built homepage was checked in Chrome at desktop width and in a

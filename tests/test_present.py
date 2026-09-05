@@ -192,7 +192,11 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert 'data-coverage-filter="top" aria-pressed="false"' in home
     assert 'data-coverage-filter="all" aria-pressed="true"' in home
     assert 'data-source-count="1"' in home
-    assert '<span data-count-label>unread in briefing</span></span> · <time data-site-updated' in home
+    assert (
+        '<span data-visible-count>1</span> <span data-count-label>unread story</span>'
+        '</span> · <time data-site-updated'
+    ) in home
+    assert 'unread in briefing' not in home
     assert 'role="status" aria-live="polite" aria-atomic="true"' in home
     assert 'data-generated-at="2026-08-24T01:00:00Z"' in home
     assert 'datetime="2026-08-24T01:00:00Z">Updated 1m ago</time>' in home
@@ -250,7 +254,9 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "function isStoryRead(card)" in script
     assert "function compactViewedState()" in script
     assert "function updateUnreadCount()" in script
-    assert "countLabel.textContent = 'unread in briefing'" in script
+    assert "const unread = cards.filter((card) => {" in script
+    assert "'unread story' : 'unread stories'" in script
+    assert 'unread in briefing' not in script
     assert 'data-read-order="1787529600000:2026-08-24-polish"' in home
     assert "function relativeUpdatedLabel(timestamp)" in script
     assert "window.setInterval(updateSiteFreshness, 60 * 1000)" in script
