@@ -34,6 +34,23 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on September 5, 2026, evening (Homepage Long Scroll, presentation v25)
+
+- **Change**: removed the collapsed "Explore more coverage" `<details>` block,
+  the per-section mobile collapse toggles and the Expand all/Collapse all
+  control. Topic groups and category remainders now render inline under the
+  briefing finish line on every viewport; section headings are plain `h2`
+  text with a story count shown on mobile. The finish line reads "That's the
+  main briefing. More coverage follows." when secondary sections exist.
+  `PRESENTATION_VERSION` is `presentation-v25`.
+- **Verification**: 332 tests pass; `ruff`, `compileall` and Node syntax
+  checks of both generated scripts pass. `present --build-only` rendered 5,713
+  stories; the built homepage was checked in Chrome at desktop width and in a
+  390 px frame: 0 hidden grids, 0 hidden cards, no `details`/toggle elements,
+  no horizontal overflow.
+- **Rollout**: source only; the next hourly run publishes v25.
+- **Not committed.**
+
 ### State on September 5, 2026, later (LLM Spend Reduction: Accounting, Curation Reuse, Prescreen Cache, Lite Evidence, Gate, Flex, 3.8 Flash)
 
 - **Baseline**: recorded spend was about $41/day (39.5M input, 5.4M output

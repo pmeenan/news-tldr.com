@@ -263,17 +263,20 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "cardCoveragePriority" in script
     assert "COVERAGE_WINDOW_MS = 24 * 60 * 60 * 1000" in script
     assert "const topNews = briefingPool" in script
-    assert "window.matchMedia('(max-width: 820px)')" in script
-    assert "expandedSectionKeys" in script
-    assert "toggleSectionsButton.textContent = allExpanded ? 'Collapse all' : 'Expand all'" in script
-    assert "grid.hidden = !expanded" in script
+    assert "matchMedia('(max-width: 820px)')" not in script
+    assert "expandedSectionKeys" not in script
+    assert "deeper-coverage" not in script
+    assert "Explore more coverage" not in script
+    assert "createElement('details')" not in script
+    assert "grid.hidden" not in script
+    assert "More coverage follows." in script
     assert "if (activeView === 'new') renderStories();" in script
     assert "data-mark-view-read" in home
     assert "Mark read" in home
     assert "Mark all visible stories as read" in home
     assert "Mark view read" not in home
-    assert "data-toggle-sections" in home
-    assert "Expand all" in home
+    assert "data-toggle-sections" not in home
+    assert "Expand all" not in home
     assert "data-story-title" in home
     assert 'class="read-indicator"' in home
     assert "data-source-coverage=" in home
@@ -305,8 +308,9 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "main[data-reader-pending] > *" in css
     assert 'content: "Loading latest read status…"' in css
     assert ".edition > p { white-space: nowrap; }" in css
-    assert '.section-toggle[aria-expanded="true"]::after' in css
-    assert ".story-grid[hidden] { display: none; }" in css
+    assert ".section-toggle" not in css
+    assert ".deeper-coverage" not in css
+    assert ".section-title-group { display: flex; align-items: baseline; gap: .55rem; }" in css
 
 
 def test_home_renders_curation_metadata_for_top_news_and_topic_sections(tmp_path: Path) -> None:

@@ -284,9 +284,9 @@ sudo systemctl reload nginx
 
 The homepage opens with a finite briefing of up to 12 developments. Its cohort is
 chosen before read-history filtering, so reading a story does not pull another
-one into the briefing. Additional topic sections and category remainders sit
-behind **Explore more coverage**. Top News opens on mobile; secondary sections
-remain individually expandable. Smaller headlines and two complementary bullets
+one into the briefing. Additional topic sections and category remainders follow
+it on the same page, on every screen size, so readers scroll as far as they
+like without expanding anything. Smaller headlines and two complementary bullets
 replace the repeated headline/dek/summary treatment on cards. New editorial
 output generates those two bullets deliberately, including material uncertainty;
 legacy stories use the first TL;DR bullet and their first uncertainty when present.

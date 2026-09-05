@@ -217,8 +217,10 @@ gantt
 - [x] Limit topic curation to one high-ranked candidate set per category, encourage
   coherent three-story groups and broader meaningful desk labels, and fold topic
   groups reduced to one visible card into their category remainder.
-- [x] Keep secondary curated sections behind tappable, counted headings on mobile (Top News now opens) and
-  provide an Expand All/Collapse All action for the current view.
+- [x] ~~Keep secondary curated sections behind tappable, counted headings on mobile~~
+  Reverted September 5, 2026 (presentation v25): the collapsed "Explore more
+  coverage" section, per-section mobile toggles and Expand all control were
+  removed; secondary sections render inline for a plain long scroll.
 - [x] Order recent topic groups with category-normalized source breadth, capped
   same-publisher angle depth, and a smaller editorial-rank allowance; preserve
   curated Top News placement inside focused categories.

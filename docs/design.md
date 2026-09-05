@@ -624,9 +624,9 @@ builds into a temporary sibling before replacing ignored `dist/`.
 The main briefing contains at most 12 stories. The cohort is selected for the
 current category/coverage preference **before** read filtering, preferring
 curated Top News then rank. Reading a card cannot cause a replacement to enter
-that briefing. A clear stopping message precedes optional **Explore more
-coverage**, containing topic groups and category remainders. Mobile opens Top
-News by default; deeper topic sections remain collapsible.
+that briefing. A clear stopping message separates the briefing from the topic groups and
+category remainders, which render inline below it on every viewport; nothing
+on the homepage is collapsed.
 
 Cards use smaller headlines and two complementary bullets, without a redundant
 dek. New artifacts supply `briefing`; older artifacts fall back to the first

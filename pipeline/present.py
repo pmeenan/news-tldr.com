@@ -32,7 +32,7 @@ from pipeline.sources import publisher_id
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v24"
+PRESENTATION_VERSION = "presentation-v25"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
@@ -213,26 +213,19 @@ main[data-reader-pending]::before { content: "Loading latest read status…"; po
 .mark-view-read:hover { color: var(--ink); border-color: var(--ink); }
 .story-sections { padding-top: .25rem; }
 .briefing-finish { padding: 1.5rem 0; color: var(--muted); font: .9rem/1.5 system-ui, sans-serif; }
-.deeper-coverage > summary { cursor: pointer; padding: 1rem 0; border-block: 1px solid var(--line); font-weight: 700; }
 .story-update { border-left: 3px solid var(--accent); padding-left: .7rem; font: .85rem/1.5 system-ui, sans-serif; }
 .story-update[hidden] { display: none; }
 .story-meta a { text-underline-offset: 3px; }
 .source-explanation { color: var(--muted); font: .9rem/1.5 system-ui, sans-serif; }
 :focus-visible { outline: 2px solid var(--accent-dark); outline-offset: 3px; }
-.section-actions { display: none; }
-.section-actions[hidden] { display: none; }
-.toggle-sections { border: 0; border-bottom: 1px solid var(--line); padding: .35rem .1rem; background: transparent; color: var(--muted); font: 750 .68rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; cursor: pointer; }
-.toggle-sections:hover { color: var(--ink); border-color: var(--ink); }
 .story-section { margin-top: 1.65rem; }
 .story-section + .story-section { margin-top: 2.5rem; }
 .section-heading { display: flex; align-items: baseline; gap: .8rem; margin: 0; padding: 0 0 .55rem; border-bottom: 1px solid var(--ink); font: 800 clamp(1.15rem, 2vw, 1.5rem)/1.1 Georgia, "Times New Roman", serif; letter-spacing: -.015em; }
 .section-heading::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
-.section-toggle { appearance: none; display: flex; align-items: baseline; gap: .55rem; border: 0; padding: 0; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; text-align: left; }
-.section-toggle:disabled { opacity: 1; color: inherit; }
+.section-title-group { display: flex; align-items: baseline; gap: .55rem; }
 .section-count { display: none; }
 .story-section-top .section-heading { color: var(--accent-dark); }
 .story-grid { display: grid; grid-template-columns: repeat(12, 1fr); }
-.story-grid[hidden] { display: none; }
 .story-card { --card-tint: var(--neutral-rgb); --shade: 0; grid-column: span 4; padding: 1.5rem; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); background: linear-gradient(rgba(var(--card-tint), var(--shade)), rgba(var(--card-tint), var(--shade))), var(--card); transition: opacity .18s ease, background-color .18s ease; }
 .story-card:nth-child(3n) { border-right: 0; }
 .story-card.lead { grid-column: span 8; }
@@ -312,13 +305,10 @@ main[data-reader-pending]::before { content: "Loading latest read status…"; po
   .masthead { align-items: center; }
   .masthead-side { align-items: center; }
   .tagline { display: none; }
-  .section-actions { display: flex; justify-content: flex-end; padding-top: .7rem; }
   .story-section, .story-section + .story-section { margin-top: .8rem; }
-  .section-heading { display: block; padding: 0; }
+  .section-heading { display: block; padding: .75rem .15rem; }
   .section-heading::after { display: none; }
-  .section-toggle { align-items: center; width: 100%; padding: .75rem .15rem; cursor: pointer; }
-  .section-toggle::after { content: "+"; flex: 0 0 auto; min-width: 1rem; color: var(--muted); font: 500 1.25rem/1 system-ui, sans-serif; text-align: center; }
-  .section-toggle[aria-expanded="true"]::after { content: "−"; }
+  .section-title-group { align-items: center; width: 100%; }
   .section-count { display: inline; flex: 0 0 auto; margin-left: auto; color: var(--muted); font: 750 .65rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
   .story-card, .story-card.lead, .story-card.secondary { grid-column: span 12; border-right: 0; }
   .framing-grid { grid-template-columns: 1fr; }
@@ -381,8 +371,6 @@ const siteUpdated = document.querySelector('[data-site-updated]');
 const sectionRoot = document.querySelector('[data-story-sections]');
 const emptyState = document.querySelector('[data-empty-state]');
 const markViewReadButton = document.querySelector('[data-mark-view-read]');
-const toggleSectionsButton = document.querySelector('[data-toggle-sections]');
-const sectionActions = toggleSectionsButton?.closest('.section-actions');
 const readerMain = document.querySelector('[data-reader-pending]');
 const syncButton = document.querySelector('[data-sync-button]');
 const syncDialog = document.querySelector('[data-sync-dialog]');
@@ -397,14 +385,9 @@ const syncCopyButton = document.querySelector('[data-sync-copy]');
 const syncDisconnectButton = document.querySelector('[data-sync-disconnect]');
 const syncDeleteButton = document.querySelector('[data-sync-delete]');
 const syncActionButtons = Array.from(document.querySelectorAll('[data-sync-action]'));
-const mobileSections = window.matchMedia('(max-width: 820px)');
-const expandedSectionKeys = new Set();
-const collapsedSectionKeys = new Set();
-let deeperExpanded = false;
 const timers = new Map();
 let visibleCards = [];
 let briefingCards = [];
-let sectionSequence = 0;
 let syncToken = '';
 let syncTimer = null;
 let syncInFlight = null;
@@ -985,35 +968,18 @@ function renderStories() {
   if (topNews.length) fragment.appendChild(createStorySection('Top News', topNews, true));
   const finish = document.createElement('p');
   finish.className = 'briefing-finish';
-  finish.textContent = topNews.length ? 'That’s the main briefing. Explore more when you have time.'
+  finish.textContent = topNews.length
+    ? (sectionCandidates.length ? 'That’s the main briefing. More coverage follows.'
+      : 'That’s the main briefing.')
     : 'You’re caught up on the main developments.';
   fragment.appendChild(finish);
-  if (sectionCandidates.length) {
-    const deeper = document.createElement('details');
-    deeper.className = 'deeper-coverage';
-    deeper.open = deeperExpanded;
-    const summary = document.createElement('summary');
-    summary.textContent = `Explore more coverage · ${sectionCandidates.length} stories`;
-    deeper.appendChild(summary);
-    const deeperContent = document.createElement('div');
-    deeperContent.hidden = !deeperExpanded;
-    if (sectionActions) deeperContent.appendChild(sectionActions);
-    deeper.appendChild(deeperContent);
-    deeper.addEventListener('toggle', () => {
-      deeperExpanded = deeper.open;
-      deeperContent.hidden = !deeper.open;
-      updateSectionBulkControl();
-    });
-    for (const topic of sortedTopicGroups) {
-      deeperContent.appendChild(createStorySection(topic.title, topic.cards, false));
-    }
-    for (const remainder of sortedCategoryRemainders) {
-      deeperContent.appendChild(createStorySection(remainder.title, remainder.cards, false));
-    }
-    fragment.appendChild(deeper);
+  for (const topic of sortedTopicGroups) {
+    fragment.appendChild(createStorySection(topic.title, topic.cards, false));
+  }
+  for (const remainder of sortedCategoryRemainders) {
+    fragment.appendChild(createStorySection(remainder.title, remainder.cards, false));
   }
   sectionRoot.replaceChildren(fragment);
-  updateSectionBulkControl();
   for (const button of categoryButtons) {
     button.setAttribute('aria-pressed', String(button.dataset.categoryFilter === activeCategory));
   }
@@ -1043,16 +1009,12 @@ function renderStories() {
 }
 
 function createStorySection(title, sectionCards, topSection) {
-  const sectionKey = `${activeCategory}::${title}`;
   const section = document.createElement('section');
   section.className = topSection ? 'story-section story-section-top' : 'story-section';
   const heading = document.createElement('h2');
   heading.className = 'section-heading';
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.className = 'section-toggle';
-  toggle.dataset.sectionToggle = '';
-  toggle.dataset.sectionKey = sectionKey;
+  const titleGroup = document.createElement('span');
+  titleGroup.className = 'section-title-group';
   const titleLabel = document.createElement('span');
   titleLabel.className = 'section-title';
   titleLabel.textContent = title;
@@ -1061,62 +1023,15 @@ function createStorySection(title, sectionCards, topSection) {
   sectionCount.textContent = `${sectionCards.length} ${sectionCards.length === 1 ? 'story' : 'stories'}`;
   const grid = document.createElement('div');
   grid.className = 'story-grid';
-  grid.id = `story-section-${++sectionSequence}`;
-  toggle.setAttribute('aria-controls', grid.id);
-  const expanded = !mobileSections.matches || expandedSectionKeys.has(sectionKey)
-    || (topSection && !collapsedSectionKeys.has(sectionKey));
-  toggle.disabled = !mobileSections.matches;
-  toggle.setAttribute('aria-expanded', String(expanded));
-  grid.hidden = !expanded;
-  toggle.addEventListener('click', () => {
-    if (!mobileSections.matches) return;
-    setSectionExpanded(toggle, grid, toggle.getAttribute('aria-expanded') !== 'true');
-    updateSectionBulkControl();
-  });
   for (const card of sectionCards) {
     card.hidden = false;
     grid.appendChild(card);
   }
-  toggle.append(titleLabel, sectionCount);
-  heading.appendChild(toggle);
+  titleGroup.append(titleLabel, sectionCount);
+  heading.appendChild(titleGroup);
   section.append(heading, grid);
   return section;
 }
-
-function setSectionExpanded(toggle, grid, expanded) {
-  const sectionKey = toggle.dataset.sectionKey;
-  toggle.setAttribute('aria-expanded', String(expanded));
-  grid.hidden = !expanded;
-  if (expanded) { expandedSectionKeys.add(sectionKey); collapsedSectionKeys.delete(sectionKey); }
-  else { expandedSectionKeys.delete(sectionKey); collapsedSectionKeys.add(sectionKey); }
-}
-
-function updateSectionBulkControl() {
-  if (!toggleSectionsButton) return;
-  const toggles = Array.from(sectionRoot.querySelectorAll('[data-section-toggle]'));
-  toggleSectionsButton.hidden = !mobileSections.matches || !deeperExpanded || toggles.length === 0;
-  if (sectionActions) sectionActions.hidden = toggleSectionsButton.hidden;
-  const allExpanded = toggles.length > 0
-    && toggles.every((toggle) => toggle.getAttribute('aria-expanded') === 'true');
-  toggleSectionsButton.setAttribute('aria-expanded', String(allExpanded));
-  toggleSectionsButton.textContent = allExpanded ? 'Collapse all' : 'Expand all';
-}
-
-if (toggleSectionsButton) {
-  toggleSectionsButton.addEventListener('click', () => {
-    const toggles = Array.from(sectionRoot.querySelectorAll('[data-section-toggle]'));
-    const shouldExpand = !toggles.every(
-      (toggle) => toggle.getAttribute('aria-expanded') === 'true'
-    );
-    for (const toggle of toggles) {
-      const grid = document.getElementById(toggle.getAttribute('aria-controls'));
-      if (grid) setSectionExpanded(toggle, grid, shouldExpand);
-    }
-    updateSectionBulkControl();
-  });
-}
-
-mobileSections.addEventListener('change', renderStories);
 
 for (const button of categoryButtons) {
   button.addEventListener('click', () => {
@@ -1729,9 +1644,6 @@ def _render_home(
         f'datetime="{_e(isoformat_z(generated_at))}">Updated 1m ago</time></p></div>'
     )
     content = (
-        '<div class="section-actions" hidden>'
-        '<button type="button" class="toggle-sections" data-toggle-sections '
-        'aria-expanded="false">Expand all</button></div>'
         f'<div class="story-sections" data-story-sections data-active-category="all">'
         f'<section class="story-section"><div class="story-grid">{"".join(cards)}</div></section></div>'
         f'<p class="empty-state" data-empty-state{empty_hidden}>'
