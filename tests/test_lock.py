@@ -151,3 +151,22 @@ def test_lock_release_does_not_remove_replaced_lock(tmp_path):
 
     assert lock_path.exists()
     lock_path.unlink()
+
+
+def test_lock_holder_reports_only_verified_live_process(tmp_path):
+    import socket
+
+    from pipeline.lock import lock_holder
+
+    path = tmp_path / "pipeline.lock"
+    assert lock_holder(path) is None
+    with PipelineLock(path, timedelta(minutes=5), run_id="probe"):
+        holder = lock_holder(path)
+        assert holder is not None and holder["pid"] == os.getpid() and holder["run_id"] == "probe"
+    assert lock_holder(path) is None
+    path.write_text(json.dumps({"pid": 999_999_9, "pid_start_time": "1", "hostname": socket.gethostname(),
+                                "acquired_at": isoformat_z()}))
+    assert lock_holder(path) is None
+    foreign = {"pid": 1, "hostname": "elsewhere", "acquired_at": isoformat_z()}
+    path.write_text(json.dumps(foreign))
+    assert lock_holder(path) == foreign

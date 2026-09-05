@@ -26,7 +26,11 @@ def main() -> int:
         print(json.dumps({"stories": [case["id"] for case in data["stories"]],
                           "partitions": data["partitions"], "network_calls": 0}))
         return 0
-    client = create_gemini_client("review")
+    # Mirror production: bulk-tier evidence extraction, full-Flash drafting, and
+    # verification with the last-resort chain.
+    client = create_gemini_client("review", purpose="editorial")
+    evidence_client = create_gemini_client("bulk", purpose="evidence")
+    verification_client = create_gemini_client("review", purpose="editorial", last_resort=True)
     rows = []
     try:
         for index, case in enumerate(data["stories"], 1):
@@ -45,16 +49,28 @@ def main() -> int:
                    "human_review": {"unsupported_claims": None, "missing_qualifications": None,
                                     "misleading_headline": None, "notes": ""}}
             try:
-                generated = generate_story(event, client=client)
+                generated = generate_story(
+                    event, client=client, evidence_client=evidence_client,
+                    verification_client=verification_client,
+                )
                 row["story"] = build_story_payload(event, generated, generated_at=now)
                 row["automatic_validation"] = "passed"
                 row["usage"] = generated["usage"]
+                row["usage_records"] = [
+                    {"model": r["model"], "prompt_version": r["prompt_version"],
+                     "service_tier": (r.get("usage") or {}).get("serviceTier"),
+                     "input_tokens": (r.get("usage") or {}).get("promptTokenCount"),
+                     "output_tokens": (r.get("usage") or {}).get("candidatesTokenCount"),
+                     "thinking_tokens": (r.get("usage") or {}).get("thoughtsTokenCount")}
+                    for r in generated.get("usage_records") or []
+                ]
             except Exception as exc:
                 row["automatic_validation"] = "failed"
                 row["error"] = str(exc)
             rows.append(row)
     finally:
-        client.close()
+        for owned in (client, evidence_client, verification_client):
+            owned.close()
     report = {"generated_at": isoformat_z(), "cases": rows, "partition_review_cases": data["partitions"],
               "human_review_complete": False}
     args.output.parent.mkdir(parents=True, exist_ok=True)

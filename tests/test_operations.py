@@ -24,6 +24,7 @@ def _valid_fixture(tmp_path: Path) -> dict[str, Path]:
     event_id = "2026-08-24-test-event"
     css_asset = "assets/site.1111111111111111.css"
     js_asset = "assets/site.2222222222222222.js"
+    theme_asset = "assets/theme.3333333333333333.js"
 
     _write_json(
         config_dir / "categories.json",
@@ -119,6 +120,7 @@ def _valid_fixture(tmp_path: Path) -> dict[str, Path]:
         "archive/index.html",
         css_asset,
         js_asset,
+        theme_asset,
         "assets/social-card.png",
         "robots.txt",
         "sitemap.xml",
@@ -130,6 +132,7 @@ def _valid_fixture(tmp_path: Path) -> dict[str, Path]:
             path.write_bytes(b"png")
         elif relative == "index.html":
             path.write_text(
+                f'<script src="/{theme_asset}"></script>'
                 f'<link rel="stylesheet" href="/{css_asset}">'
                 f'<script src="/{js_asset}" defer></script>',
                 encoding="utf-8",
@@ -161,7 +164,7 @@ def test_validate_artifacts_accepts_complete_fixture(tmp_path: Path) -> None:
         "events": 1,
         "stories": 1,
         "active_index_stories": 1,
-            "static_files": 11,
+        "static_files": 12,
         "categories": 1,
     }
 
@@ -223,3 +226,16 @@ def test_health_report_accepts_recent_successful_stage_runs(tmp_path: Path) -> N
 
     assert report["status"] == "healthy"
     assert all(check["ok"] for check in report["checks"])
+
+
+def test_llm_usage_report_includes_tier_thinking_and_cache_totals(tmp_path: Path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        state.record_llm_usage("r", "editorial", "m", "v", input_tokens=10, output_tokens=2,
+                               thinking_tokens=5, cached_tokens=1, service_tier="flex", cost_usd=0.5)
+        state.record_llm_usage("r", "editorial", "m", "v", input_tokens=10, output_tokens=2, cost_usd=0.25)
+    report = llm_usage_report(db_path=db_path, hours=24)
+    assert report["thinking_tokens"] == 5 and report["cached_tokens"] == 1
+    assert report["flex_calls"] == 1 and report["cost_usd"] == 0.75
+    assert report["groups"][0]["flex_calls"] == 1 and report["groups"][0]["thinking_tokens"] == 5

@@ -266,6 +266,28 @@ gantt
 - [x] Add methodology/correction guidance and a synthetic evaluation runner with an explicit human-review rubric.
 - [ ] Obtain human sign-off on the evaluation fixtures and compare human quality scores across future prompt/model revisions.
 
+### [x] September 5 Review Follow-ups
+
+- [x] Reorder the duplicate review queue by signal strength, demote weak title cohesion, and raise the per-run review cap to 120.
+- [x] Add per-category impact floors (`min_category_impact_overrides`) applied in aggregation and digest review; raise entertainment to 0.40.
+- [x] Tighten briefing bullets (15–22 words, 230 characters), reject title-case and copied headlines, and require named attribution for single-publisher stories.
+- [x] Make revision change summaries reader-facing news sentences with a bounded verifier retry.
+- [x] Add a bounded, rank-ordered backfill that migrates pre-evidence stories to the verified pipeline (100 per run, time-budgeted, with failure cooldown).
+- [x] Show publisher names on cards, reveal update notes only to returning readers, and add a system-following dark theme with a manual toggle.
+- [ ] Watch the dedup review mix after the queue change; if rejections still dominate, tighten the prescreen prompt before raising the cap again.
+
+### [x] September 5 LLM Spend Reduction
+
+- [x] Record thinking/cached tokens and service tier per call; estimate cost from `llm.prices` so `llm-usage` reports dollars.
+- [x] Run homepage curation once per hourly run on compact cards (80/50 candidates), reuse it when the story set is unchanged, and group category sections on Flash-Lite.
+- [x] Cache deduplication prescreen chunks by content signature with hash-bucketed, stable chunking; run coherence and deduplication only in the final aggregation pass.
+- [x] Move evidence extraction and the new regeneration gate to Flash-Lite with a full-Flash fallback; cap evidence at three passages of 320 characters; draft from digests plus the ledger instead of full article text.
+- [x] Raise the base impact floor to 0.30 and hold single-article events for an hour before their first story.
+- [x] Adopt 3.8 Flash as the review model with 3.7 Flash as fallback, reserve 3.5 Flash for verification, and add half-price flex attempts (3.7 Flash) with per-purpose budgets, standard fallback, higher concurrency, a 50-minute watchdog, and a clean scheduler skip.
+- [ ] Compare `llm-usage --hours 24` after a full day against the $41/day baseline and revisit the flex fallback rate and gate skip rate.
+- [ ] Add a retry cooldown for validation-rejected events that have not changed, so a story the verifier keeps rejecting does not cost five calls every hour.
+- [ ] Human review of Lite-drafted stories before considering drafting on Flash-Lite.
+
 ## Backlog
 
 - Headless browser fallback for sources that block readability extraction.

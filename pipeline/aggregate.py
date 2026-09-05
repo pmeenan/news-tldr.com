@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import re
 import uuid
 from collections import Counter
@@ -35,7 +37,15 @@ DEDUPLICATION_PRESCREEN_ANCHOR_EVENTS = 6
 DEDUPLICATION_MAX_PASSES = 3
 DEFAULT_AGGREGATION_CATEGORY_BATCH_CONCURRENCY = 8
 DEFAULT_DEDUPLICATION_CONCURRENCY = 16
-DEFAULT_DEDUPLICATION_MAX_PAIRS_PER_RUN = 40
+DEFAULT_DEDUPLICATION_MAX_PAIRS_PER_RUN = 120
+# Candidate review order: strongest deterministic signals first, weak title
+# cohesion last so it cannot crowd out keyword and prescreen candidates.
+DEDUPLICATION_PRIORITY_TITLE = 4
+DEDUPLICATION_PRIORITY_HEADLINE = 3
+DEDUPLICATION_PRIORITY_KEYWORD = 3
+DEDUPLICATION_PRIORITY_PRESCREEN = 3
+DEDUPLICATION_PRIORITY_COHESION = 2
+DEDUPLICATION_PRIORITY_WEAK_COHESION = 0
 DEFAULT_DEDUPLICATION_MAX_PASSES_PER_RUN = 1
 DEFAULT_DEDUPLICATION_LOOKBACK_HOURS = 72
 FORCE_RESET_AGGREGATION_STATUSES = (
@@ -219,6 +229,7 @@ class LlmUsageRecord:
     prompt_version: str
     input_tokens: int | None
     output_tokens: int | None
+    usage: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -335,6 +346,38 @@ def load_unprocessed_articles(
             state.close()
 
 
+def category_impact_floors(aggregation_config: dict[str, Any]) -> dict[str, float]:
+    """Per-category minimum category-impact overrides from configuration."""
+    raw = aggregation_config.get("min_category_impact_overrides") or {}
+    if not isinstance(raw, dict):
+        raise ValueError("aggregation.min_category_impact_overrides must be an object")
+    valid = set(load_categories())
+    floors: dict[str, float] = {}
+    for category, value in raw.items():
+        if category not in valid:
+            raise ValueError(f"unknown category in min_category_impact_overrides: {category}")
+        floor = float(value)
+        if not 0.0 <= floor <= 1.0:
+            raise ValueError(f"min_category_impact_overrides.{category} must be within 0-1")
+        floors[str(category)] = floor
+    return floors
+
+
+def category_impact_floor_for_source(
+    source_id: str,
+    *,
+    feeds_by_source: dict[str, Any],
+    min_category_impact: float,
+    floors: dict[str, float] | None,
+) -> float:
+    """Resolve the impact threshold for an article from its feed's default category."""
+    if not floors:
+        return min_category_impact
+    feed = feeds_by_source.get(source_id)
+    category = getattr(feed, "default_category", None) if feed is not None else None
+    return floors.get(str(category or ""), min_category_impact)
+
+
 def load_window_articles(
     *,
     window_start: str,
@@ -343,11 +386,15 @@ def load_window_articles(
     mark_filtered: bool = True,
     db: StateDB | None = None,
     max_article_rowid: int | None = None,
+    category_impact_floors: dict[str, float] | None = None,
+    feeds_by_source: dict[str, Any] | None = None,
 ) -> list[ArticleForAggregation]:
     _validate_iso_timestamp(window_start)
     _validate_iso_timestamp(window_end)
     close_db = db is None
     state = db or StateDB()
+    if category_impact_floors and feeds_by_source is None:
+        feeds_by_source = {feed.source_id: feed for feed in load_feeds(enabled_only=False)}
     try:
         rowid_clause = " AND rowid <= ?" if max_article_rowid is not None else ""
         params: list[Any] = [window_start, window_end]
@@ -394,12 +441,18 @@ def load_window_articles(
             score = _article_category_impact(article)
             if score is None:
                 continue
-            if score < min_category_impact:
+            threshold = category_impact_floor_for_source(
+                article.source_id,
+                feeds_by_source=feeds_by_source or {},
+                min_category_impact=min_category_impact,
+                floors=category_impact_floors,
+            )
+            if score < threshold:
                 if mark_filtered:
                     state.update_article_aggregation_status(
                         article.article_id,
                         status="filtered_low_impact",
-                        reason=f"category_impact {score:.3f} below {min_category_impact:.3f}",
+                        reason=f"category_impact {score:.3f} below {threshold:.3f}",
                     )
                 continue
             if mark_filtered:
@@ -427,6 +480,7 @@ def _usage_record(stage: str, prompt_version: str, usage: dict[str, Any]) -> Llm
         prompt_version=prompt_version,
         input_tokens=usage.get("promptTokenCount"),
         output_tokens=usage.get("candidatesTokenCount"),
+        usage=dict(usage),
     )
 
 
@@ -445,6 +499,7 @@ def _record_llm_usage_records(
             prompt_version=record.prompt_version,
             input_tokens=record.input_tokens,
             output_tokens=record.output_tokens,
+            usage=record.usage,
         )
 
 
@@ -902,7 +957,10 @@ def aggregate_once(
     force: bool = False,
     acquire_lock: bool = True,
     max_article_rowid: int | None = None,
+    post_review: bool = True,
 ) -> dict[str, Any]:
+    """Aggregate planned windows. ``post_review=False`` skips the coherence and
+    deduplication passes so an intermediate run does not repeat them."""
     if (range_start is None) != (range_end is None):
         raise ValueError("range_start and range_end must be provided together or both omitted")
     config = load_pipeline_config()
@@ -910,6 +968,7 @@ def aggregate_once(
     step_hours = int(config.aggregation.get("window_step_hours", window_hours))
     overlap_hours = int(config.aggregation.get("window_overlap_hours", 1))
     min_category_impact = float(config.aggregation.get("min_category_impact", 0.25))
+    impact_floors = category_impact_floors(config.aggregation)
     category_batch_concurrency = _positive_int_config(
         config.aggregation.get("category_batch_concurrency"),
         DEFAULT_AGGREGATION_CATEGORY_BATCH_CONCURRENCY,
@@ -934,13 +993,25 @@ def aggregate_once(
     run_id = f"aggregation-{uuid.uuid4().hex}"
     state = StateDB()
     owns_generator = client is None and not dry_run
-    generator = client or (None if dry_run else create_gemini_client("bulk"))
+    generator = client or (None if dry_run else create_gemini_client("bulk", purpose="aggregation"))
     owns_review_generator = review_client is None and client is None and not dry_run
     review_generator = review_client or (
         generator
         if client is not None or dry_run
-        else create_gemini_client("review", include_lite=True)
+        else create_gemini_client("review", include_lite=True, purpose="aggregation")
     )
+    # Deduplication and coherence tolerate minutes of latency, so they get their
+    # own clients with longer flex budgets when this run owns its clients.
+    post_review_clients: list[Any] = []
+    if owns_generator and post_review:
+        dedup_generator = create_gemini_client("bulk", purpose="deduplication")
+        dedup_review_generator = create_gemini_client("review", include_lite=True, purpose="deduplication")
+        coherence_generator = create_gemini_client("review", purpose="coherence")
+        post_review_clients = [dedup_generator, dedup_review_generator, coherence_generator]
+    else:
+        dedup_generator, dedup_review_generator, coherence_generator = (
+            generator, review_generator, review_generator,
+        )
     stats: dict[str, Any] = {
         "windows_planned": 0,
         "windows_processed": 0,
@@ -954,6 +1025,7 @@ def aggregate_once(
         "newsworthiness_scored": 0,
         "newsworthiness_fallbacks": 0,
         "min_category_impact": min_category_impact,
+        "min_category_impact_overrides": impact_floors,
         "window_hours": window_hours,
         "window_overlap_hours": overlap_hours,
         "window_step_hours": step_hours,
@@ -1095,6 +1167,8 @@ def aggregate_once(
                             mark_filtered=not dry_run,
                             db=state,
                             max_article_rowid=max_article_rowid,
+                            category_impact_floors=impact_floors,
+                            feeds_by_source=feeds_by_source,
                         )
                         if not articles:
                             if not dry_run:
@@ -1351,17 +1425,21 @@ def aggregate_once(
                                 article_count=0,
                                 stats={"error": str(exc)},
                             )
-                if not dry_run:
+                if not dry_run and not post_review:
+                    stats["post_review_skipped"] = True
+                    if progress:
+                        progress("aggregate: coherence and deduplication deferred to the final pass")
+                if not dry_run and post_review:
                     from pipeline.coherence import review_event_coherence
                     stats["coherence"] = review_event_coherence(
-                        state=state, client=review_generator, run_id=run_id,
+                        state=state, client=coherence_generator, run_id=run_id,
                         limit=int(config.aggregation.get("coherence_reviews_per_run", 10)), progress=progress,
                     )
                     try:
                         stats["events_merged"] = deduplicate_active_events_llm(
                             state=state,
-                            client=generator,
-                            review_client=review_generator,
+                            client=dedup_generator,
+                            review_client=dedup_review_generator,
                             feeds_by_source=feeds_by_source,
                             progress=progress,
                             run_id=run_id,
@@ -1400,6 +1478,10 @@ def aggregate_once(
                 close()
         if owns_generator and generator is not None:
             close = getattr(generator, "close", None)
+            if callable(close):
+                close()
+        for owned in post_review_clients:
+            close = getattr(owned, "close", None)
             if callable(close):
                 close()
 
@@ -2015,8 +2097,7 @@ def filter_active_events_with_llm(
             stage="active_events_filter",
             model=client.model,
             prompt_version="active-events-filter-v1",
-            input_tokens=result.usage.get("promptTokenCount"),
-            output_tokens=result.usage.get("candidatesTokenCount"),
+            usage=result.usage,
         )
     return result.active_events
 
@@ -2795,16 +2876,18 @@ def _shared_words_are_only_generic(shared_words: set[str]) -> bool:
     return bool(shared_words) and shared_words <= _HEADLINE_COHESION_GENERIC_WORDS
 
 
-def _headlines_have_cohesion_edge(left: str, right: str) -> bool:
+def _headline_cohesion_strength(left: str, right: str) -> int:
+    """Return 2 for three or more shared non-generic words, 1 for the weaker
+    two-word anchor match, and 0 when the headlines do not cohere."""
     left_words = _headline_word_set(left)
     right_words = _headline_word_set(right)
     shared_words = left_words & right_words
     if len(shared_words) >= 3:
-        return not _shared_words_are_only_generic(shared_words)
+        return 0 if _shared_words_are_only_generic(shared_words) else 2
     if len(shared_words) < 2:
-        return False
+        return 0
     if _shared_words_are_only_generic(shared_words):
-        return False
+        return 0
 
     shared_anchors = (
         _headline_anchor_word_set(left)
@@ -2812,10 +2895,15 @@ def _headlines_have_cohesion_edge(left: str, right: str) -> bool:
         & shared_words
     )
     if len(shared_anchors) >= 2:
-        return True
-    return bool(shared_anchors) and any(
+        return 1
+    weak = bool(shared_anchors) and any(
         word not in _HEADLINE_COHESION_GENERIC_WORDS for word in shared_words - shared_anchors
     )
+    return 1 if weak else 0
+
+
+def _headlines_have_cohesion_edge(left: str, right: str) -> bool:
+    return _headline_cohesion_strength(left, right) > 0
 
 
 def _keywords_for_articles(articles: Sequence[ArticleForAggregation]) -> list[str]:
@@ -3191,8 +3279,7 @@ def _evaluate_and_apply_deduplication_candidates(
                         stage=usage_stage,
                         model=decision.model,
                         prompt_version=prompt_version,
-                        input_tokens=decision.usage.get("promptTokenCount"),
-                        output_tokens=decision.usage.get("candidatesTokenCount"),
+                        usage=decision.usage,
                     )
                 except Exception:
                     pass
@@ -3452,16 +3539,23 @@ def _prescreen_chunk_specs_for_events(
     valid_ids = frozenset(event["event_id"] for event in events)
     chunk_size = DEDUPLICATION_MAX_EVENTS_PER_PRESCREEN_BATCH
     if len(events) <= chunk_size:
-        chunks = [tuple(events)]
+        chunks = [tuple(sorted(events, key=lambda event: event["event_id"]))]
     else:
         anchors = _prescreen_anchor_events(events, anchor_count=anchor_count)
         anchor_ids = {event["event_id"] for event in anchors}
         non_anchor_events = [event for event in events if event["event_id"] not in anchor_ids]
         non_anchor_chunk_size = max(1, chunk_size - len(anchors))
+        # Bucket by a hash of the event ID so one new event perturbs only its own
+        # chunk; sequential slicing would shift every chunk and defeat the cache.
+        bucket_count = max(1, math.ceil(len(non_anchor_events) / non_anchor_chunk_size))
+        buckets: list[list[dict[str, Any]]] = [[] for _ in range(bucket_count)]
+        for event in sorted(non_anchor_events, key=lambda item: item["event_id"]):
+            digest = hashlib.sha256(str(event["event_id"]).encode("utf-8")).hexdigest()
+            buckets[int(digest[:8], 16) % bucket_count].append(event)
         chunks = []
-        for start in range(0, len(non_anchor_events), non_anchor_chunk_size):
-            chunk = tuple([*anchors, *non_anchor_events[start : start + non_anchor_chunk_size]])
-            chunks.append(chunk)
+        for bucket in buckets:
+            for start in range(0, len(bucket), non_anchor_chunk_size):
+                chunks.append(tuple([*anchors, *bucket[start : start + non_anchor_chunk_size]]))
 
     return [
         PrescreenChunkSpec(
@@ -3489,6 +3583,28 @@ def _prescreen_anchor_events(
             event["event_id"],
         ),
     )[: min(anchor_count, len(events) - 1)]
+
+
+def _prescreen_chunk_signature(
+    spec: PrescreenChunkSpec, article_headlines_by_event: dict[str, list[str]]
+) -> str:
+    """Content signature of the chunk: IDs, titles, raw keywords and headlines.
+
+    Raw keywords are used instead of the stopword-filtered list because the
+    per-batch dynamic stopwords shift whenever the batch changes; that would
+    invalidate every chunk each hour for a cosmetic prompt difference."""
+    payload = [
+        [
+            event["event_id"],
+            event.get("title"),
+            [str(k).lower() for k in (event.get("keywords") or [])[:DEDUPLICATION_KEYWORDS_PER_EVENT]],
+            sorted(article_headlines_by_event.get(event["event_id"], []))[:DEDUPLICATION_HEADLINES_PER_EVENT],
+        ]
+        for event in spec.chunk
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
 
 
 def _run_prescreen_chunk_spec(
@@ -3521,6 +3637,30 @@ def _execute_prescreen_chunk_specs(
         return []
 
     collected: list[tuple[str, str]] = []
+    signatures = {spec.chunk_label: _prescreen_chunk_signature(spec, article_headlines_by_event) for spec in specs}
+    # Unchanged chunks (same events, titles, keywords and headlines) reuse the
+    # cached prescreen instead of paying for an identical call every hour.
+    cache_hits = 0
+    pending: list[PrescreenChunkSpec] = []
+    for spec in specs:
+        cached = (
+            state.get_cached_prescreen_pairs(
+                chunk_signature=signatures[spec.chunk_label],
+                prompt_version=DEDUPLICATION_PRESCREEN_PROMPT_VERSION,
+            )
+            if state is not None
+            else None
+        )
+        if cached is not None:
+            cache_hits += 1
+            collected.extend(pair for pair in cached if pair[0] in spec.valid_ids and pair[1] in spec.valid_ids)
+        else:
+            pending.append(spec)
+    if progress and cache_hits:
+        progress(f"deduplicate: prescreen cache reused {cache_hits} chunk(s); {len(pending)} to run")
+    specs = pending
+    if not specs:
+        return collected
 
     def record_success(result: PrescreenChunkResult) -> None:
         if state is not None and run_id and result.usage:
@@ -3530,8 +3670,17 @@ def _execute_prescreen_chunk_specs(
                     stage="deduplication_prescreen",
                     model=client.model,
                     prompt_version=DEDUPLICATION_PRESCREEN_PROMPT_VERSION,
-                    input_tokens=result.usage.get("promptTokenCount"),
-                    output_tokens=result.usage.get("candidatesTokenCount"),
+                    usage=result.usage,
+                )
+            except Exception:
+                pass
+        if state is not None:
+            try:
+                state.put_cached_prescreen_pairs(
+                    chunk_signature=signatures[result.chunk_label],
+                    prompt_version=DEDUPLICATION_PRESCREEN_PROMPT_VERSION,
+                    model=client.model,
+                    pairs=result.pairs,
                 )
             except Exception:
                 pass
@@ -3670,6 +3819,10 @@ def _deduplicate_active_events_llm_pass(
     lookback_hours: int = DEFAULT_DEDUPLICATION_LOOKBACK_HOURS,
 ) -> int:
     since = _recent_event_cutoff(lookback_hours)
+    try:
+        state.prune_cached_prescreens(older_than=_recent_event_cutoff(24 * 7))
+    except Exception:
+        pass
 
     rows = state.conn.execute(
         """
@@ -3700,6 +3853,7 @@ def _deduplicate_active_events_llm_pass(
         FROM articles
         WHERE event_id IS NOT NULL
           AND is_filtered = 0
+        ORDER BY event_id, published_at, article_id
         """
     ).fetchall():
         article_headlines_by_event.setdefault(row["event_id"], []).append(row["headline"])
@@ -3717,12 +3871,12 @@ def _deduplicate_active_events_llm_pass(
             e2 = events[j]
             slug_match = _base_slug(e1["event_id"]) == _base_slug(e2["event_id"])
             title_match = _titles_similar(e1["title"], e2["title"])
-            title_cohesion_match = False
+            cohesion_strength = 0
             if not (slug_match or title_match):
-                title_cohesion_match = _headlines_have_cohesion_edge(e1["title"], e2["title"])
+                cohesion_strength = _headline_cohesion_strength(e1["title"], e2["title"])
             headline_match = False
             if (
-                not (slug_match or title_match or title_cohesion_match)
+                not (slug_match or title_match)
                 and _titles_share_at_least(e1["title"], e2["title"], 2)
             ):
                 headline_match = _events_have_similar_article_headline(
@@ -3730,13 +3884,19 @@ def _deduplicate_active_events_llm_pass(
                     e2["event_id"],
                     article_headlines_by_event,
                 )
-            if slug_match or title_match or title_cohesion_match or headline_match:
-                pair = frozenset((e1["event_id"], e2["event_id"]))
-                candidate_pairs.add(pair)
-                candidate_priorities[pair] = max(
-                    candidate_priorities.get(pair, 0),
-                    4 if slug_match or title_match else 3,
-                )
+            if slug_match or title_match:
+                priority = DEDUPLICATION_PRIORITY_TITLE
+            elif headline_match:
+                priority = DEDUPLICATION_PRIORITY_HEADLINE
+            elif cohesion_strength >= 2:
+                priority = DEDUPLICATION_PRIORITY_COHESION
+            elif cohesion_strength == 1:
+                priority = DEDUPLICATION_PRIORITY_WEAK_COHESION
+            else:
+                continue
+            pair = frozenset((e1["event_id"], e2["event_id"]))
+            candidate_pairs.add(pair)
+            candidate_priorities[pair] = max(candidate_priorities.get(pair, -1), priority)
     heuristic_count = len(candidate_pairs)
 
     # Keyword-overlap candidates + LLM pre-screen are scoped to category-group
@@ -3767,7 +3927,9 @@ def _deduplicate_active_events_llm_pass(
             if pair not in candidate_pairs:
                 candidate_pairs.add(pair)
                 keyword_added += 1
-            candidate_priorities[pair] = max(candidate_priorities.get(pair, 0), 2)
+            candidate_priorities[pair] = max(
+                candidate_priorities.get(pair, -1), DEDUPLICATION_PRIORITY_KEYWORD
+            )
         prescreen_specs.extend(
             _prescreen_chunk_specs_for_events(
                 batch_events,
@@ -3810,7 +3972,9 @@ def _deduplicate_active_events_llm_pass(
         if pair not in candidate_pairs:
             candidate_pairs.add(pair)
             prescreen_added += 1
-        candidate_priorities[pair] = max(candidate_priorities.get(pair, 0), 1)
+        candidate_priorities[pair] = max(
+            candidate_priorities.get(pair, -1), DEDUPLICATION_PRIORITY_PRESCREEN
+        )
 
     if not candidate_pairs:
         return 0

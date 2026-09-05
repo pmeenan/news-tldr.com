@@ -120,8 +120,7 @@ def review_event_coherence(
                     stage="aggregation",
                     model=result.model,
                     prompt_version=COHERENCE_VERSION,
-                    input_tokens=result.usage.get("promptTokenCount"),
-                    output_tokens=result.usage.get("candidatesTokenCount"),
+                    usage=result.usage,
                 )
                 if result.model.endswith("-lite"):
                     raise ValueError("Lite cannot authorize an event partition")
@@ -274,8 +273,7 @@ def guard_event_extensions(
             stage="aggregation",
             model=result.model,
             prompt_version="event-membership-v1",
-            input_tokens=result.usage.get("promptTokenCount"),
-            output_tokens=result.usage.get("candidatesTokenCount"),
+            usage=result.usage,
         )
     if result.model.endswith("-lite"):
         raise ValueError("Lite cannot authorize attachment to an existing event")

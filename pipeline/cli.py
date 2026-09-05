@@ -19,7 +19,7 @@ from pipeline.aggregate import (
 from pipeline.collect import collect_once
 from pipeline.config import load_feeds, load_pipeline_config
 from pipeline.digest import ARTICLE_DIGEST_PROMPT_VERSION, digest_once
-from pipeline.editorial import editorial_once
+from pipeline.editorial import editorial_once, pending_editorial_sql
 from pipeline.lock import PipelineLock
 from pipeline.maintenance import maintenance_once
 from pipeline.operations import (
@@ -106,15 +106,12 @@ def _stderr_progress(message: str) -> None:
 def _pending_editorial_count(*, excluded_event_ids: list[str] | None = None) -> int:
     excluded = sorted(set(excluded_event_ids or []))
     exclusion = f" AND event_id NOT IN ({','.join('?' for _ in excluded)})" if excluded else ""
+    hold_minutes = int(load_pipeline_config().editorial.get("single_source_hold_minutes", 0) or 0)
+    clause, params = pending_editorial_sql(hold_minutes=hold_minutes)
     with StateDB() as state:
         row = state.conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM events
-            WHERE status IN ('active', 'stale')
-              AND (last_editorial_at IS NULL OR updated_at > last_editorial_at)
-            """ + exclusion,
-            excluded,
+            f"SELECT COUNT(*) FROM events WHERE {clause}{exclusion}",
+            [*params, *excluded],
         ).fetchone()
         return int(row[0]) if row else 0
 
@@ -123,6 +120,14 @@ def _blocking_editorial_count(stats: dict) -> int:
     # Validation failures remain pending and unhealthy, but do not starve unrelated news.
     rejected = stats.get("rejected_event_ids")
     return _pending_editorial_count(excluded_event_ids=rejected) if rejected else _pending_editorial_count()
+
+
+def pipeline_lock_status() -> dict:
+    """Report whether a verified live process currently holds the pipeline lock."""
+    from pipeline.lock import lock_holder
+
+    holder = lock_holder(LOCK_PATH)
+    return {"held": holder is not None, "holder": holder}
 
 
 def _recover_stale_pipeline_runs() -> int:
@@ -231,6 +236,8 @@ def run_completed_pipeline(
                     force=False,
                     progress=progress,
                     acquire_lock=False,
+                    backfill_limit=0,
+                    curate=False,
                 )
                 remaining_backlog = _blocking_editorial_count(backlog_editorial_stats)
                 if progress:
@@ -278,11 +285,14 @@ def run_completed_pipeline(
                     progress=progress,
                     acquire_lock=False,
                     max_article_rowid=backlog_article_rowid,
+                    post_review=False,
                 )
                 prior_work_stages["prior_editorial"] = editorial_once(
                     force=False,
                     progress=progress,
                     acquire_lock=False,
+                    backfill_limit=0,
+                    curate=False,
                 )
                 prior_work_stages["prior_presentation"] = presentation_once(
                     publish=publish,
@@ -363,6 +373,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="news-tldr-pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db", help="Initialize or migrate the SQLite state database.")
+    sub.add_parser(
+        "lock-status",
+        help="Exit 0 when the pipeline lock is free or stale, 3 when a verified live run holds it.",
+    )
     run_parser = sub.add_parser(
         "run",
         help="Run completed pipeline stages through presentation and publishing.",
@@ -424,6 +438,14 @@ def main() -> None:
         "--force",
         action="store_true",
         help="Regenerate stories even when events have not changed.",
+    )
+    editorial_parser.add_argument(
+        "--backfill",
+        type=int,
+        help=(
+            "Also regenerate up to N current-window stories that predate evidence "
+            "verification, highest rank first (default: editorial.backfill_per_run; 0 disables)."
+        ),
     )
     editorial_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     presentation_parser = sub.add_parser(
@@ -569,12 +591,19 @@ def main() -> None:
             progress=progress,
         )
         print(json.dumps(stats, indent=2, sort_keys=True))
+    elif args.command == "lock-status":
+        status = pipeline_lock_status()
+        print(json.dumps(status, indent=2, sort_keys=True))
+        if status["held"]:
+            sys.exit(3)
     elif args.command == "editorial":
         progress = _stderr_progress if args.verbose else None
         if args.limit is not None and args.limit < 1:
             parser.error("--limit must be at least 1")
         if args.concurrency is not None and args.concurrency < 1:
             parser.error("--concurrency must be at least 1")
+        if args.backfill is not None and args.backfill < 0:
+            parser.error("--backfill must not be negative")
         migrate()
         stats = editorial_once(
             limit=args.limit,
@@ -582,6 +611,7 @@ def main() -> None:
             force=args.force,
             event_ids=args.event_ids,
             progress=progress,
+            backfill_limit=args.backfill,
         )
         print(json.dumps(stats, indent=2, sort_keys=True))
     elif args.command == "present":

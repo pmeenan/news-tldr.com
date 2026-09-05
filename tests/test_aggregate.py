@@ -2762,8 +2762,8 @@ def test_deduplicate_active_events_llm_requires_high_confidence(tmp_path, monkey
             client=second_client,
             feeds_by_source={},
         )
-        # The loose prescreen still runs, but the unchanged pair's strict review is cached.
-        assert len(second_client.prompts) == 1
+        # Both the unchanged prescreen chunk and the pair's strict review are cached.
+        assert len(second_client.prompts) == 0
 
 
 def test_deduplicate_active_events_llm_cross_category_same_group(tmp_path, monkeypatch) -> None:
@@ -4272,3 +4272,192 @@ def test_deduplicate_active_events_llm_uses_prescreen_when_keywords_miss(tmp_pat
     assert len(merge_calls) == 1  # the prescreen surfaced exactly one pair
     remaining = sorted(p.name for p in event_dir.glob("*.json"))
     assert len(remaining) == 1
+
+
+def test_headline_cohesion_strength_ranks_three_word_matches_above_anchor_pairs() -> None:
+    from pipeline.aggregate import _headline_cohesion_strength
+
+    assert _headline_cohesion_strength(
+        "US diesel prices reach record high amid supply strains",
+        "Diesel prices hit record high as refinery outages squeeze supply",
+    ) == 2
+    assert _headline_cohesion_strength(
+        "Las Vegas Enhanced Games launch sparks controversy and ethical debate",
+        "A Swimmer Broke a World Record at the Enhanced Games",
+    ) == 1
+    assert _headline_cohesion_strength(
+        "Trump demands Federal Reserve cut rates",
+        "Bipartisan senators demand federal inquiry into GI Bill schools",
+    ) == 0
+
+
+def test_deduplication_candidate_order_puts_weak_cohesion_after_prescreen_pairs() -> None:
+    from pipeline.aggregate import (
+        DEDUPLICATION_PRIORITY_COHESION,
+        DEDUPLICATION_PRIORITY_KEYWORD,
+        DEDUPLICATION_PRIORITY_PRESCREEN,
+        DEDUPLICATION_PRIORITY_TITLE,
+        DEDUPLICATION_PRIORITY_WEAK_COHESION,
+        _ordered_deduplication_candidate_pairs,
+    )
+
+    assert DEDUPLICATION_PRIORITY_TITLE > DEDUPLICATION_PRIORITY_PRESCREEN
+    assert DEDUPLICATION_PRIORITY_PRESCREEN == DEDUPLICATION_PRIORITY_KEYWORD
+    assert DEDUPLICATION_PRIORITY_KEYWORD > DEDUPLICATION_PRIORITY_COHESION
+    assert DEDUPLICATION_PRIORITY_COHESION > DEDUPLICATION_PRIORITY_WEAK_COHESION
+    weak = frozenset(("weak-a", "weak-b"))
+    prescreen = frozenset(("old-a", "old-b"))
+    events = {
+        "weak-a": {"updated_at": "2026-09-05T12:00:00Z"},
+        "weak-b": {"updated_at": "2026-09-05T12:00:00Z"},
+        "old-a": {"updated_at": "2026-09-01T12:00:00Z"},
+        "old-b": {"updated_at": "2026-09-01T12:00:00Z"},
+    }
+    ordered = _ordered_deduplication_candidate_pairs(
+        [weak, prescreen],
+        candidate_priorities={
+            weak: DEDUPLICATION_PRIORITY_WEAK_COHESION,
+            prescreen: DEDUPLICATION_PRIORITY_PRESCREEN,
+        },
+        events_by_id=events,
+    )
+    assert ordered == [prescreen, weak]
+
+
+def test_category_impact_floors_validate_config_and_resolve_by_feed(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import pytest
+
+    from pipeline.aggregate import category_impact_floor_for_source, category_impact_floors
+
+    monkeypatch.setattr("pipeline.aggregate.load_categories", lambda: ["world", "entertainment"])
+    assert category_impact_floors({}) == {}
+    assert category_impact_floors({"min_category_impact_overrides": {"entertainment": 0.4}}) == {
+        "entertainment": 0.4
+    }
+    with pytest.raises(ValueError, match="unknown category"):
+        category_impact_floors({"min_category_impact_overrides": {"sports": 0.4}})
+    with pytest.raises(ValueError, match="within 0-1"):
+        category_impact_floors({"min_category_impact_overrides": {"world": 1.5}})
+    feeds = {"variety": SimpleNamespace(default_category="entertainment")}
+    floors = {"entertainment": 0.4}
+    assert category_impact_floor_for_source(
+        "variety", feeds_by_source=feeds, min_category_impact=0.25, floors=floors
+    ) == 0.4
+    assert category_impact_floor_for_source(
+        "unknown", feeds_by_source=feeds, min_category_impact=0.25, floors=floors
+    ) == 0.25
+    assert category_impact_floor_for_source(
+        "variety", feeds_by_source=feeds, min_category_impact=0.25, floors={}
+    ) == 0.25
+
+
+def test_load_window_articles_applies_per_category_impact_floor(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        for article_id, source_id in (("film", "variety"), ("summit", "ap")):
+            article_path = tmp_path / f"{article_id}.json"
+            payload = {
+                "article_id": article_id,
+                "source_id": source_id,
+                "source_name": source_id,
+                "url": f"https://example.com/{article_id}",
+                "headline": f"Headline {article_id}",
+                "summary": f"Summary {article_id}",
+                "published_at": "2026-05-24T16:30:00Z",
+                "publish_date_estimated": False,
+                "fetched_at": "2026-05-24T16:31:00Z",
+                "content_type": "unknown",
+                "language": "en",
+                "collection": {},
+                "fingerprints": {},
+                "llm_digest": {
+                    "summary": "Generated digest.",
+                    "key_facts": ["A key fact."],
+                    "impact": {"global": 0.3, "category": 0.3},
+                },
+            }
+            article_path.write_text(json.dumps(payload), encoding="utf-8")
+            state.insert_article(payload, article_path)
+
+        articles = load_window_articles(
+            window_start="2026-05-24T16:00:00Z",
+            window_end="2026-05-24T22:00:00Z",
+            min_category_impact=0.25,
+            category_impact_floors={"entertainment": 0.4},
+            feeds_by_source={
+                "variety": SimpleNamespace(default_category="entertainment"),
+                "ap": SimpleNamespace(default_category="world"),
+            },
+            db=state,
+        )
+        row = state.conn.execute(
+            "SELECT aggregation_status, aggregation_reason FROM articles WHERE article_id = 'film'"
+        ).fetchone()
+
+    assert [article.article_id for article in articles] == ["summit"]
+    assert row["aggregation_status"] == "filtered_low_impact"
+    assert "below 0.400" in row["aggregation_reason"]
+
+
+def test_prescreen_chunks_are_stable_and_cached(tmp_path) -> None:
+    from pipeline.aggregate import _execute_prescreen_chunk_specs, _prescreen_chunk_specs_for_events
+
+    events = [
+        {"event_id": f"e-{i:02d}", "title": f"Title {i}", "article_count": 5 if i < 6 else 1,
+         "created_at": f"2026-05-25T{i % 24:02d}:00:00Z", "keywords": [f"kw{i}"]}
+        for i in range(80)
+    ]
+    specs_a = _prescreen_chunk_specs_for_events(events, set(), batch_label="b")
+    newcomer = {"event_id": "e-new", "title": "New event", "article_count": 1,
+                "created_at": "2026-05-26T00:00:00Z", "keywords": ["new"]}
+    specs_b = _prescreen_chunk_specs_for_events([*events, newcomer], set(), batch_label="b")
+    chunks_a = {tuple(e["event_id"] for e in spec.chunk) for spec in specs_a}
+    chunks_b = {tuple(e["event_id"] for e in spec.chunk) for spec in specs_b}
+    assert len(chunks_a) >= 3
+    assert len(chunks_a & chunks_b) >= len(chunks_a) - 1
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        client = FakeJsonGenerator({"candidate_pairs": [{"event_a": "e-00", "event_b": "e-01"}]})
+        first = _execute_prescreen_chunk_specs(specs_a, {}, client=client, state=state, run_id="r", concurrency=1)
+        calls = len(client.prompts)
+        assert calls == len(specs_a) and first
+        second = _execute_prescreen_chunk_specs(specs_a, {}, client=client, state=state, run_id="r", concurrency=1)
+        assert len(client.prompts) == calls and second == first
+        assert state.conn.execute("SELECT COUNT(*) FROM llm_usage").fetchone()[0] == calls
+        # A changed title invalidates only that chunk.
+        events[10]["title"] = "Retitled"
+        specs_c = _prescreen_chunk_specs_for_events(events, set(), batch_label="b")
+        _execute_prescreen_chunk_specs(specs_c, {}, client=client, state=state, run_id="r", concurrency=1)
+        assert len(client.prompts) == calls + 1
+
+
+def test_aggregate_once_skips_post_review_when_disabled(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+
+    from pipeline.config import PipelineConfig
+
+    monkeypatch.setattr("pipeline.aggregate.StateDB", lambda: StateDB(db_path))
+    monkeypatch.setattr("pipeline.aggregate.LOCK_PATH", tmp_path / "pipeline.lock")
+    monkeypatch.setattr(
+        "pipeline.aggregate.load_pipeline_config",
+        lambda: PipelineConfig(collection={}, aggregation={}, retention={}, pipeline={}, digest={}),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr("pipeline.aggregate.deduplicate_active_events_llm", lambda **kwargs: calls.append("dedup") or 0)
+    monkeypatch.setattr(
+        "pipeline.coherence.review_event_coherence",
+        lambda **kwargs: calls.append("coherence") or {"reviewed": 0, "split": 0, "failed": 0},
+    )
+
+    stats = aggregate_once(client=FakeJsonGenerator({}), post_review=False)
+    assert stats["post_review_skipped"] is True and calls == []
+    stats = aggregate_once(client=FakeJsonGenerator({}))
+    assert calls == ["coherence", "dedup"] and "post_review_skipped" not in stats

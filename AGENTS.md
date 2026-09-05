@@ -34,6 +34,150 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on September 5, 2026, later (LLM Spend Reduction: Accounting, Curation Reuse, Prescreen Cache, Lite Evidence, Gate, Flex, 3.8 Flash)
+
+- **Baseline**: recorded spend was about $41/day (39.5M input, 5.4M output
+  tokens; curation 20%, editorial drafts 25%, evidence 19%, prescreen 7%), with
+  thinking tokens unrecorded. Implicit caching was ruled out (prefixes 185–2,167
+  tokens vs a 4,096-token minimum); batch mode was ruled out in favor of flex.
+- **Accounting** (`pipeline/llm.py`, `pipeline/state.py`, schema v10):
+  `llm_usage` gains `thinking_tokens`, `cached_tokens`, `service_tier`;
+  `record_llm_usage(usage=...)` fills them from `usageMetadata` and estimates
+  `cost_usd` from `llm.prices` in `config/pipeline.json` (thinking billed as
+  output, cached input at the cached rate, flex/batch rates by tier).
+  `llm-usage` reports thinking/cached totals and flex call counts.
+- **Models and flex**: review chain is 3.8 Flash → 3.7 Flash; 3.5 Flash (twice
+  the price) is appended only for editorial verification (`last_resort=True`).
+  Each chain starts with one flex attempt on `GEMINI_REVIEW_FLEX_MODEL`
+  (3.7 Flash; 3.8 flex shed every probe, 3.7 flex answered in under a second)
+  bounded by `llm.flex_budget_seconds[purpose]` (240 s digest/aggregation/
+  editorial/evidence, 900 s deduplication/coherence/curation). Flex clients use
+  `max_attempts=1`; a shed (429/503) or overrun attempt falls through and the
+  model:tier label cools for five minutes. `GEMINI_FLEX_DISABLED=1` disables.
+  Live `.env` now sets `GEMINI_REVIEW_MODEL=gemini-3.8-flash`; fallbacks come
+  from code defaults. Concurrency: digest 40, dedup 16, editorial 6; watchdog
+  50 min; `lock-status` CLI plus a scheduler skip when a live run holds the lock.
+- **Editorial** (`pipeline/editorial.py`, `pipeline/evidence.py`): evidence
+  extraction runs on Flash-Lite (`evidence_client`) with one full-Flash retry
+  after two Lite validation failures; passages capped at 3 per claim and 320
+  characters (`editorial-evidence-v2`); drafts omit `article_text` when a ledger
+  exists (`editorial-v5`, `editorial-framing-v4`); verification uses the
+  last-resort chain. A Flash-Lite `material_update_gate`
+  (`editorial-update-gate-v1`) skips regeneration of verified stories whose new
+  reports add nothing (no new articles skips without a call); skipped events
+  advance their checkpoint and count as `skipped_unchanged`. Single-article
+  events wait `editorial.single_source_hold_minutes` (60) before their first
+  story; `pending_editorial_sql` applies the hold to the run gate, preflight and
+  health counts.
+- **Curation**: `homepage-curation-v6` cards carry id/category/headline/two
+  ranks/source_count/coverage_priority/hours_old; 80 Top News candidates, 50
+  per category; category sections run on Flash-Lite (`sections_client`).
+  `write_active_stories_index` stores an `input_signature` of the window's story
+  versions and reuses the previous curation when unchanged or when called with
+  `reuse_previous_curation=True`; the combined run curates only in its final
+  editorial pass (`curate=False` on backlog/snapshot passes).
+- **Aggregation**: `aggregate_once(post_review=False)` skips coherence and
+  deduplication (used for the snapshot pass); prescreen chunks are hash-bucketed
+  by event ID and cached in `deduplication_prescreens` by content signature
+  (pruned after 7 days). Base `min_category_impact` is 0.30.
+- **Verification**: 330 tests pass; `ruff`, `compileall`, `bash -n` pass.
+  Live fixture evaluation with the new pipeline passed 5/5: Lite evidence
+  succeeded first try on every case, quotes ≤136 characters, bullets 13–19
+  words, calls split 5 Lite flex / 4 3.7 flex / 8 3.8 standard. Cost dollars
+  appear only for calls recorded after this change.
+- **Live rollout runs (16:34 and 16:41 UTC)**: the first manual run exposed a
+  conflict between the single-publisher attribution rule and the verifier,
+  which rejected "according to Wired" because it never saw publisher names; it
+  was interrupted, three false `item_errors` were deleted so the backfill would
+  retry those stories, and `verify_story` now receives a `publishers` map with
+  an instruction that attributing a supported claim to the quoted report's
+  outlet is correct. The second run completed and published: backlog 3/4,
+  main pass 11 completed, 2 gate-skipped, 1 rejected; backfill 94/100 in about
+  three minutes; curation reused on the intermediate pass and generated once;
+  13 dedup merges from 120 reviewed pairs. Recorded cost for the run was $1.73
+  ($1.45 editorial, dominated by the one-time backfill at about 1.4 cents per
+  story). Thinking tokens are negligible at thinking level low.
+- **Two fixes after observation**: only 2 of 87 prescreen chunks hit the cache
+  on the second run because the headline query had no ORDER BY and the
+  signature used stopword-filtered keywords; the query is now ordered and the
+  signature uses raw keywords and sorted headlines (expect high reuse from the
+  second scheduled run onward). Only 25 of 422 full-Flash calls used flex
+  because one shed request cooled the tier for five minutes; flex clients now
+  carry their own `llm.flex_cooldown_seconds` (45 s).
+- **Follow-ups**: validation-rejected events (for example the GPT-6 Astra story)
+  are retried every hour at about five calls each until their event changes;
+  add a rejection cooldown to `pending_editorial_sql` if `llm-usage` shows it
+  matters. Watch the flex share and the gate skip rate in the next day's usage.
+- **Not committed.** Developed in a temporary worktree and applied to the main
+  tree between scheduled runs.
+
+### State on September 5, 2026 (Review Follow-ups: Dedup Queue, Impact Floors, Editorial Rules, Backfill, Cards, Dark Theme)
+
+- **Scope**: Implemented the September 5 site/pipeline review recommendations
+  chosen by the user. The one-second/60%-visible read rule and the single-page
+  HTML architecture are intentionally unchanged.
+- **Production finding (not code)**: the installed nginx was GetPageSpeed's
+  unlicensed build, which appends a "Served by GetPageSpeed NGINX - free trial"
+  line after `</html>` on every page. Replacement steps with the official
+  nginx.org build (already configured and pinned) were given to the user; the
+  brotli module is dropped because Cloudflare compresses at the edge. Verify
+  with `curl -sk --resolve news-tldr.com:443:127.0.0.1 https://news-tldr.com/methodology/ | tail -c 200`.
+- **Deduplication** (`pipeline/aggregate.py`, `config/pipeline.json`): live analysis showed
+  ~2,400 candidate pairs per hour against a 40-pair cap, with the noisy two-word
+  title-cohesion heuristic ordered ahead of keyword/prescreen candidates
+  (2,229 rejections vs 593 merges over three days). Candidates are now ordered
+  title/slug (4) → headline match, keyword overlap, prescreen (3) → three-word
+  cohesion (2) → weak two-word cohesion (0); `_headline_cohesion_strength` exposes
+  the tiers. `deduplication_max_pairs_per_run` is 120 (about 14 s and 40 Flash
+  calls per 40 pairs). A cross-group anchor gate was evaluated and dropped: the
+  known splits were already candidates and the gate added only noise.
+- **Impact floors**: `aggregation.min_category_impact_overrides` (production
+  `{"entertainment": 0.4}`) resolves per feed default category in both
+  `load_window_articles` and the digest filter-review trigger; the review prompt
+  now states the effective threshold. Existing entertainment events are untouched.
+- **Editorial** (`pipeline/editorial.py`, `pipeline/evidence.py`): prompt versions
+  `editorial-v4`, `editorial-framing-v3`, compact variants, and
+  `editorial-verification-v2`. Briefing bullets target 15–22 words (230-char
+  cap). Deterministic rejections with one repair: title-case headlines (≥75% of
+  eligible words capitalized), headlines equal to a source headline, and
+  single-publisher stories whose dek or first bullet does not name the outlet or
+  say "according to". Change summaries must be one reader-facing sentence of
+  news; changelog phrasing ("Added…", "Updated to…") or a copied bullet triggers
+  one verifier retry whose usage is recorded.
+- **Backfill**: `editorial.backfill_per_run=100`, `backfill_time_budget_minutes=12`,
+  `backfill_error_cooldown_hours=24`. After normal work, `backfill_editorial_stories`
+  regenerates current-window stories lacking `evidence_verification`, highest
+  rank first, lazily submitting within the time budget; failures use the normal
+  editorial error path and never block the run gate. `editorial --backfill N`
+  overrides; forced/event-scoped runs skip it; the combined run enables it only
+  in the final editorial pass. At the observed ~3 s/story effective rate the
+  window's 1,072 pre-evidence stories migrate in about half a day.
+- **Presentation v24** (`pipeline/present.py`, `pipeline/operations.py`): cards
+  name publishers ("ABC News, NPR +3", deduplicated by publisher identity and
+  display name) in place of outlet counts; the revision note is rendered hidden
+  and revealed only for readers whose history covers the earlier revision, always
+  labelled "Updated since you read". All colors are tokens; a dark token set
+  applies via `prefers-color-scheme` or `data-theme`, and a synchronous
+  fingerprinted `assets/theme.<hash>.js` applies the saved `newsTldrThemeV1`
+  choice before CSS and drives the masthead sun/moon toggle on every page.
+  Validation expects exactly one `site.css`, `site.js`, and `theme.js` asset;
+  deployment retains prior theme assets for cached HTML.
+- **Verification**: 313 tests passed (`PYTHONPATH=. ./.venv/bin/pytest -q`);
+  `ruff check .`, `compileall`, and Node syntax checks of both generated scripts
+  passed. `present --build-only` rendered 5,717 stories; the homepage is 2.45 MB
+  (slightly smaller than live). Chromium screenshots at 1440 and 390 px verified
+  light/dark homepage, mobile, and story page rendering with publisher labels.
+  `scripts/evaluate-editorial.py --verbose` passed 5/5 fixtures on the v4 prompt:
+  bullets 14–18 words, dek and first bullet attribute the single fixture
+  publisher, headlines sentence case. No dependency was added.
+- **Rollout**: source changes only; the next hourly run publishes v24, starts the
+  120-pair dedup queue and the 100-story backfill. Until that run rebuilds
+  `dist/`, `validate-data` reports the missing theme asset against the old build.
+  Watch the first runs for backfill validation rejections (attribution rule) and
+  the dedup merge/reject mix; `docs/plan.md` records the follow-up.
+- **Not committed.** Work was developed in a temporary git worktree and applied
+  to the main tree between scheduled runs.
+
 ### State on September 4, 2026 (Evidence-Grounded Editorial and Finite Briefing)
 
 - **Scope**: Implemented the requested editorial and presentation review changes.

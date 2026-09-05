@@ -6,8 +6,12 @@ import json
 import re
 from typing import Any
 
-EVIDENCE_VERSION = "editorial-evidence-v1"
-REVIEW_VERSION = "editorial-verification-v1"
+EVIDENCE_VERSION = "editorial-evidence-v2"
+REVIEW_VERSION = "editorial-verification-v2"
+# Output tokens cost five times input tokens; short passages keep the ledger
+# auditable without paying for whole paragraphs.
+EVIDENCE_MAX_PASSAGES_PER_CLAIM = 3
+EVIDENCE_MAX_QUOTE_CHARS = 320
 
 
 def normalized(text: str) -> str:
@@ -62,7 +66,9 @@ def collect_evidence(event: Any, client: Any, *, feedback: str = "") -> tuple[li
             "Select 4-12 essential claims, including material uncertainty, contradictions, dates, numbers, "
             "research limitations, and attribution. Omit unrelated developments and boilerplate. "
             "Each evidence quote must be a short EXACT contiguous passage from the supplied article text "
-            "that supports the claim. Never use a headline alone as evidence. Attribute allegations, forecasts, "
+            f"that supports the claim: at most {EVIDENCE_MAX_PASSAGES_PER_CLAIM} passages per claim, each under "
+            f"{EVIDENCE_MAX_QUOTE_CHARS} characters, quoting only the sentence or clause that carries the fact. "
+            "Never use a headline alone as evidence. Attribute allegations, forecasts, "
             "and preliminary results in the claim itself. Repetition is not independent verification. "
             "Preserve the difference between a reported fact and a claim by an interested party.\n"
             + json.dumps(articles, ensure_ascii=False)
@@ -92,19 +98,21 @@ def validate_evidence(payload: Any, event: Any) -> list[dict[str, Any]]:
         if len(claim["text"]) > 1000 or claim.get("status") not in {"reported", "attributed", "disputed", "uncertain"}:
             raise ValueError("invalid evidence claim")
         evidence = claim.get("evidence")
-        if not isinstance(evidence, list) or not 1 <= len(evidence) <= 8:
-            raise ValueError("evidence claim requires supporting passages")
+        if not isinstance(evidence, list) or not 1 <= len(evidence) <= EVIDENCE_MAX_PASSAGES_PER_CLAIM:
+            raise ValueError(
+                f"each claim needs 1-{EVIDENCE_MAX_PASSAGES_PER_CLAIM} supporting passages"
+            )
         for item in evidence:
             if not isinstance(item, dict):
                 raise ValueError("invalid evidence passage")
             aid, quote = item.get("article_id"), item.get("quote")
-            if (
-                not isinstance(aid, str)
-                or aid not in texts
-                or not isinstance(quote, str)
-                or not 8 <= len(quote) <= 1200
-            ):
+            if not isinstance(aid, str) or aid not in texts or not isinstance(quote, str) or len(quote) < 8:
                 raise ValueError("invalid evidence source or quote")
+            if len(quote) > EVIDENCE_MAX_QUOTE_CHARS:
+                raise ValueError(
+                    f"evidence quote exceeds {EVIDENCE_MAX_QUOTE_CHARS} characters; quote only the clause "
+                    "that carries the fact"
+                )
             if normalized(quote) not in texts[aid]:
                 raise ValueError("evidence quote is not present in supplied article text")
         verified.append(
@@ -135,60 +143,130 @@ def validate_claim_links(payload: dict[str, Any], ledger: list[dict[str, Any]]) 
             check(row)
 
 
+CHANGE_SUMMARY_MAX_CHARS = 300
+# A change summary describes news for readers, never the edit itself.
+_CHANGE_SUMMARY_EDIT_OPENERS = re.compile(
+    r"^(?:added|adds|adding|updated|updates|updating|update|details?|expanded|expands|included|includes|"
+    r"incorporated|incorporates|revised|revises|clarified|clarifies|corrected|the (?:coverage|story|summary|"
+    r"update|draft)|this (?:update|revision|story)|coverage|new (?:details?|information|coverage)|"
+    r"now (?:includes?|reports?))\b",
+    re.IGNORECASE,
+)
+
+
+def change_summary_problem(summary: str, payload: dict[str, Any]) -> str | None:
+    """Return why a change summary is unsuitable for readers, or None when acceptable."""
+    text = normalized(summary)
+    if not text:
+        return None
+    if _CHANGE_SUMMARY_EDIT_OPENERS.match(text):
+        return (
+            "change_summary describes the edit instead of the news; write one reader-facing sentence "
+            "stating the new fact, resolved question or correction as news"
+        )
+    lowered = text.lower().rstrip(".")
+    bullets = list(payload.get("briefing") or []) + list(payload.get("tldr") or [])
+    for bullet in bullets:
+        if normalized(str(bullet)).lower().rstrip(".") == lowered:
+            return "change_summary must not repeat a briefing or TLDR bullet verbatim"
+    return None
+
+
 def verify_story(
-    payload: dict[str, Any], ledger: list[dict[str, Any]], previous: dict[str, Any] | None, client: Any
+    payload: dict[str, Any],
+    ledger: list[dict[str, Any]],
+    previous: dict[str, Any] | None,
+    client: Any,
+    *,
+    publishers: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], Any]:
-    result = client.generate_json(
-        system_instruction=(
-            "Independently verify a news draft against quoted evidence. Do not trust the draft's assertions."
-        ),
-        prompt=(
-            "Check EVERY assertion in headline, dek, briefing, TLDR, facts, uncertainties and framing against "
-            "the ledger's actual quoted passages, not just its claim text. Reject unsupported numbers, dates, "
-            "causality, allegations stated as facts, missing material qualifications, or misleading certainty. "
-            "Source IDs existing is insufficient. approved must be false if any substantive assertion fails. "
-            "For an existing story, material_update is true ONLY for new substantive facts, resolved uncertainty, "
-            "or a correction; extra citations, paraphrasing and regenerated timestamps do not count. "
-            "For rumors/leaks, the headline itself must retain reported/according-to attribution. "
-            "If true, write a short factual change_summary supported by the quoted ledger; otherwise leave it empty.\n"
-            + json.dumps(
-                {
-                    "ledger": ledger,
-                    "draft": payload,
-                    "previous": {k: previous.get(k) for k in ("headline", "tldr", "key_facts", "uncertainties")}
-                    if previous
-                    else None,
+    """Verify a draft. A change summary written as a changelog gets one bounded retry;
+    the extra result is returned under ``retried_results`` for usage accounting.
+    ``publishers`` maps article IDs to outlet names so attribution such as
+    "according to Wired" can be checked against the quoted report's publisher."""
+    retried_results: list[Any] = []
+    feedback = ""
+    for attempt in range(2):
+        result = client.generate_json(
+            system_instruction=(
+                "Independently verify a news draft against quoted evidence. Do not trust the draft's assertions."
+            ),
+            prompt=(
+                "Check EVERY assertion in headline, dek, briefing, TLDR, facts, uncertainties and framing against "
+                "the ledger's actual quoted passages, not just its claim text. Reject unsupported numbers, dates, "
+                "causality, allegations stated as facts, missing material qualifications, or misleading certainty. "
+                "Source IDs existing is insufficient. approved must be false if any substantive assertion fails. "
+                "For an existing story, material_update is true ONLY for new substantive facts, resolved "
+                "uncertainty, or a correction; extra citations, paraphrasing and regenerated timestamps do not "
+                "count. For rumors/leaks, the headline itself must retain reported/according-to attribution. "
+                "The publishers map names the outlet that published each quoted article_id; attributing a "
+                "supported claim to that outlet ('<outlet> reports', 'according to <outlet>') is correct "
+                "attribution and must not be rejected. Reject attribution to an outlet that published none "
+                "of the quoted passages. "
+                "When material_update is true, change_summary is ONE reader-facing sentence (at most 30 words) "
+                "that states the new development itself as news, supported by the quoted ledger, for example "
+                "'Rescuers found two trapped workers alive nine days after the floods.' It must never describe "
+                "the edit ('Added details', 'Updated to include'), never begin with a verb about the text, and "
+                "must not repeat a briefing bullet. Otherwise leave change_summary empty.\n"
+                + json.dumps(
+                    {
+                        "ledger": ledger,
+                        "publishers": publishers or {},
+                        "draft": payload,
+                        "previous": {k: previous.get(k) for k in ("headline", "tldr", "key_facts", "uncertainties")}
+                        if previous
+                        else None,
+                    },
+                    ensure_ascii=False,
+                )
+                + (f"\nCorrect this problem with your previous review: {feedback}" if feedback else "")
+            ),
+            response_schema={
+                "type": "OBJECT",
+                "properties": {
+                    "approved": {"type": "BOOLEAN"},
+                    "reason": {"type": "STRING"},
+                    "material_update": {"type": "BOOLEAN"},
+                    "change_summary": {"type": "STRING"},
                 },
-                ensure_ascii=False,
-            )
-        ),
-        response_schema={
-            "type": "OBJECT",
-            "properties": {
-                "approved": {"type": "BOOLEAN"},
-                "reason": {"type": "STRING"},
-                "material_update": {"type": "BOOLEAN"},
-                "change_summary": {"type": "STRING"},
+                "required": ["approved", "reason", "material_update", "change_summary"],
             },
-            "required": ["approved", "reason", "material_update", "change_summary"],
-        },
-        max_output_tokens=2048,
-        thinking_level="low",
-    )
-    try:
-        return _validate_review(result.payload, previous), result
-    except ValueError as exc:
-        exc.editorial_unrecorded_result = (result, REVIEW_VERSION)
-        raise
+            max_output_tokens=2048,
+            thinking_level="low",
+        )
+        try:
+            review = _validate_review(result.payload, previous, payload)
+        except ValueError as exc:
+            if attempt == 0 and getattr(exc, "editorial_retryable_review", False):
+                retried_results.append(result)
+                feedback = str(exc)
+                continue
+            exc.editorial_unrecorded_result = (result, REVIEW_VERSION)
+            if retried_results:
+                exc.editorial_retried_results = retried_results
+            raise
+        review["retried_results"] = retried_results
+        return review, result
+    raise AssertionError("unreachable")
 
 
-def _validate_review(review: Any, previous: dict[str, Any] | None) -> dict[str, Any]:
+def _validate_review(
+    review: Any, previous: dict[str, Any] | None, payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
     if not isinstance(review, dict) or not isinstance(review.get("approved"), bool):
         raise ValueError("editorial verifier returned invalid decision")
     if not isinstance(review.get("material_update"), bool) or not isinstance(review.get("change_summary"), str):
         raise ValueError("editorial verifier returned invalid revision")
-    if len(review["change_summary"]) > 500 or (
+    if len(review["change_summary"]) > CHANGE_SUMMARY_MAX_CHARS or (
         previous and review["material_update"] and not review["change_summary"].strip()
     ):
         raise ValueError("material revision requires a concise change summary")
+    if not previous or not review["material_update"]:
+        review["change_summary"] = ""
+    problem = change_summary_problem(review["change_summary"], payload or {})
+    if problem:
+        error = ValueError(problem)
+        error.editorial_retryable_review = True
+        raise error
+    review["change_summary"] = normalized(review["change_summary"])
     return review

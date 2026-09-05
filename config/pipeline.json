@@ -15,23 +15,30 @@
     "window_step_hours": 3,
     "stale_threshold_hours": 48,
     "category_batch_concurrency": 8,
-    "deduplication_concurrency": 4,
-    "deduplication_max_pairs_per_run": 40,
+    "deduplication_concurrency": 16,
+    "deduplication_max_pairs_per_run": 120,
     "deduplication_max_passes_per_run": 1,
     "deduplication_lookback_hours": 72,
-    "min_category_impact": 0.25,
+    "min_category_impact": 0.3,
+    "min_category_impact_overrides": {
+      "entertainment": 0.4
+    },
     "coherence_reviews_per_run": 10
   },
   "digest": {
-    "concurrency": 10,
+    "concurrency": 40,
     "content_char_limit": 12000,
     "filter_review_enabled": true,
     "filter_review_margin": 0.1
   },
   "editorial": {
-    "concurrency": 2,
+    "concurrency": 6,
     "article_char_limit": 12000,
-    "event_char_limit": 40000
+    "event_char_limit": 40000,
+    "backfill_per_run": 100,
+    "backfill_time_budget_minutes": 12,
+    "backfill_error_cooldown_hours": 24,
+    "single_source_hold_minutes": 60
   },
   "presentation": {
     "site_url": "https://news-tldr.com",
@@ -50,7 +57,65 @@
     "archived_event_days": 30
   },
   "pipeline": {
-    "watchdog_timeout_minutes": 30,
+    "watchdog_timeout_minutes": 50,
     "max_item_retries": 3
+  },
+  "llm": {
+    "flex_cooldown_seconds": 45,
+    "flex_budget_seconds": {
+      "digest": 240,
+      "aggregation": 240,
+      "deduplication": 900,
+      "coherence": 900,
+      "editorial": 240,
+      "evidence": 240,
+      "curation": 900
+    },
+    "prices": {
+      "gemini-3.8-flash": {
+        "input": 0.75,
+        "output": 3.75,
+        "cached_input": 0.075,
+        "flex_input": 0.375,
+        "flex_output": 1.875,
+        "batch_input": 0.375,
+        "batch_output": 1.875
+      },
+      "gemini-3.7-flash": {
+        "input": 0.75,
+        "output": 3.75,
+        "cached_input": 0.075,
+        "flex_input": 0.375,
+        "flex_output": 1.875,
+        "batch_input": 0.375,
+        "batch_output": 1.875
+      },
+      "gemini-3.6-flash": {
+        "input": 0.75,
+        "output": 3.75,
+        "cached_input": 0.075,
+        "flex_input": 0.375,
+        "flex_output": 1.875,
+        "batch_input": 0.375,
+        "batch_output": 1.875
+      },
+      "gemini-3.5-flash": {
+        "input": 1.5,
+        "output": 9.0,
+        "cached_input": 0.15,
+        "flex_input": 0.75,
+        "flex_output": 4.5,
+        "batch_input": 0.75,
+        "batch_output": 4.5
+      },
+      "gemini-3.5-flash-lite": {
+        "input": 0.3,
+        "output": 2.5,
+        "flex_input": 0.15,
+        "flex_output": 1.25,
+        "batch_input": 0.15,
+        "batch_output": 1.25
+      }
+    }
   }
 }

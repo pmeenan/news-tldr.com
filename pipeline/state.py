@@ -18,7 +18,7 @@ def _relative_to_project(path: Path) -> str:
         return str(path)
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 # Each migration is the SQL needed to take the database from the previous
@@ -264,6 +264,26 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
 
         CREATE INDEX IF NOT EXISTS idx_deduplication_reviews_reviewed_at
           ON deduplication_reviews(reviewed_at);
+        """,
+    ),
+    (
+        10,
+        """
+        ALTER TABLE llm_usage ADD COLUMN thinking_tokens INTEGER;
+        ALTER TABLE llm_usage ADD COLUMN cached_tokens INTEGER;
+        ALTER TABLE llm_usage ADD COLUMN service_tier TEXT;
+
+        CREATE TABLE IF NOT EXISTS deduplication_prescreens (
+          chunk_signature TEXT NOT NULL,
+          prompt_version TEXT NOT NULL,
+          model TEXT NOT NULL,
+          pairs_json TEXT NOT NULL,
+          reviewed_at TEXT NOT NULL,
+          PRIMARY KEY (chunk_signature, prompt_version)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_deduplication_prescreens_reviewed_at
+          ON deduplication_prescreens(reviewed_at);
         """,
     ),
 )
@@ -773,21 +793,105 @@ class StateDB:
         stage: str,
         model: str,
         prompt_version: str | None,
-        input_tokens: int | None,
-        output_tokens: int | None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
         cost_usd: float | None = None,
+        *,
+        usage: dict[str, Any] | None = None,
+        thinking_tokens: int | None = None,
+        cached_tokens: int | None = None,
+        service_tier: str | None = None,
     ) -> None:
+        """Persist one call's usage. A raw ``usageMetadata`` dict fills every token
+        field and the service tier; the cost is estimated from the price table."""
+        from pipeline.llm import estimate_cost_usd, usage_fields
+
+        if usage is not None:
+            fields = usage_fields(usage)
+            input_tokens = fields["input_tokens"] if input_tokens is None else input_tokens
+            output_tokens = fields["output_tokens"] if output_tokens is None else output_tokens
+            thinking_tokens = fields["thinking_tokens"] if thinking_tokens is None else thinking_tokens
+            cached_tokens = fields["cached_tokens"] if cached_tokens is None else cached_tokens
+            service_tier = fields["service_tier"] if service_tier is None else service_tier
+        if cost_usd is None:
+            cost_usd = estimate_cost_usd(
+                model=model,
+                service_tier=service_tier,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                thinking_tokens=thinking_tokens,
+                cached_tokens=cached_tokens,
+            )
         now = isoformat_z()
         with self.conn:
             self.conn.execute(
                 """
                 INSERT INTO llm_usage (
-                  run_id, stage, model, prompt_version, input_tokens, output_tokens, cost_usd, occurred_at
+                  run_id, stage, model, prompt_version, input_tokens, output_tokens, cost_usd, occurred_at,
+                  thinking_tokens, cached_tokens, service_tier
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, stage, model, prompt_version, input_tokens, output_tokens, cost_usd, now),
+                (
+                    run_id, stage, model, prompt_version, input_tokens, output_tokens, cost_usd, now,
+                    thinking_tokens, cached_tokens, service_tier,
+                ),
             )
+
+    def get_cached_prescreen_pairs(
+        self, *, chunk_signature: str, prompt_version: str
+    ) -> list[tuple[str, str]] | None:
+        row = self.conn.execute(
+            """
+            SELECT pairs_json FROM deduplication_prescreens
+            WHERE chunk_signature = ? AND prompt_version = ?
+            """,
+            (chunk_signature, prompt_version),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            pairs = json.loads(row["pairs_json"])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(pairs, list):
+            return None
+        return [
+            (str(pair[0]), str(pair[1]))
+            for pair in pairs
+            if isinstance(pair, list) and len(pair) == 2
+        ]
+
+    def put_cached_prescreen_pairs(
+        self,
+        *,
+        chunk_signature: str,
+        prompt_version: str,
+        model: str,
+        pairs: Sequence[tuple[str, str]],
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO deduplication_prescreens (
+                  chunk_signature, prompt_version, model, pairs_json, reviewed_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    chunk_signature,
+                    prompt_version,
+                    model,
+                    json.dumps([list(pair) for pair in pairs]),
+                    isoformat_z(),
+                ),
+            )
+
+    def prune_cached_prescreens(self, *, older_than: str) -> int:
+        with self.conn:
+            cursor = self.conn.execute(
+                "DELETE FROM deduplication_prescreens WHERE reviewed_at < ?", (older_than,)
+            )
+            return int(cursor.rowcount or 0)
 
     def start_run(self, run_id: str, stage: str) -> None:
         self.conn.execute(

@@ -54,21 +54,38 @@ Create a local `.env` file with an AI Studio API key and the two model tiers:
 ```bash
 GEMINI_API_KEY=your-ai-studio-api-key
 GEMINI_BULK_MODEL=gemini-3.5-flash-lite
-GEMINI_REVIEW_MODEL=gemini-3.7-flash
-GEMINI_REVIEW_FALLBACK_MODELS=gemini-3.6-flash,gemini-3.5-flash
+GEMINI_REVIEW_MODEL=gemini-3.8-flash
+GEMINI_REVIEW_FALLBACK_MODELS=gemini-3.7-flash
+GEMINI_REVIEW_LAST_RESORT_MODELS=gemini-3.5-flash
+GEMINI_REVIEW_FLEX_MODEL=gemini-3.7-flash
 GEMINI_REVIEW_LITE_FALLBACK_MODEL=gemini-3.5-flash-lite
 ```
 
 `GEMINI_MODEL` remains a supported fallback for the bulk tier. The `.env` file
 is ignored by git and must not be committed. Bulk digestion, grouping, scoring,
-and candidate discovery use 3.5 Flash-Lite with minimal thinking. Borderline
-article-filter decisions, editorial, and final event-merge decisions try 3.7,
-3.6, then 3.5 Flash with low thinking when capacity is constrained.
-Deduplication may fall back once more to 3.5 Flash-Lite, but a Lite result can
-only reject or defer a pair and can never authorize a merge. All calls use
-Gemini structured output and validated responses. Safety-sensitive editorial
-inputs that produce empty responses across all full-Flash tiers get one compact
-digest/key-fact retry on the same full-Flash chain; editorial never uses Lite.
+candidate discovery, editorial evidence extraction, the regeneration gate, and
+homepage category sections use 3.5 Flash-Lite with minimal thinking. Borderline
+article-filter decisions, drafting, verification, Top News curation, and final
+event-merge decisions use 3.8 Flash with low thinking, falling back to 3.7
+Flash when capacity is constrained. 3.5 Flash costs twice as much, so only
+editorial verification may reach it as a last resort. Deduplication may fall
+back once more to 3.5 Flash-Lite, but a Lite result can only reject or defer a
+pair and can never authorize a merge. All calls use Gemini structured output and
+validated responses. Safety-sensitive editorial inputs that produce empty
+responses across all full-Flash tiers get one compact digest/key-fact retry on
+the same full-Flash chain; drafting and verification never use Lite.
+
+Every chain starts with one half-price **flex** attempt on
+`GEMINI_REVIEW_FLEX_MODEL` (bulk chains use the bulk model itself). The flex
+budget per purpose lives in `llm.flex_budget_seconds` in `config/pipeline.json`
+(production: 240 s on the digest, aggregation, editorial and evidence paths;
+900 s for deduplication, coherence and curation). A flex request that is shed
+(429/503) or exceeds its budget falls through to the standard chain and the
+flex tier is bypassed for `llm.flex_cooldown_seconds` (45 s; shedding is per
+request, unlike a model outage). Set `GEMINI_FLEX_DISABLED=1` to turn flex
+off. `llm.prices` holds per-million-token rates so `llm-usage` reports
+dollars; usage rows record thinking tokens, cached tokens and the service tier
+returned by the API.
 
 ### Pipeline Commands
 
@@ -181,6 +198,37 @@ or repeat `--event-id <id>` to evaluate specific events:
 ./.venv/bin/python -m pipeline.cli editorial --verbose --limit 10
 ```
 
+After its normal work, editorial also regenerates a bounded batch of
+current-window stories that predate evidence verification, highest homepage
+rank first. `editorial.backfill_per_run` in `config/pipeline.json` sets the
+per-run batch (production 100), `backfill_time_budget_minutes` stops submitting
+new work once the budget is spent, and `backfill_error_cooldown_hours` skips
+stories that failed recently. `--backfill N` overrides the batch for one
+invocation; `--backfill 0` disables it. Forced or event-specific runs never
+backfill:
+```bash
+./.venv/bin/python -m pipeline.cli editorial --verbose --backfill 20
+```
+
+Drafts must use sentence-case headlines that do not copy a source headline,
+keep each briefing bullet under 230 characters, and, when only one publisher
+is reporting, attribute the reporting to that outlet by name in the dek and
+first briefing bullet. Violations are rejected and repaired once. Change
+summaries for meaningful revisions must read as one sentence of news rather
+than a description of the edit.
+
+Each story costs at most three full-Flash calls plus cheap Flash-Lite work:
+Flash-Lite extracts the exact-passage evidence ledger (at most three passages
+of 320 characters per claim, with one full-Flash retry if Lite fails twice),
+full Flash drafts from the digests plus that ledger rather than the full
+article text, and full Flash verifies. When an already verified story's event
+gains articles, a Flash-Lite gate first checks whether the new reports add a
+material fact; if not, the checkpoint advances and the story is left as is.
+Brand-new single-article events wait `editorial.single_source_hold_minutes`
+(production 60) before their first story so a second outlet or a merge can
+arrive first; held events are not counted as pending by the run gate or the
+health check.
+
 Build and publish the static presentation without running upstream stages:
 
 ```bash
@@ -243,13 +291,19 @@ replace the repeated headline/dek/summary treatment on cards. New editorial
 output generates those two bullets deliberately, including material uncertainty;
 legacy stories use the first TL;DR bullet and their first uncertainty when present.
 
-The paper palette and serif typography remain. The sticky toolbar provides
+The paper palette and serif typography remain, and a dark palette follows the
+system color scheme. A masthead toggle overrides it; the choice is stored in
+local storage and applied by a tiny fingerprinted script before the stylesheet
+loads so pages never flash the wrong theme. The sticky toolbar provides
 category navigation, New/All read history, All/2+ outlets coverage, and Mark read.
 All outlets is the default for new browsers, allowing important single-outlet
 reporting into the briefing. Existing saved coverage preferences are honored.
 The optional `coverage=top` URL selects multiple publishers; `coverage=all` remains
-accepted. The count explicitly reports unread items **in the briefing**. Sources
-on each card links directly to the story's reporting. A public
+accepted. The count explicitly reports unread items **in the briefing**. Each
+card names its publishers (for example "Associated Press, Al Jazeera +2") and
+links directly to the story's reporting, so single-outlet stories are visible at
+a glance. A story's change summary appears on a card only for readers who saw
+the earlier version. A public
 [/methodology/](https://news-tldr.com/methodology/) page explains selection,
 evidence checks, source counts, read behavior, and correction reporting.
 
@@ -292,6 +346,23 @@ Reports default to ignored `data/evaluations/editorial.json`. Use `--output PATH
 to override or `--dry-run` to list fixtures without network calls. Automatic
 validation is not a human quality score; the report leaves human judgments blank.
 See [docs/editorial-evaluation.md](docs/editorial-evaluation.md) for the rubric.
+
+Low-impact filtering uses `aggregation.min_category_impact` (0.25) with optional
+per-category overrides in `aggregation.min_category_impact_overrides`, resolved
+from each feed's default category; production raises entertainment to 0.40.
+The digest stage applies the same threshold when deciding which borderline
+articles get a full-Flash filter review.
+
+Duplicate-event candidates are reviewed in signal order: slug/title matches,
+then keyword-overlap and Flash-Lite prescreen candidates, then three-word title
+cohesion, with weak two-word cohesion last. The strict merge review handles up to
+`aggregation.deduplication_max_pairs_per_run` new pairs per run (production 120).
+Prescreen chunks are hash-bucketed by event ID and cached by their exact content,
+so an hourly run only re-screens chunks whose events, titles, keywords or
+headlines changed. Coherence review and deduplication run only in the final
+aggregation pass of a combined run, and homepage curation runs only in its
+final editorial pass, reusing the previous curation whenever the current-window
+story set is unchanged.
 
 Aggregation now checks incoming attachments to existing events, reserves merges
 for the full-Flash deduplication review, and reviews up to

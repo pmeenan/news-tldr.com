@@ -32,14 +32,15 @@ from pipeline.sources import publisher_id
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v23"
+PRESENTATION_VERSION = "presentation-v24"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
 ASSET_FINGERPRINT_LENGTH = 16
 VERSIONED_SITE_ASSET_PATTERN = re.compile(
-    rf"^assets/site\.[0-9a-f]{{{ASSET_FINGERPRINT_LENGTH}}}\.(?:css|js)$"
+    rf"^assets/(?:site|theme)\.[0-9a-f]{{{ASSET_FINGERPRINT_LENGTH}}}\.(?:css|js)$"
 )
+MAX_CARD_PUBLISHER_NAMES = 2
 LEGACY_SITE_ASSET_PATHS = frozenset({"assets/site.css", "assets/site.js"})
 
 ROBOTS_TXT = """User-agent: Googlebot
@@ -71,16 +72,48 @@ Allow: /
 """
 
 
+DARK_THEME_TOKENS = """
+  --paper: #16191b;
+  --paper-deep: #1f2427;
+  --ink: #ece7dc;
+  --ink-soft: #c9c3b8;
+  --on-ink: #16191b;
+  --muted: #a39d91;
+  --line: #3a4044;
+  --accent: #e0705f;
+  --accent-dark: #f0a08f;
+  --card: #1d2124;
+  --control-bg: rgba(255,255,255,.06);
+  --shadow: rgba(0,0,0,.6);
+  --backdrop: rgba(0,0,0,.62);
+  --world: #c9a77c;
+  --us: #c2a078;
+  --politics: #b3bd78;
+  --business: #bcc282;
+  --technology: #a9b3b2;
+  --science: #b1b7b5;
+  --health: #c2add6;
+  --environment: #a3b4af;
+  --automotive: #93c2dc;
+  --entertainment: #dea87a;
+  color-scheme: dark;
+""".strip("\n")
+
 SITE_CSS = """
 :root {
   --paper: #f4f0e8;
   --paper-deep: #e9e1d3;
   --ink: #17201d;
+  --ink-soft: #3d4743;
+  --on-ink: #ffffff;
   --muted: #65706b;
   --line: #cfc7b8;
   --accent: #c84938;
   --accent-dark: #873026;
   --card: #fffdf8;
+  --control-bg: rgba(255,255,255,.32);
+  --shadow: rgba(23,32,29,.28);
+  --backdrop: rgba(23,32,29,.48);
   --neutral-rgb: 164, 139, 101;
   --world: #725a3c;
   --world-rgb: 177, 151, 112;
@@ -107,6 +140,14 @@ SITE_CSS = """
   background: var(--paper);
   color: var(--ink);
 }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+__DARK_THEME_TOKENS__
+  }
+}
+:root[data-theme="dark"] {
+__DARK_THEME_TOKENS__
+}
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 body { margin: 0; background: var(--paper); }
@@ -121,8 +162,12 @@ a { color: inherit; }
 .sync-button:hover, .sync-button.is-connected { color: var(--accent-dark); border-color: var(--accent-dark); }
 .sync-button svg { width: 1.15rem; height: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 .sync-button.is-syncing svg { animation: sync-spin .9s linear infinite; }
-.sync-dialog { width: min(31rem, calc(100% - 2rem)); padding: 0; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); box-shadow: 0 1.2rem 4rem rgba(23,32,29,.28); }
-.sync-dialog::backdrop { background: rgba(23,32,29,.48); }
+.theme-button { flex: 0 0 auto; width: 2.45rem; height: 2.45rem; display: inline-grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
+.theme-button:hover { color: var(--accent-dark); border-color: var(--accent-dark); }
+.theme-button svg { width: 1.15rem; height: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.theme-button svg[hidden] { display: none; }
+.sync-dialog { width: min(31rem, calc(100% - 2rem)); padding: 0; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); box-shadow: 0 1.2rem 4rem var(--shadow); }
+.sync-dialog::backdrop { background: var(--backdrop); }
 .sync-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 1.2rem 1.25rem .8rem; border-bottom: 1px solid var(--line); }
 .sync-dialog-header h2 { margin: 0; font-size: 1.35rem; }
 .sync-dialog-close { border: 0; padding: .15rem .35rem; background: transparent; color: var(--muted); font: 1.4rem/1 system-ui, sans-serif; cursor: pointer; }
@@ -135,7 +180,7 @@ a { color: inherit; }
 .sync-actions { display: flex; flex-wrap: wrap; gap: .55rem; }
 .sync-action { border: 1px solid var(--line); border-radius: 999px; padding: .55rem .8rem; background: transparent; color: var(--ink); font: 750 .72rem/1 system-ui, sans-serif; cursor: pointer; }
 .sync-action:hover { border-color: var(--ink); }
-.sync-action-primary { border-color: var(--ink); background: var(--ink); color: white; }
+.sync-action-primary { border-color: var(--ink); background: var(--ink); color: var(--on-ink); }
 .sync-action-danger { color: var(--accent-dark); }
 .sync-action:disabled { cursor: wait; opacity: .55; }
 .sync-privacy { margin-top: 1rem !important; color: var(--muted); font-size: .78rem; }
@@ -145,7 +190,7 @@ a { color: inherit; }
 .reader-toolbar:not(:has(.edition)) { border-bottom: 1px solid var(--ink); }
 .category-nav { max-width: 1180px; margin: 0 auto; padding: .65rem 1.25rem; display: flex; justify-content: center; gap: .35rem; overflow: visible; }
 .category-nav button, .category-nav a { min-height: 2.5rem; display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; background: transparent; padding: .43rem .62rem; white-space: nowrap; color: var(--muted); text-decoration: none; font: 700 .69rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .035em; cursor: pointer; }
-.category-nav button:hover, .category-nav button[aria-pressed="true"], .category-nav a:hover { color: white; border-color: var(--ink); background: var(--ink); }
+.category-nav button:hover, .category-nav button[aria-pressed="true"], .category-nav a:hover { color: var(--on-ink); border-color: var(--ink); background: var(--ink); }
 main { max-width: 1180px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 main[data-reader-pending] { position: relative; min-height: 14rem; }
 main[data-reader-pending] > * { visibility: hidden; animation: reader-pending-reveal 0s 12s forwards; }
@@ -160,10 +205,10 @@ main[data-reader-pending]::before { content: "Loading latest read status…"; po
 .edition-actions { display: flex; align-items: center; gap: .45rem; }
 .filter-control { display: inline-flex; align-items: center; gap: .3rem; }
 .filter-label { color: var(--muted); font: 750 .58rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; }
-.view-switch { display: inline-flex; padding: .16rem; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.32); }
+.view-switch { display: inline-flex; padding: .16rem; border: 1px solid var(--line); border-radius: 999px; background: var(--control-bg); }
 .view-switch button { min-height: 2.5rem; border: 0; border-radius: 999px; padding: .32rem .62rem; background: transparent; color: var(--muted); font: 750 .67rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .055em; cursor: pointer; }
 .view-switch button:hover { color: var(--ink); }
-.view-switch button[aria-pressed="true"] { color: white; background: var(--ink); }
+.view-switch button[aria-pressed="true"] { color: var(--on-ink); background: var(--ink); }
 .mark-view-read { min-height: 2.5rem; border: 1px solid var(--line); border-radius: 999px; padding: .42rem .65rem; background: transparent; color: var(--muted); font: 750 .67rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .035em; cursor: pointer; }
 .mark-view-read:hover { color: var(--ink); border-color: var(--ink); }
 .story-sections { padding-top: .25rem; }
@@ -224,7 +269,7 @@ main[data-reader-pending]::before { content: "Loading latest read status…"; po
 .story-card.lead h2 { font-size: clamp(1.65rem, 3vw, 2.35rem); line-height: 1.15; }
 .story-card h2 a { text-decoration: none; }
 .story-card h2 a:hover { color: var(--accent-dark); }
-.dek { margin: 0 0 1rem; color: #3d4743; font-size: 1rem; line-height: 1.5; }
+.dek { margin: 0 0 1rem; color: var(--ink-soft); font-size: 1rem; line-height: 1.5; }
 .tldr-list { margin: 0 0 1rem; padding-left: 1.1rem; }
 .tldr-list li { margin: .35rem 0; line-height: 1.4; }
 .story-meta { display: flex; gap: .65rem; flex-wrap: wrap; color: var(--muted); font: 650 .72rem/1.3 system-ui, sans-serif; }
@@ -235,7 +280,7 @@ main[data-reader-pending]::before { content: "Loading latest read status…"; po
 .story-page { max-width: 880px; }
 .story-page .back { display: inline-block; margin-bottom: 1.5rem; color: var(--muted); font: 700 .8rem/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .08em; }
 .story-page h1 { overflow-wrap: anywhere; margin: .3rem 0 1rem; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1.12; letter-spacing: -.045em; }
-.story-page .standfirst { margin: 0 0 1.2rem; color: #3d4743; font-size: clamp(1.15rem, 2vw, 1.45rem); line-height: 1.5; }
+.story-page .standfirst { margin: 0 0 1.2rem; color: var(--ink-soft); font-size: clamp(1.15rem, 2vw, 1.45rem); line-height: 1.5; }
 .story-page section { margin-top: 2.4rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
 .story-page section h2 { margin: 0 0 1rem; font-size: .85rem; font-family: system-ui, sans-serif; text-transform: uppercase; letter-spacing: .12em; }
 .story-page .tldr-list { font-size: 1.2rem; }
@@ -266,9 +311,7 @@ main[data-reader-pending]::before { content: "Loading latest read status…"; po
 @media (max-width: 820px) {
   .masthead { align-items: center; }
   .masthead-side { align-items: center; }
-  .masthead:has(.sync-button) .tagline { display: none; }
-  .masthead:not(:has(.sync-button)) { display: block; }
-  .masthead:not(:has(.sync-button)) .tagline { margin-top: .8rem; text-align: left; }
+  .tagline { display: none; }
   .section-actions { display: flex; justify-content: flex-end; padding-top: .7rem; }
   .story-section, .story-section + .story-section { margin-top: .8rem; }
   .section-heading { display: block; padding: 0; }
@@ -865,12 +908,11 @@ function renderStories() {
     card.classList.toggle('is-read', isRead);
     const update = card.querySelector('[data-story-update]');
     if (update) {
+      // Only readers who saw an earlier version need the "what changed" note.
       const initialOrder = card.dataset.initialOrder || '';
       const seenBefore = Boolean(viewed[card.dataset.storyId]
         || (readBefore && initialOrder && initialOrder <= readBefore));
-      update.hidden = isRead;
-      const label = update.querySelector('strong');
-      if (label) label.textContent = seenBefore ? 'Updated since you read: ' : 'New development: ';
+      update.hidden = isRead || !seenBefore;
     }
     card.classList.remove('lead', 'secondary');
     if (show) visibleCards.push(card);
@@ -1227,15 +1269,70 @@ void initializeReader();
 """.strip()
 
 
-def _fingerprinted_asset_path(extension: str, content: str) -> str:
+THEME_JS = """
+(function () {
+  var KEY = 'newsTldrThemeV1';
+  var root = document.documentElement;
+  var saved = '';
+  try { saved = localStorage.getItem(KEY) || ''; } catch (_) {}
+  if (saved === 'dark' || saved === 'light') root.dataset.theme = saved;
+  var media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  function effectiveTheme() {
+    if (root.dataset.theme === 'dark' || root.dataset.theme === 'light') return root.dataset.theme;
+    return media && media.matches ? 'dark' : 'light';
+  }
+  function render() {
+    var theme = effectiveTheme();
+    var buttons = document.querySelectorAll('[data-theme-toggle]');
+    for (var i = 0; i < buttons.length; i++) {
+      var button = buttons[i];
+      var label = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+      button.setAttribute('aria-label', label);
+      button.setAttribute('title', label);
+      var sun = button.querySelector('[data-icon-sun]');
+      var moon = button.querySelector('[data-icon-moon]');
+      if (sun) sun.hidden = theme !== 'dark';
+      if (moon) moon.hidden = theme === 'dark';
+    }
+  }
+  function toggle() {
+    var next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+    root.dataset.theme = next;
+    try { localStorage.setItem(KEY, next); } catch (_) {}
+    render();
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    var buttons = document.querySelectorAll('[data-theme-toggle]');
+    for (var i = 0; i < buttons.length; i++) buttons[i].addEventListener('click', toggle);
+    render();
+  });
+  if (media && typeof media.addEventListener === 'function') media.addEventListener('change', render);
+})();
+""".strip()
+
+
+THEME_BUTTON_HTML = (
+    '<button type="button" class="theme-button" data-theme-toggle aria-label="Switch to dark theme" '
+    'title="Switch to dark theme">'
+    '<svg data-icon-moon viewBox="0 0 24 24" aria-hidden="true">'
+    '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>'
+    '<svg data-icon-sun viewBox="0 0 24 24" aria-hidden="true" hidden>'
+    '<circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22'
+    'M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></svg></button>'
+)
+
+
+def _fingerprinted_asset_path(extension: str, content: str, *, name: str = "site") -> str:
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:ASSET_FINGERPRINT_LENGTH]
-    return f"assets/site.{digest}.{extension}"
+    return f"assets/{name}.{digest}.{extension}"
 
 
-SITE_CSS_CONTENT = SITE_CSS + "\n"
+SITE_CSS_CONTENT = SITE_CSS.replace("__DARK_THEME_TOKENS__", DARK_THEME_TOKENS) + "\n"
 SITE_JS_CONTENT = SITE_JS + "\n"
+THEME_JS_CONTENT = THEME_JS + "\n"
 SITE_CSS_ASSET_PATH = _fingerprinted_asset_path("css", SITE_CSS_CONTENT)
 SITE_JS_ASSET_PATH = _fingerprinted_asset_path("js", SITE_JS_CONTENT)
+THEME_JS_ASSET_PATH = _fingerprinted_asset_path("js", THEME_JS_CONTENT, name="theme")
 
 
 def presentation_once(
@@ -1472,6 +1569,7 @@ def _write_site_files(
 ) -> None:
     _write_text(root / SITE_CSS_ASSET_PATH, SITE_CSS_CONTENT)
     _write_text(root / SITE_JS_ASSET_PATH, SITE_JS_CONTENT)
+    _write_text(root / THEME_JS_ASSET_PATH, THEME_JS_CONTENT)
     _write_public_bytes(root / "favicon.ico", FAVICON_PATH.read_bytes())
     _write_public_bytes(root / "assets" / "social-card.png", SOCIAL_CARD_PATH.read_bytes())
     _write_text(
@@ -1573,8 +1671,11 @@ def _render_home(
         read_id = read_order.split(":", 1)[1]
         initial_order = _story_read_order({**story, "revision": 1})
         change = str(story.get("change_summary") or "")
-        update = (f'<p class="story-update" data-story-update><strong>New development: </strong>{_e(change)}</p>'
+        # Rendered hidden: the script reveals it only for readers who saw the earlier version.
+        update = (f'<p class="story-update" data-story-update hidden>'
+                  f'<strong>Updated since you read: </strong>{_e(change)}</p>'
                   if int(story.get("revision") or 1) > 1 and change else "")
+        publishers = _card_publisher_label(story.get("sources", []))
         topic_title, topic_order = topic_by_story.get(story_id, ("", 0))
         story_top_order = top_order.get(story_id)
         cards.append(
@@ -1597,8 +1698,8 @@ def _render_home(
             f'{update}'
             f'<ul class="tldr-list">{bullets}</ul>'
             f'<div class="story-meta"><span data-story-time>{_relative_time(_event_time(story), generated_at)}</span>'
-            f'<a href="/stories/{_e(story_id)}/#sources">'
-            f'{source_count} {"outlet" if source_count == 1 else "outlets"} · Sources</a>'
+            f'<a href="/stories/{_e(story_id)}/#sources" class="story-publishers">'
+            f'{_e(publishers["label"])}</a>'
             '<span class="read-indicator" aria-hidden="true">✓ Read</span></div>'
             "</article>"
         )
@@ -1778,6 +1879,31 @@ def _render_archive(
     )
 
 
+def _card_publisher_label(sources: Any) -> dict[str, str]:
+    """Distinct publisher names in source order, e.g. 'AP, Al Jazeera +2'."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for source in sources if isinstance(sources, list) else []:
+        if not isinstance(source, dict):
+            continue
+        identity = publisher_id(source)
+        name = str(source.get("source_name") or "").split(" - ")[0].strip() or identity
+        # Dedupe on publisher identity and on the display name, so feeds that are not
+        # in the configured catalog still collapse to one outlet.
+        keys = {identity.lower(), name.lower()}
+        if keys & seen:
+            seen.update(keys)
+            continue
+        seen.update(keys)
+        names.append(name)
+    if not names:
+        return {"label": "Sources", "names": []}
+    shown = ", ".join(names[:MAX_CARD_PUBLISHER_NAMES])
+    remaining = len(names) - MAX_CARD_PUBLISHER_NAMES
+    label = f"{shown} +{remaining}" if remaining > 0 else shown
+    return {"label": label, "names": names}
+
+
 def _briefing_bullets(story: dict[str, Any]) -> list[str]:
     briefing = story.get("briefing")
     if isinstance(briefing, list) and len(briefing) == 2:
@@ -1920,11 +2046,13 @@ def _page(
         f'{image_meta}<meta name="twitter:card" content="summary_large_image">'
         f'<meta name="twitter:title" content="{_attr(title)}">'
         f'<meta name="twitter:description" content="{_attr(description)}">'
+        # The theme script runs before the stylesheet so a saved dark preference never flashes light.
+        f'<script src="/{THEME_JS_ASSET_PATH}"></script>'
         f'<link rel="stylesheet" href="/{SITE_CSS_ASSET_PATH}">'
         f"{script_tag}</head><body><header class=\"site-header\"><div class=\"masthead\">"
         '<a class="brand" href="/">news<span>-tldr</span>.com</a>'
         '<div class="masthead-side"><p class="tagline">The important facts, the open questions, '
-        f'and the sources — without the churn.</p>{sync_header}</div>'
+        f'and the sources — without the churn.</p>{THEME_BUTTON_HTML}{sync_header}</div>'
         f'</div></header>{sync_dialog}<div class="reader-toolbar"><nav class="category-nav" '
         f'aria-label="Story categories">{nav}</nav>{toolbar}</div>'
         f"<main{main_attributes}>{content}</main><footer class=\"site-footer\"><div>"

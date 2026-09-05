@@ -293,7 +293,7 @@ Responsibilities:
 
 - Query the state database for articles not yet assigned to an event.
 - Use completed article digests instead of site-provided teaser summaries where available.
-- Filter out non-news, promotional/affiliate/product/deals, puzzle/game help, gambling picks, archive/index, video-carousel, and no-substantive-content artifacts before grouping. Remaining low-impact articles are filtered using the article digest's category/vertical impact score and `aggregation.min_category_impact` from `config/pipeline.json`. Filtered articles are marked with `aggregation_status = filtered_*` so completed windows do not rerun forever on intentionally skipped rows.
+- Filter out non-news, promotional/affiliate/product/deals, puzzle/game help, gambling picks, archive/index, video-carousel, and no-substantive-content artifacts before grouping. Remaining low-impact articles are filtered using the article digest's category/vertical impact score and `aggregation.min_category_impact` from `config/pipeline.json`; `aggregation.min_category_impact_overrides` raises the floor for specific categories, resolved from the feed's default category (production: entertainment 0.40). Filtered articles are marked with `aggregation_status = filtered_*` so completed windows do not rerun forever on intentionally skipped rows.
 - Video/carousel exclusion does not rely only on the digest model. Aggregation also applies deterministic URL/path and collection-signal checks for obvious media pages (for example `/videos/`, `/video/`, gallery/carousel paths, and untitled pages whose extracted text is dominated by video listings) before grouping.
 - Deduplicate near-identical exact article reprints (e.g., wire service stories) using content and canonical URL hashes during digest and aggregation stages. Headline and summary hashes remain available in `article_fingerprints` for collection-time near-duplicate suppression, but are not used to short-circuit digest generation.
 - Classify each article's content type: news, opinion, analysis, review, or unknown.
@@ -480,19 +480,27 @@ operations per ordinary story, using the existing ordered 3.7 → 3.6 → 3.5 ch
    or more short verbatim passages and an offered article ID. Code checks each
    passage against the supplied article text after whitespace normalization.
    Invalid extraction receives one bounded retry with validation feedback.
-2. **Draft (`editorial-v3`, or `editorial-framing-v2`)**: generate a sentence-case
-   headline, dek, 2–4 TL;DR bullets, exactly two compact briefing bullets, cited
-   key facts and uncertainties. Headline, dek and both summary forms link to
-   ledger claim IDs. Citations containing any unknown source ID are rejected.
-   The draft schema restricts article citations to reports present in the ledger.
-   Overlong fields fail validation rather than being silently truncated.
-3. **Verification (`editorial-verification-v1`)**: a separate model call checks
+2. **Draft (`editorial-v4`, or `editorial-framing-v3`)**: generate a sentence-case
+   headline, dek, 2–4 TL;DR bullets, exactly two short briefing bullets (15–22
+   words, at most 230 characters), cited key facts and uncertainties. Headline,
+   dek and both summary forms link to ledger claim IDs. Citations containing any
+   unknown source ID are rejected. The draft schema restricts article citations
+   to reports present in the ledger. Deterministic checks reject a headline that
+   copies a source headline or reads as title case (three quarters or more of
+   its eligible words capitalized), and, when every report shares one publisher,
+   require the dek and first briefing bullet to name that outlet or say
+   "according to". Overlong fields fail validation rather than being silently
+   truncated; every rejection feeds the single repair attempt.
+3. **Verification (`editorial-verification-v2`)**: a separate model call checks
    the actual quoted evidence against every draft assertion and qualification.
    It also compares with the previous story to distinguish substantive changes
    from rewording or added citations. A rejected draft gets one repair and
    verification attempt. Failure retains the previous artifact and checkpoint.
    Validation rejections remain pending and unhealthy, but do not block unrelated
    downstream news. Transport/capacity failures still gate backlog processing.
+   A meaningful revision's `change_summary` must be one reader-facing sentence
+   of news; a summary that describes the edit ("Added details…") or repeats a
+   bullet is rejected and the verifier is re-asked once with that feedback.
 
 These are automated checks, not a guarantee of truth or independence. The
 quoted passage can itself report an allegation or contain a publisher error;
@@ -506,8 +514,18 @@ additional same-publisher reports. Up to eight reports fit within the configured
 per-article/event character limits (production 12,000/40,000 characters, aiming
 for at least 3,000 per selected report). Digests remain contextual aids, not
 substitutes for quoted evidence verification. The existing compact draft retry
-uses the same verified ledger, with `editorial-v3-compact` or
-`editorial-framing-v2-compact` provenance.
+uses the same verified ledger, with `editorial-v4-compact` or
+`editorial-framing-v3-compact` provenance.
+
+Stories published before evidence verification migrate through a bounded
+backfill after each run's normal editorial work. `editorial_backfill_rows`
+selects current-window active/stale events whose story file lacks
+`evidence_verification`, highest global newsworthiness and article count first,
+skipping events with an editorial error inside the cooldown window. Work stops
+being submitted once the time budget is spent; unstarted stories defer to a
+later run. Backfill failures are recorded like ordinary editorial failures but
+never enter the combined run's backlog gate, because those events are not
+pending. Forced or event-specific runs do not backfill.
 
 Story files retain a private `_evidence` ledger for audit. Public JSON excludes
 underscore-prefixed fields and exposes only claim-to-source mappings, summaries,
@@ -563,8 +581,10 @@ use `r` plus SHA-256 of `story_id:revision` as their read ID, paired with the fi
 publication time of that revision. The article's public route remains stable.
 This separate, immutable identity lets existing sync watermarks and sparse read
 maps coexist with new developments. An earlier story read cannot cover a revision
-published after that read watermark. A new revision may show “Updated since you
-read” when prior history is available, otherwise “New development.”
+published after that read watermark. The card's “Updated since you read” note
+is rendered hidden and revealed only for readers whose local history covers the
+earlier revision; first-time readers see the bullets alone. Story pages always
+show the latest change summary.
 
 ### Political framing and ranking
 
@@ -611,13 +631,20 @@ News by default; deeper topic sections remain collapsible.
 Cards use smaller headlines and two complementary bullets, without a redundant
 dek. New artifacts supply `briefing`; older artifacts fall back to the first
 TL;DR item plus their first uncertainty, or two TL;DR items when no uncertainty
-exists. Source links jump directly to `#sources` on the story page. Story pages
+exists. Each card names its distinct publishers in source order, showing two
+names plus a “+N” remainder (deduplicated by publisher identity and display
+name), and links directly to `#sources` on the story page. Story pages
 retain full TL;DR, facts, uncertainties, optional framing, and source reports;
 new TL;DR bullets have claim-backed source links. `/methodology/` explains the
 process, source-count limitations, read behavior and public correction reporting.
 
 The existing warm palette, category-family tints, serif typography, same-origin
-assets, noindex/social metadata and favicon remain. Larger controls and complete
+assets, noindex/social metadata and favicon remain. All colors are CSS tokens; a
+dark token set applies under `prefers-color-scheme: dark` unless the root carries
+`data-theme="light"`, and `data-theme="dark"` forces it. A fingerprinted
+`assets/theme.<hash>.js` runs synchronously in `<head>` on every page, applies
+the saved `newsTldrThemeV1` preference before the stylesheet loads, and drives
+the masthead toggle. Larger controls and complete
 labels improve mobile operation. The sticky toolbar contains category, New/All,
 All/2+ outlets, and Mark read controls. New browsers default to all outlets so
 consequential original reporting is not automatically hidden. Saved preferences
@@ -635,7 +662,9 @@ Publishing, CSP, noindex/social metadata and cache contracts are unchanged:
 HTML has a 10-minute freshness lifetime; fingerprinted CSS/JavaScript have one
 year immutable caching. Deployment preserves unknown files and old asset paths,
 copies assets/pages before replacing `index.html`, and removes only stale managed
-files. Presentation v23 adds the methodology route to the managed build/sitemap.
+files. Presentation v23 added the methodology route to the managed build/sitemap;
+v24 adds the retained `theme.<hash>.js` asset, which artifact validation expects
+exactly once alongside the site CSS and JavaScript.
 
 ## Anonymous Reader-Sync Origin
 
@@ -821,7 +850,8 @@ Current schema tables (schema version 9):
 - `source_run_stats`: durable per-source collection yield, skip, failure, and HTTP accounting for each run.
 - `pipeline_runs`: run ID, stage, start/end timestamps, status, counters, and error summary.
 - `item_errors`: per-feed, per-article, or per-event errors with retry counts and last error details.
-- `llm_usage`: run ID, stage, model, prompt version, input/output token counts, optional cost, and occurrence time.
+- `llm_usage`: run ID, stage, model, prompt version, input/output/thinking/cached token counts, the service tier reported by the API, estimated cost, and occurrence time.
+- `deduplication_prescreens`: cached prescreen candidate pairs keyed by the exact chunk content signature and prompt version, pruned after seven days.
 
 Indexes must cover common incremental queries: articles with `event_id is null`, events by status and `updated_at`, events needing editorial regeneration, articles by canonical URL/hash input, and errors eligible for retry.
 
@@ -885,6 +915,26 @@ fallback. Adding another hosted or local backend remains a backlog item and can
 use the same structured-output boundary without changing stage logic.
 
 ### Cost Awareness
+
+Model chains are built per purpose by `create_gemini_client`. Review work runs
+3.8 Flash with 3.7 Flash as the capacity fallback; 3.5 Flash costs twice as
+much and is appended only for editorial verification. Bulk work (digests,
+grouping, prescreen, evidence extraction, the regeneration gate, category
+sections) runs 3.5 Flash-Lite. Each chain starts with one flex-tier attempt at
+half price on the flex model, bounded by `llm.flex_budget_seconds[purpose]`;
+flex requests can be shed with 429/503 and are never upgraded server-side, so
+the fallback chain treats a shed or overrun flex attempt like any capacity
+failure and cools that model-plus-tier for five minutes. Implicit context
+caching is not pursued: the reusable instruction prefixes are far below the
+4,096-token minimum and the costly tokens are per-article content.
+
+Token discipline: drafts see digests plus the verified ledger, not full article
+text; evidence quotes are capped at three per claim and 320 characters;
+homepage curation runs once per hourly run on compact cards and is reused when
+the window's story set is unchanged; prescreen chunks are content-cached and
+hash-bucketed; and a Lite "material update" gate skips the three full-Flash
+calls when a verified story's new reports add no facts. `llm-usage` estimates
+dollars from `llm.prices`, including thinking tokens billed as output.
 
 - Aggregation uses fixed chunk-plus-overlap window calls with short summaries (headline + lead) to minimize token usage.
 - Editorial uses **per-event** calls with full article text where quality matters most.

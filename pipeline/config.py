@@ -35,6 +35,7 @@ class PipelineConfig:
     editorial: dict[str, Any] = field(default_factory=dict)
     presentation: dict[str, Any] = field(default_factory=dict)
     operations: dict[str, Any] = field(default_factory=dict)
+    llm: dict[str, Any] = field(default_factory=dict)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -53,6 +54,7 @@ def load_pipeline_config(path: Path | None = None) -> PipelineConfig:
         editorial=data.get("editorial", {}),
         presentation=data.get("presentation", {}),
         operations=data.get("operations", {}),
+        llm=data.get("llm", {}),
     )
 
 

@@ -178,3 +178,21 @@ class PipelineLock:
         if alive and expired:
             _terminate_verified_process(pid, data.get("pid_start_time"))
         self.path.unlink(missing_ok=True)
+
+
+def lock_holder(path: Path = LOCK_PATH) -> dict[str, Any] | None:
+    """Return the lock payload when a verified live process on this host holds
+    it, otherwise None. Never mutates or recovers the lock."""
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if data.get("hostname") not in {None, socket.gethostname()}:
+        return dict(data)
+    if data.get("boot_id") not in {None, _boot_id()}:
+        return None
+    pid = int(data.get("pid") or -1)
+    if pid > 0 and _pid_is_same_process(pid, data.get("pid_start_time")):
+        return dict(data)
+    return None

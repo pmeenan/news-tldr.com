@@ -110,7 +110,7 @@ def test_migrate_upgrades_existing_v1_database(tmp_path: Path) -> None:
         assert "source_run_stats" in {
             row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        assert versions == list(range(1, SCHEMA_VERSION + 1))
     finally:
         conn.close()
 
@@ -582,3 +582,32 @@ def test_fail_stale_running_pipeline_runs(tmp_path: Path) -> None:
         assert row["status"] == "failed"
         assert row["finished_at"] is not None
         assert json.loads(row["stats_json"]) == {"recovered_as_stale": True}
+
+
+def test_record_llm_usage_stores_tier_thinking_cache_and_cost(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pipeline.llm.llm_price_table",
+        lambda: {"gemini-x": {"input": 1.0, "output": 2.0, "flex_input": 0.5, "flex_output": 1.0}},
+    )
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        state.record_llm_usage(
+            "run", "editorial", "gemini-x", "v1",
+            usage={"promptTokenCount": 1_000_000, "candidatesTokenCount": 0, "thoughtsTokenCount": 1_000_000,
+                   "cachedContentTokenCount": 0, "serviceTier": "flex"},
+        )
+        row = state.conn.execute("SELECT * FROM llm_usage").fetchone()
+        assert row["service_tier"] == "flex"
+        assert row["input_tokens"] == 1_000_000 and row["thinking_tokens"] == 1_000_000
+        assert abs(row["cost_usd"] - 1.5) < 1e-9
+        state.record_llm_usage("run", "editorial", "gemini-x", "v1", input_tokens=10, output_tokens=1)
+        rows = state.conn.execute("SELECT service_tier, cost_usd FROM llm_usage ORDER BY id").fetchall()
+        assert rows[1]["service_tier"] is None and abs(rows[1]["cost_usd"] - 1.2e-5) < 1e-12
+
+        assert state.get_cached_prescreen_pairs(chunk_signature="s", prompt_version="v") is None
+        state.put_cached_prescreen_pairs(chunk_signature="s", prompt_version="v", model="m", pairs=[("a", "b")])
+        assert state.get_cached_prescreen_pairs(chunk_signature="s", prompt_version="v") == [("a", "b")]
+        assert state.get_cached_prescreen_pairs(chunk_signature="s", prompt_version="other") is None
+        assert state.prune_cached_prescreens(older_than="2999-01-01T00:00:00Z") == 1
+        assert state.get_cached_prescreen_pairs(chunk_signature="s", prompt_version="v") is None

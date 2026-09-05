@@ -490,3 +490,44 @@ def test_revision_read_identity_is_stable_and_private_evidence_is_not_published(
     detail = (output / "stories" / story["story_id"] / "index.html").read_text()
     assert "Latest update:</strong> Officials corrected the total." in detail
     assert f'/stories/{story["story_id"]}/#sources' in home
+
+
+def test_cards_show_publisher_names_theme_toggle_and_hidden_update_notes(tmp_path: Path) -> None:
+    story = _story("2026-08-24-publishers", updated_at="2026-08-24T00:00:00Z")
+    story["sources"] = [
+        {"article_id": "x1", "source_name": "Associated Press", "headline": "h", "url": "https://example.test/1"},
+        {"article_id": "x2", "source_name": "Fox News - Politics", "headline": "h", "url": "https://example.test/2"},
+        {"article_id": "x3", "source_name": "Fox News - World", "headline": "h", "url": "https://example.test/3"},
+        {"article_id": "x4", "source_name": "Al Jazeera", "headline": "h", "url": "https://example.test/4"},
+    ]
+    story["key_facts"][0]["source_article_ids"] = ["x1"]
+    story["uncertainties"][0]["source_article_ids"] = ["x1"]
+    story.update(revision=2, change_summary="A second victim was identified.")
+    _, story_dir, active = _write_published_fixture(tmp_path, [story])
+    output = tmp_path / "dist"
+    build_static_site(
+        output_dir=output, story_dir=story_dir, active_stories_path=active,
+        now=datetime(2026, 8, 24, 1, tzinfo=UTC),
+    )
+    home = (output / "index.html").read_text(encoding="utf-8")
+    assert 'class="story-publishers">Associated Press, Fox News +1</a>' in home
+    assert "outlets · Sources" not in home
+    assert (
+        '<p class="story-update" data-story-update hidden><strong>Updated since you read: </strong>'
+        "A second victim was identified.</p>"
+    ) in home
+    theme_assets = list((output / "assets").glob("theme.*.js"))
+    assert len(theme_assets) == 1
+    assert f'<script src="/assets/{theme_assets[0].name}"></script>' in home
+    assert "data-theme-toggle" in home
+    detail = (output / "stories" / story["story_id"] / "index.html").read_text(encoding="utf-8")
+    assert "data-theme-toggle" in detail and theme_assets[0].name in detail
+    css = _site_asset(output, "css").read_text(encoding="utf-8")
+    assert "@media (prefers-color-scheme: dark)" in css
+    assert ':root[data-theme="dark"]' in css and "--on-ink" in css
+    assert "color: white" not in css and "#3d4743;" not in css.split("--ink-soft: #3d4743;", 1)[1]
+    script = _site_asset(output, "js").read_text(encoding="utf-8")
+    assert "update.hidden = isRead || !seenBefore;" in script
+    assert "New development" not in script
+    theme_script = theme_assets[0].read_text(encoding="utf-8")
+    assert "newsTldrThemeV1" in theme_script and "prefers-color-scheme: dark" in theme_script

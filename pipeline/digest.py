@@ -11,7 +11,8 @@ from datetime import date, datetime, timedelta
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from pipeline.config import load_pipeline_config
+from pipeline.aggregate import category_impact_floor_for_source, category_impact_floors
+from pipeline.config import load_feeds, load_pipeline_config
 from pipeline.llm import GeminiResult, create_gemini_client
 from pipeline.lock import PipelineLock
 from pipeline.paths import LOCK_PATH, PROJECT_ROOT
@@ -314,14 +315,15 @@ def digest_once(
     review_enabled = bool(config.digest.get("filter_review_enabled", True))
     review_margin = float(config.digest.get("filter_review_margin", 0.10))
     min_category_impact = float(config.aggregation.get("min_category_impact", 0.25))
+    impact_floors = category_impact_floors(config.aggregation)
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"article-digest-{uuid.uuid4().hex}"
     owns_generator = client is None
-    generator = client or create_gemini_client("bulk")
+    generator = client or create_gemini_client("bulk", purpose="digest")
     owns_review_generator = review_client is None and client is None and review_enabled
     reviewer = review_client
     if reviewer is None and client is None and review_enabled:
-        reviewer = create_gemini_client("review")
+        reviewer = create_gemini_client("review", purpose="digest")
     state = StateDB()
     stats: dict[str, Any] = {"run_id": run_id}
     try:
@@ -343,6 +345,7 @@ def digest_once(
                         client=generator,
                         review_client=reviewer,
                         min_category_impact=min_category_impact,
+                        category_impact_floors=impact_floors,
                         review_margin=review_margin,
                         progress=progress,
                         max_article_rowid=max_article_rowid,
@@ -384,6 +387,7 @@ def digest_articles_for_aggregation(
     review_margin: float = 0.10,
     progress: Callable[[str], None] | None = None,
     max_article_rowid: int | None = None,
+    category_impact_floors: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     if limit is not None and limit < 1:
         raise ValueError("limit must be at least 1")
@@ -391,6 +395,11 @@ def digest_articles_for_aggregation(
         raise ValueError("concurrency must be at least 1")
     generator = client or create_gemini_client("bulk")
     max_retries = int(load_pipeline_config().pipeline.get("max_item_retries", 3))
+    feeds_by_source = (
+        {feed.source_id: feed for feed in load_feeds(enabled_only=False)}
+        if category_impact_floors
+        else {}
+    )
     stats: dict[str, Any] = {
         "candidates": 0,
         "completed": 0,
@@ -494,7 +503,12 @@ def digest_articles_for_aggregation(
                 client=generator,
                 review_client=review_client,
                 content_char_limit=content_char_limit,
-                min_category_impact=min_category_impact,
+                min_category_impact=category_impact_floor_for_source(
+                    article.source_id,
+                    feeds_by_source=feeds_by_source,
+                    min_category_impact=min_category_impact,
+                    floors=category_impact_floors,
+                ),
                 review_margin=review_margin,
             ): article
             for article in candidates
@@ -515,9 +529,15 @@ def digest_articles_for_aggregation(
                     stats["reviewed"] += 1
                     first_score = float(result["review"]["first_pass_category_impact"])
                     final_score = float(result["digest"]["impact"]["category"])
-                    if first_score < min_category_impact <= final_score:
+                    threshold = category_impact_floor_for_source(
+                        article.source_id,
+                        feeds_by_source=feeds_by_source,
+                        min_category_impact=min_category_impact,
+                        floors=category_impact_floors,
+                    )
+                    if first_score < threshold <= final_score:
                         stats["review_rescued"] += 1
-                    elif final_score < min_category_impact <= first_score:
+                    elif final_score < threshold <= first_score:
                         stats["review_dropped"] += 1
 
                 # Propagate digest to any deferred reprints in this batch
@@ -677,9 +697,9 @@ def generate_article_digest_with_review(
             "category impact means importance within one of the site's configured categories: world, US, "
             "politics, business, technology, science, health, environment, automotive, or entertainment. "
             "There is no sports category: routine games, standings, tournament live blogs, athlete profiles, "
-            "and ordinary sports results must remain below the 0.25 category threshold unless the article has "
-            "unusually broad non-sports public impact. Local human-interest stories should also remain below "
-            "the threshold unless they reveal a broader consequential development."
+            f"and ordinary sports results must remain below the {min_category_impact:.2f} category threshold "
+            "unless the article has unusually broad non-sports public impact. Local human-interest stories "
+            "should also remain below the threshold unless they reveal a broader consequential development."
         ),
         response_schema=_digest_response_schema(),
     )
@@ -1127,8 +1147,7 @@ def _persist_pipeline_digest_result(
             stage=usage_record["stage"],
             model=usage_record["model"],
             prompt_version=usage_record["prompt_version"],
-            input_tokens=usage.get("promptTokenCount"),
-            output_tokens=usage.get("candidatesTokenCount"),
+            usage=usage,
         )
 
 

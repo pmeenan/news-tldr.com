@@ -185,7 +185,16 @@ Post-aggregation deduplication runs even when no new window is planned. Candidat
 pairs come from slug/title/headline heuristics (including current published headlines), distinctive keyword overlap, and
 a Flash-Lite prescreen. Strict full-Flash review is the only authority that can
 approve a merge. Reviews are cached against both event update timestamps and the
-prompt version; production reviews at most 40 new pairs in one pass per run.
+prompt version; production reviews at most 120 new pairs in one pass per run.
+The queue is ordered by signal strength so the noisy title-cohesion heuristic
+cannot starve better candidates: slug/title matches first, then article-headline
+matches, keyword overlap and prescreen pairs, then titles sharing three or more
+non-generic words, with weak two-word anchor matches last. Within one tier the
+freshest pair is reviewed first.
+
+Low-impact filtering resolves each article's threshold from its feed's default
+category: `aggregation.min_category_impact` unless
+`aggregation.min_category_impact_overrides` names that category.
 
 ## Stage 3: Editorial and Homepage Curation
 
@@ -221,6 +230,19 @@ advances. Political framing is considered only for eligible politics/U.S./world
 events with both left and right source-policy coverage, and each perspective can
 cite only its matching side.
 
+Deterministic draft checks reject title-case or copied headlines, briefing
+bullets over 230 characters, and single-publisher stories whose dek or first
+bullet does not attribute the outlet; each rejection feeds the one repair
+attempt. A changelog-style change summary is sent back to the verifier once.
+
+After the normal pass, and only when not forced or event-scoped, editorial
+regenerates up to `editorial.backfill_per_run` current-window stories that
+predate evidence verification (highest rank first), within
+`backfill_time_budget_minutes`, skipping events that failed inside
+`backfill_error_cooldown_hours`. Deferred stories wait for a later run. The
+combined run enables backfill only in its final editorial pass, never in the
+backlog or snapshot passes.
+
 Editorial also rebuilds `active-stories.json`, calculates homepage and category
 display ranks, and runs `homepage-curation-v5`. Curation selects up to 12 Top
 News stories and coherent multi-story topic sections from bounded high-rank
@@ -238,7 +260,10 @@ Command:
 The standard-library renderer treats all editorial text as untrusted, escapes
 HTML, and allows only HTTP/HTTPS source links. It generates the homepage, story
 pages, active archive, methodology/corrections page, 404 page, robots policy, sitemap, social metadata, and
-public JSON APIs. CSS and JavaScript use content-fingerprinted filenames.
+public JSON APIs. CSS and JavaScript use content-fingerprinted filenames,
+including a small synchronous theme script that applies the saved light/dark
+preference before styles load. Cards name their publishers, and the "Updated
+since you read" note is shown only to readers who saw the earlier revision.
 
 The main briefing fixes up to 12 candidates before applying read history; it does
 not refill when items become read. Top News opens on mobile, with additional
@@ -263,16 +288,44 @@ production.
 | --- | --- | --- |
 | Article digest | Gemini 3.5 Flash-Lite | Full-Flash review only for borderline/conflicting filters |
 | Active-event filtering, grouping, scoring | Gemini 3.5 Flash-Lite | Deterministic scoring fallback where supported |
-| Deduplication prescreen | Gemini 3.5 Flash-Lite | Candidate discovery only |
-| Deduplication decision | Gemini 3.7 → 3.6 → 3.5 Flash | Lite may reject/defer but can never approve a merge |
+| Deduplication prescreen | Gemini 3.5 Flash-Lite | Candidate discovery only; unchanged chunks are cached |
+| Deduplication decision | Gemini 3.8 → 3.7 Flash | Lite may reject/defer but can never approve a merge |
 | Membership/coherence review | Full-Flash review chain | Lite cannot authorize attachment or partition |
-| Evidence, editorial drafting and verification | Gemini 3.7 → 3.6 → 3.5 Flash | Compact full-Flash retry for eligible empty responses; never Lite |
-| Homepage curation | Same full-Flash client | Deterministic ranked fallback |
+| Evidence extraction, regeneration gate | Gemini 3.5 Flash-Lite | Exact-passage validation; one full-Flash retry after two Lite failures |
+| Editorial drafting | Gemini 3.8 → 3.7 Flash | Compact full-Flash retry for eligible empty responses; never Lite |
+| Editorial verification | Gemini 3.8 → 3.7 → 3.5 Flash | The only work allowed to reach the last-resort model |
+| Top News curation | Gemini 3.8 → 3.7 Flash | Deterministic ranked fallback |
+| Category sections | Gemini 3.5 Flash-Lite | Deterministic ranked fallback |
+
+Every chain begins with one half-price flex attempt on the configured flex
+model (3.7 Flash for review work, the bulk model for bulk work) bounded by the
+purpose's `llm.flex_budget_seconds` entry: 240 s on the critical path (digest,
+aggregation, editorial, evidence) and 900 s where an hour of latency is
+acceptable (deduplication, coherence, curation). A shed or overrun flex attempt
+falls through to the standard chain and bypasses the flex tier for
+`llm.flex_cooldown_seconds` (45 s), while standard-tier capacity failures keep
+the five-minute model cooldown. The verifier receives a map of article IDs to
+publishers so required single-outlet attribution is checkable. `GEMINI_FLEX_DISABLED=1` turns flex off. Concurrency is sized so slow
+flex calls overlap (digest 40, deduplication 16, editorial 6) and the watchdog
+allows 50 minutes; the scheduler skips an hour cleanly when the previous run
+still holds the lock.
 
 All LLM responses use structured JSON schemas. Deterministic code owns ID
 generation, allowed enums, citations, file writes, SQLite mutations, filtering,
-and deployment. Calls record run ID, stage, actual model, prompt version, token
-usage, optional cost, and time in `llm_usage`.
+and deployment. Calls record run ID, stage, actual model, prompt version, input,
+output, thinking and cached token counts, the service tier the API reported,
+an estimated cost from `llm.prices`, and time in `llm_usage`.
+
+Spend controls beyond the model chain: homepage curation runs once per hourly
+run on compact headline cards (80 Top News candidates, 50 per category) and is
+reused when the current-window story set is unchanged; the deduplication
+prescreen caches each chunk by its exact content and hash-buckets events so a
+new event perturbs one chunk; coherence and deduplication run only in the final
+aggregation pass; evidence passages are capped at three per claim and 320
+characters; drafts receive digests plus the verified ledger rather than the
+full article text; a Lite gate skips regenerating a verified story when new
+reports add nothing material; and single-article events wait
+`editorial.single_source_hold_minutes` before their first story.
 
 ## Failure and Idempotency Model
 
@@ -320,8 +373,10 @@ pipeline or health check fails. The latest health report is written atomically t
 - `config/source-policy.json`: publisher identity, paywall, reliability, and political-bias metadata;
   IDs must exactly match the feed registry.
 - `config/categories.json`: category IDs, labels, descriptions, and sort order.
-- `config/pipeline.json`: concurrency, timeouts, retention, thresholds,
-  production publishing, and optional reader-sync presentation flag.
+- `config/pipeline.json`: concurrency, timeouts, retention, thresholds
+  (including per-category impact floors and the deduplication review cap),
+  editorial backfill limits, production publishing, and the optional
+  reader-sync presentation flag.
 - `.env`: ignored Gemini credentials and model overrides.
 
 The current defaults are documented in `config/pipeline.json`; avoid copying

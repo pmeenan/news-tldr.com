@@ -603,12 +603,14 @@ def test_editorial_verbose_passes_selection_and_writes_progress(monkeypatch, cap
         force=False,
         event_ids=None,
         progress=None,
+        backfill_limit=None,
     ):
         assert limit == 2
         assert concurrency == 3
         assert force is True
         assert event_ids == ["event-1", "event-2"]
         assert progress is not None
+        assert backfill_limit is None
         progress("editorial: fake progress")
         return {"completed": 2}
 
@@ -940,3 +942,15 @@ def test_aggregation_experiment_time_window_defaults_to_uncapped(monkeypatch, ca
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload["result"] == {"article_count": 565}
+
+
+def test_lock_status_command_exits_three_when_a_live_run_holds_the_lock(monkeypatch, capsys):
+    monkeypatch.setattr("pipeline.cli.pipeline_lock_status", lambda: {"held": True, "holder": {"pid": 4242}})
+    monkeypatch.setattr("sys.argv", ["news-tldr-pipeline", "lock-status"])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 3
+    assert json.loads(capsys.readouterr().out)["holder"]["pid"] == 4242
+    monkeypatch.setattr("pipeline.cli.pipeline_lock_status", lambda: {"held": False, "holder": None})
+    main()
+    assert json.loads(capsys.readouterr().out)["held"] is False

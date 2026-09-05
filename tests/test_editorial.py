@@ -92,12 +92,15 @@ def _response(*article_ids: str) -> dict[str, Any]:
     ids = list(article_ids or ("a1",))
     return {
         "headline": "Officials announce a material policy change",
-        "dek": "The change takes effect next month, while implementation details remain open.",
+        "dek": "According to the report, the change takes effect next month, while implementation details remain open.",
         "tldr": [
             "Officials announced a policy change.",
             "Implementation details remain unresolved.",
         ],
-        "briefing": ["Officials announced a policy change.", "Implementation details remain unresolved."],
+        "briefing": [
+            "Officials announced a policy change, according to the report.",
+            "Implementation details remain unresolved.",
+        ],
         "headline_claim_ids": ["c1"], "dek_claim_ids": ["c1"],
         "tldr_claim_ids": [["c1"], ["c1"]], "briefing_claim_ids": [["c1"], ["c1"]],
         "key_facts": [
@@ -264,9 +267,10 @@ def test_generate_story_retries_empty_responses_with_compact_digest_context() ->
     generated = generate_story(event, client=client)
 
     assert len(client.calls) == 4
-    assert "Sensitive full article text" in client.calls[1]["prompt"]
-    # The compact draft retains the verified quote but excludes the full repeated input.
-    assert len(client.calls[2]["prompt"]) < len(client.calls[1]["prompt"])
+    # Evidence extraction reads the full text; the ledger-backed draft does not repeat it.
+    assert "Sensitive full article text" in client.calls[0]["prompt"]
+    assert '"article_text"' not in client.calls[1]["prompt"]
+    assert len(client.calls[2]["prompt"]) <= len(client.calls[1]["prompt"])
     assert generated["model"] == "gemini-3.6-flash"
     assert generated["prompt_version"] == EDITORIAL_COMPACT_PROMPT_VERSION
 
@@ -520,10 +524,11 @@ def test_homepage_curation_uses_one_high_ranked_candidate_set_per_category() -> 
 
     assert len(client.calls) == 2
     category_prompt = client.calls[1]["prompt"]
-    assert category_prompt.count('"id":') == 100
+    assert category_prompt.count('"id":') == 50
     assert '"id":"event-204"' in category_prompt
-    assert '"id":"event-105"' in category_prompt
-    assert '"id":"event-104"' not in category_prompt
+    assert '"id":"event-155"' in category_prompt
+    assert '"id":"event-154"' not in category_prompt
+    assert '"dek"' not in category_prompt and '"source_coverage_ratio"' not in category_prompt
 
 
 def test_homepage_coverage_priority_normalizes_category_supply_and_expires() -> None:
@@ -635,3 +640,310 @@ def test_malformed_verifier_retry_is_accounted_for() -> None:
 
     result = generate_story(_event(), client=MalformedClient(_response()))
     assert len(result["usage_records"]) == 5
+
+
+def test_headline_validation_rejects_title_case_and_source_copies() -> None:
+    event = _event(_article("a1"))
+    response = _response()
+    response["headline"] = (
+        "Defense Secretary Gutted Civilian Protection Program Despite Objections From Top Commanders"
+    )
+    with pytest.raises(ValueError, match="title case"):
+        validate_editorial_response(response, event)
+    response["headline"] = "Las Vegas jury convicts Duane Davis of murder in 1996 killing of Tupac Shakur"
+    validate_editorial_response(response, event)
+    response["headline"] = "Headline a1"
+    with pytest.raises(ValueError, match="copies the"):
+        validate_editorial_response(response, event)
+
+
+def test_single_publisher_stories_must_attribute_in_dek_and_first_bullet() -> None:
+    event = _event(_article("a1"))
+    assert "Only one publisher, Source a1" in _build_editorial_prompt(event)
+    assert "Only one publisher" not in _build_editorial_prompt(_event(_article("a1"), _article("a2")))
+    response = _response()
+    response["dek"] = "The change takes effect next month."
+    with pytest.raises(ValueError, match="attribute this single-outlet reporting"):
+        validate_editorial_response(response, event)
+    response["dek"] = "Source a1 reports the change takes effect next month."
+    response["briefing"][0] = "Officials announced a policy change."
+    with pytest.raises(ValueError, match="first briefing bullet"):
+        validate_editorial_response(response, event)
+    response["briefing"][0] = "Officials announced a policy change, Source a1 reports."
+    validated = validate_editorial_response(response, event)
+    assert validated["briefing"][0].startswith("Officials")
+    unattributed = _response("a1", "a2")
+    unattributed["dek"] = "The change takes effect next month."
+    unattributed["briefing"][0] = "Officials announced a policy change."
+    validate_editorial_response(unattributed, _event(_article("a1"), _article("a2")))
+
+
+def test_briefing_bullets_are_capped_for_card_density() -> None:
+    response = _response()
+    response["briefing"][1] = "word " * 60
+    with pytest.raises(ValueError, match="briefing item exceeds 230"):
+        validate_editorial_response(response, _event())
+    assert "15-22 words each" in _build_editorial_prompt(_event())
+
+
+def test_changelog_style_summary_retries_verifier_and_records_usage() -> None:
+    class ChangelogClient(FakeEditorialClient):
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            result = super().generate_json(**kwargs)
+            if "approved" in kwargs["response_schema"]["properties"]:
+                first = len(self.calls) == 3
+                result.payload.update(
+                    material_update=True,
+                    change_summary="Added new details about the policy." if first
+                    else "The policy now takes effect in March.",
+                )
+            return result
+
+    result = generate_story(_event(), client=ChangelogClient(_response()), previous={"headline": "Old"})
+    assert len(result["usage_records"]) == 4
+    assert result["review"]["change_summary"] == "The policy now takes effect in March."
+
+
+def test_backfill_rows_select_unverified_current_stories_and_skip_recent_failures(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from pipeline.editorial import editorial_backfill_rows
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    story_dir = tmp_path / "stories"
+    story_dir.mkdir()
+    with StateDB(db_path) as state:
+        for event_id, score in (("event-1", 0.5), ("event-2", 0.9), ("event-3", 0.7), ("event-4", 0.6)):
+            payload = {
+                "event_id": event_id, "title": f"Title {event_id}", "category": "world", "thread": None,
+                "status": "active", "created_at": "2026-08-24T00:00:00Z",
+                "updated_at": "2026-08-24T01:00:00Z", "keywords": [], "entities": [],
+                "article_count": 1, "confidence": 0.9,
+                "newsworthiness": {"global": score, "category": score, "rationale_codes": []},
+            }
+            path = tmp_path / f"{event_id}.event.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            state.upsert_event(payload, path)
+            state.mark_event_editorial_completed(event_id, "2026-08-24T02:00:00Z")
+        (story_dir / "event-1.json").write_text(json.dumps({"headline": "pre-evidence"}))
+        (story_dir / "event-2.json").write_text(
+            json.dumps({"headline": "verified", "evidence_verification": {"approved": True}})
+        )
+        (story_dir / "event-3.json").write_text(json.dumps({"headline": "pre-evidence but failing"}))
+        state.record_error("run", "editorial", "event", "event-3", None, "boom")
+
+        now = datetime.now(UTC)
+        window = int((now - datetime(2026, 8, 20, tzinfo=UTC)).total_seconds() // 3600)
+        rows = editorial_backfill_rows(state=state, story_dir=story_dir, limit=10, window_hours=window, now=now)
+        assert [row["event_id"] for row in rows] == ["event-1"]
+        later = now + timedelta(hours=30)
+        rows = editorial_backfill_rows(
+            state=state, story_dir=story_dir, limit=10, window_hours=window + 30, now=later
+        )
+        assert [row["event_id"] for row in rows] == ["event-3", "event-1"]
+        rows = editorial_backfill_rows(
+            state=state, story_dir=story_dir, limit=1, window_hours=window + 30, now=later
+        )
+        assert [row["event_id"] for row in rows] == ["event-3"]
+        assert editorial_backfill_rows(state=state, story_dir=story_dir, limit=10, window_hours=1, now=now) == []
+
+
+def test_backfill_regenerates_pre_evidence_stories_within_limit(tmp_path: Path) -> None:
+    from pipeline.editorial import backfill_editorial_stories
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    story_dir = tmp_path / "stories"
+    story_dir.mkdir()
+    path = story_dir / "event-1.json"
+    with StateDB(db_path) as state:
+        _insert_event_and_articles(state, tmp_path)
+        state.mark_event_editorial_completed("event-1", "2026-08-24T02:00:00Z")
+        path.write_text(json.dumps({"headline": "Old v2 story", "created_at": "2026-08-24T02:00:00Z"}))
+        state.start_run("backfill", "editorial")
+        window = 24 * 1000
+        stats = backfill_editorial_stories(
+            state=state, run_id="backfill", client=FakeEditorialClient(_response()), limit=5,
+            concurrency=1, window_hours=window, story_dir=story_dir,
+        )
+        assert stats["backfill_candidates"] == 1
+        assert stats["backfill_completed"] == 1 and stats["backfill_failed"] == 0
+        assert stats["backfill_deferred"] == 0
+        story = json.loads(path.read_text())
+        assert story["evidence_verification"]["approved"] is True
+        assert story["created_at"] == "2026-08-24T02:00:00Z"
+        assert state.conn.execute("SELECT COUNT(*) FROM llm_usage").fetchone()[0] == 3
+        again = backfill_editorial_stories(
+            state=state, run_id="backfill", client=FakeEditorialClient(_response()), limit=5,
+            concurrency=1, window_hours=window, story_dir=story_dir,
+        )
+        assert again["backfill_candidates"] == 0
+
+
+def test_update_gate_skips_regeneration_when_new_reports_add_nothing() -> None:
+    from pipeline.editorial import UPDATE_GATE_PROMPT_VERSION
+
+    class GateClient(FakeEditorialClient):
+        model = "gemini-3.5-flash-lite"
+
+        def __init__(self, material: bool) -> None:
+            super().__init__({})
+            self.material = material
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            self.calls.append(kwargs)
+            assert "material" in kwargs["response_schema"]["properties"]
+            return GeminiResult(payload={"material": self.material, "reason": "r"}, model=self.model,
+                                elapsed_ms=1, usage={"promptTokenCount": 5, "candidatesTokenCount": 1})
+
+    previous = {
+        "headline": "Old", "evidence_verification": {"approved": True},
+        "sources": [{"article_id": "a1"}], "claim_sources": {"c1": ["a1"]},
+        "key_facts": [{"text": "Old fact"}], "uncertainties": [], "briefing": ["Old bullet", "Old caveat"],
+    }
+    event = _event(_article("a1"), _article("a2"))
+    gate = GateClient(material=False)
+    result = generate_story(event, client=FakeEditorialClient(_response("a1", "a2")), previous=previous,
+                            gate_client=gate)
+    assert result["skipped"] == "no_material_update"
+    assert [r["prompt_version"] for r in result["usage_records"]] == [UPDATE_GATE_PROMPT_VERSION]
+    assert '"Old fact"' in gate.calls[0]["prompt"] and "Headline a2" in gate.calls[0]["prompt"]
+
+    unchanged = generate_story(_event(_article("a1")), client=FakeEditorialClient(_response()), previous=previous,
+                               gate_client=gate)
+    assert unchanged["skipped"] == "no_new_articles" and len(gate.calls) == 1
+
+    generated = generate_story(event, client=FakeEditorialClient(_response("a1", "a2")), previous=previous,
+                               gate_client=GateClient(material=True))
+    assert "payload" in generated and generated["usage_records"][0]["prompt_version"] == UPDATE_GATE_PROMPT_VERSION
+
+    legacy_previous = {**previous}
+    del legacy_previous["evidence_verification"]
+    strict_gate = GateClient(material=False)
+    regenerated = generate_story(event, client=FakeEditorialClient(_response("a1", "a2")),
+                                 previous=legacy_previous, gate_client=strict_gate)
+    assert "payload" in regenerated and strict_gate.calls == []
+
+
+def test_skipped_stories_advance_checkpoint_without_rewriting(tmp_path: Path) -> None:
+    class GateOnly(FakeEditorialClient):
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            self.calls.append(kwargs)
+            assert "material" in kwargs["response_schema"]["properties"]
+            return GeminiResult(payload={"material": False, "reason": "same"}, model="lite", elapsed_ms=1,
+                                usage={"promptTokenCount": 5, "candidatesTokenCount": 1})
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    story_dir = tmp_path / "stories"
+    story_dir.mkdir()
+    path = story_dir / "event-1.json"
+    path.write_text(json.dumps({"headline": "Verified story", "evidence_verification": {"approved": True},
+                                "sources": [], "claim_sources": {}, "key_facts": [], "briefing": []}))
+    with StateDB(db_path) as state:
+        _insert_event_and_articles(state, tmp_path)
+        state.start_run("gate", "editorial")
+        gate = GateOnly({})
+        stats = generate_editorial_stories(state=state, run_id="gate", concurrency=1,
+                                          client=FakeEditorialClient(_response()), gate_client=gate,
+                                          story_dir=story_dir)
+        assert stats["skipped_unchanged"] == 1 and stats["completed"] == 0 and stats["failed"] == 0
+        assert state.conn.execute("SELECT last_editorial_at FROM events").fetchone()[0] is not None
+        assert state.conn.execute("SELECT COUNT(*) FROM llm_usage").fetchone()[0] == 1
+    assert json.loads(path.read_text())["headline"] == "Verified story"
+
+
+def test_evidence_extractor_falls_back_to_full_client_after_two_failures() -> None:
+    from pipeline.evidence import EVIDENCE_VERSION
+
+    class RepairAware(FakeEditorialClient):
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            if "\nRepair the previous extraction:" in kwargs["prompt"]:
+                kwargs = {**kwargs, "prompt": kwargs["prompt"].split("\nRepair the previous extraction:")[0]}
+            return super().generate_json(**kwargs)
+
+    class BadLite(RepairAware):
+        model = "gemini-3.5-flash-lite"
+
+        def generate_json(self, **kwargs: Any) -> GeminiResult:
+            result = super().generate_json(**kwargs)
+            if "claims" in kwargs["response_schema"]["properties"]:
+                result.payload["claims"][0]["evidence"][0]["quote"] = "Not present in the article."
+            return result
+
+    lite = BadLite(_response())
+    full = RepairAware(_response())
+    result = generate_story(_event(), client=full, evidence_client=lite)
+    assert len(lite.calls) == 2
+    models = [record["model"] for record in result["usage_records"]]
+    assert models[:3] == ["gemini-3.5-flash-lite", "gemini-3.5-flash-lite", "gemini-3.7-flash"]
+    assert result["usage_records"][2]["prompt_version"] == EVIDENCE_VERSION
+    assert "payload" in result
+
+
+def test_active_index_reuses_curation_for_unchanged_story_set(tmp_path: Path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    story_dir = tmp_path / "stories"
+    story_dir.mkdir()
+    story = {
+        "story_id": "event-1", "event_id": "event-1", "category": "world", "headline": "Story one",
+        "dek": "Dek", "tldr": ["a", "b"], "briefing": ["a", "b"], "key_facts": [], "uncertainties": [],
+        "sources": [{"article_id": "a1", "source_name": "AP News"}],
+        "importance": {"score": 0.6, "components": {}},
+        "created_at": "2026-08-24T02:00:00Z", "updated_at": "2026-08-24T02:00:00Z",
+    }
+    path = story_dir / "event-1.json"
+    path.write_text(json.dumps(story))
+    output = tmp_path / "active.json"
+    client = FakeEditorialClient({"top_news": ["event-1"], "sections": []})
+    when = datetime(2026, 8, 24, 3, tzinfo=UTC)
+    with StateDB(db_path) as state:
+        _insert_event_and_articles(state, tmp_path)
+        first = write_active_stories_index(state=state, story_dir=story_dir, output_path=output,
+                                           curation_client=client, run_id="r", generated_at=when)
+        assert first["curation_mode"] == "llm" and first["curation_top_news"] == 1
+        calls = len(client.calls)
+        second = write_active_stories_index(state=state, story_dir=story_dir, output_path=output,
+                                            curation_client=client, run_id="r", generated_at=when)
+        assert second["curation_mode"] == "reused" and len(client.calls) == calls
+        story["updated_at"] = "2026-08-24T02:30:00Z"
+        path.write_text(json.dumps(story))
+        third = write_active_stories_index(state=state, story_dir=story_dir, output_path=output,
+                                           curation_client=client, run_id="r", generated_at=when,
+                                           reuse_previous_curation=True)
+        assert third["curation_mode"] == "reused" and len(client.calls) == calls
+        fourth = write_active_stories_index(state=state, story_dir=story_dir, output_path=output,
+                                            curation_client=client, run_id="r", generated_at=when)
+        assert fourth["curation_mode"] == "llm" and len(client.calls) > calls
+    index = json.loads(output.read_text())
+    assert index["curation"]["top_news"] == ["event-1"] and index["curation"]["input_signature"]
+
+
+def test_single_source_events_are_held_before_first_story(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from pipeline.editorial import pending_editorial_sql
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    with StateDB(db_path) as state:
+        _insert_event_and_articles(state, tmp_path)
+        now = datetime(2026, 8, 24, 0, 30, tzinfo=UTC)
+        assert editorial_candidate_rows(state=state, hold_minutes=60, now=now) == []
+        assert [r["event_id"] for r in editorial_candidate_rows(state=state, hold_minutes=0, now=now)] == ["event-1"]
+        later = now + timedelta(hours=1)
+        assert [r["event_id"] for r in editorial_candidate_rows(state=state, hold_minutes=60, now=later)] == ["event-1"]
+        clause, params = pending_editorial_sql(hold_minutes=60, now=now)
+        assert state.conn.execute(f"SELECT COUNT(*) FROM events WHERE {clause}", params).fetchone()[0] == 0
+        clause, params = pending_editorial_sql(hold_minutes=60, now=later)
+        assert state.conn.execute(f"SELECT COUNT(*) FROM events WHERE {clause}", params).fetchone()[0] == 1
+
+
+def test_verifier_receives_publisher_names_for_attribution_checks() -> None:
+    client = FakeEditorialClient(_response())
+    generate_story(_event(_article("a1")), client=client)
+    verify_call = next(c for c in client.calls if "approved" in c["response_schema"]["properties"])
+    assert '"publishers": {"a1": "Source a1"}' in verify_call["prompt"]
+    assert "must not be rejected" in verify_call["prompt"]

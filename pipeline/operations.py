@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from pipeline.config import load_feeds, load_pipeline_config
+from pipeline.editorial import pending_editorial_sql
 from pipeline.paths import (
     ACTIVE_STORIES_PATH,
     ARTICLE_DIR,
@@ -26,8 +27,16 @@ from pipeline.state import StateDB
 from pipeline.util import atomic_write_json, isoformat_z, sanitize_id, utc_now
 
 VALIDATION_VERSION = "artifact-validation-v1"
+
+
+def _single_source_hold_minutes() -> int:
+    try:
+        return max(0, int(load_pipeline_config().editorial.get("single_source_hold_minutes", 0) or 0))
+    except (OSError, ValueError, TypeError):
+        return 0
 HEALTH_VERSION = "operations-health-v1"
-VERSIONED_SITE_ASSET_PATTERN = re.compile(r"^site\.[0-9a-f]{16}\.(css|js)$")
+VERSIONED_SITE_ASSET_PATTERN = re.compile(r"^(site|theme)\.[0-9a-f]{16}\.(css|js)$")
+EXPECTED_VERSIONED_SITE_ASSETS = ("site.css", "site.js", "theme.js")
 REQUIRED_PIPELINE_STAGES = (
     "maintenance",
     "collection",
@@ -80,12 +89,11 @@ def preflight_report(
             """,
             (range_start,),
         ).fetchone()[0]
+        pending_clause, pending_params = pending_editorial_sql(
+            hold_minutes=_single_source_hold_minutes()
+        )
         editorial_candidates = state.conn.execute(
-            """
-            SELECT COUNT(*) FROM events
-            WHERE status IN ('active', 'stale')
-              AND (last_editorial_at IS NULL OR last_editorial_at < updated_at)
-            """
+            f"SELECT COUNT(*) FROM events WHERE {pending_clause}", pending_params
         ).fetchone()[0]
     if progress:
         progress("preflight: validating current artifacts")
@@ -338,6 +346,9 @@ def llm_usage_report(
             SELECT stage, model, prompt_version, COUNT(*) AS calls,
                    SUM(COALESCE(input_tokens, 0)) AS input_tokens,
                    SUM(COALESCE(output_tokens, 0)) AS output_tokens,
+                   SUM(COALESCE(thinking_tokens, 0)) AS thinking_tokens,
+                   SUM(COALESCE(cached_tokens, 0)) AS cached_tokens,
+                   SUM(CASE WHEN service_tier = 'flex' THEN 1 ELSE 0 END) AS flex_calls,
                    SUM(COALESCE(cost_usd, 0)) AS cost_usd,
                    COUNT(DISTINCT run_id) AS run_count
             FROM llm_usage
@@ -348,6 +359,8 @@ def llm_usage_report(
             (cutoff,),
         ).fetchall()
     groups = [dict(row) for row in rows]
+    for group in groups:
+        group["cost_usd"] = round(float(group["cost_usd"]), 6)
     return {
         "hours": hours,
         "since": cutoff,
@@ -355,6 +368,9 @@ def llm_usage_report(
         "calls": sum(int(row["calls"]) for row in groups),
         "input_tokens": sum(int(row["input_tokens"]) for row in groups),
         "output_tokens": sum(int(row["output_tokens"]) for row in groups),
+        "thinking_tokens": sum(int(row["thinking_tokens"]) for row in groups),
+        "cached_tokens": sum(int(row["cached_tokens"]) for row in groups),
+        "flex_calls": sum(int(row["flex_calls"]) for row in groups),
         "cost_usd": round(sum(float(row["cost_usd"]) for row in groups), 6),
         "groups": groups,
     }
@@ -425,12 +441,11 @@ def health_report(
             ).fetchone()[0]
             checks.append(_check("stale_running_runs", stale_running == 0, {"count": stale_running}))
 
+            pending_clause, pending_params = pending_editorial_sql(
+                hold_minutes=_single_source_hold_minutes()
+            )
             pending_editorial = state.conn.execute(
-                """
-                SELECT COUNT(*) FROM events
-                WHERE status IN ('active', 'stale')
-                  AND (last_editorial_at IS NULL OR last_editorial_at < updated_at)
-                """
+                f"SELECT COUNT(*) FROM events WHERE {pending_clause}", pending_params
             ).fetchone()[0]
             checks.append(
                 _check(
@@ -692,26 +707,28 @@ def _validate_static_output(
         if not path.is_file():
             report(path, "required static file is missing")
     assets_dir = dist_dir / "assets"
-    versioned_assets: dict[str, list[Path]] = {"css": [], "js": []}
+    versioned_assets: dict[str, list[Path]] = {
+        asset: [] for asset in EXPECTED_VERSIONED_SITE_ASSETS
+    }
     if assets_dir.is_dir():
         for path in assets_dir.iterdir():
             match = VERSIONED_SITE_ASSET_PATTERN.fullmatch(path.name)
             if path.is_file() and match:
-                versioned_assets[match.group(1)].append(path)
+                versioned_assets.setdefault(f"{match.group(1)}.{match.group(2)}", []).append(path)
     try:
         home_html = (dist_dir / "index.html").read_text(encoding="utf-8")
     except OSError:
         home_html = ""
-    for extension, matches in versioned_assets.items():
+    for asset, matches in versioned_assets.items():
         if len(matches) != 1:
             report(
                 assets_dir,
-                f"expected exactly one versioned site {extension} asset, found {len(matches)}",
+                f"expected exactly one versioned {asset} asset, found {len(matches)}",
             )
             continue
         asset_url = f"/assets/{matches[0].name}"
         if asset_url not in home_html:
-            report(matches[0], f"homepage does not reference versioned site {extension} asset")
+            report(matches[0], f"homepage does not reference versioned {asset} asset")
     for filename in ("site.css", "site.js"):
         unversioned = assets_dir / filename
         if unversioned.is_file():
