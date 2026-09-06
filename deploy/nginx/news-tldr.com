@@ -50,6 +50,13 @@ server {
         return 404;
     }
 
+    # Public rolling research packet. Cloudflare must also mark this exact
+    # path eligible for caching and respect the origin's five-minute TTL.
+    location = /api/brief.json {
+        try_files $uri =404;
+        expires 5m;
+    }
+
     # The site is rebuilt hourly. Let browsers and Cloudflare reuse generated
     # HTML for 10 minutes before checking the origin for a newer build.
     location ~* \.(html|htm)$ {

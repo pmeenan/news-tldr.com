@@ -291,6 +291,18 @@ gantt
 - [ ] Add a retry cooldown for validation-rejected events that have not changed, so a story the verifier keeps rejecting does not cost five calls every hour.
 - [ ] Human review of Lite-drafted stories before considering drafting on Flash-Lite.
 
+### External briefing experiments
+
+- [x] Add a rolling 12-hour public JSON packet with ranking, full available
+  extractions, and a two-canonical-publisher minimum; refresh after scheduled jobs.
+- [x] Add atomic publication, five-minute Nginx cache configuration, and hourly
+  :45 scheduling for fresher packets near the top of the hour.
+- [x] Install the updated Nginx location; live `/api/brief.json` returns
+  `Cache-Control: max-age=300` (verified September 6).
+- [ ] Confirm a Cloudflare cache HIT for `/api/brief.json`; activation checks
+  returned MISS with the correct five-minute origin TTL.
+- [ ] Experiment manually with scripts and TTS in AI Studio before audio automation.
+
 ## Backlog
 
 - Headless browser fallback for sources that block readability extraction.

@@ -381,3 +381,15 @@ pipeline or health check fails. The latest health report is written atomically t
 
 The current defaults are documented in `config/pipeline.json`; avoid copying
 volatile story counts or health status into evergreen architecture documents.
+
+### External briefing export
+
+After each scheduled run, `scripts/run-scheduled.sh` invokes `brief --verbose`
+before health checks, even if upstream work exited nonzero. The exporter writes
+one public `/api/brief.json` with the preceding 12 hours of qualifying stories
+(two canonical publishers minimum), ranks, and full available article extractions.
+Older attached reports are marked as context. It uses the pipeline lock and atomic
+replacement; errors preserve the previous packet and make the wrapper fail.
+The hourly cron starts at :45. The endpoint has a five-minute origin cache TTL;
+Cloudflare eligibility must be configured separately. Manual `run`/`present`
+commands do not refresh the packet; use `brief` explicitly after manual work.

@@ -15,6 +15,7 @@ fi
 
 run_status=0
 health_status=0
+brief_status=0
 {
   echo "[$(date --iso-8601=seconds)] scheduled pipeline starting"
   cd "$project_dir" || exit 1
@@ -25,11 +26,15 @@ health_status=0
     exit 0
   fi
   PYTHONPATH=. ./.venv/bin/python -m pipeline.cli run --verbose || run_status=$?
+  PYTHONPATH=. ./.venv/bin/python -m pipeline.cli brief --verbose || brief_status=$?
   PYTHONPATH=. ./.venv/bin/python -m pipeline.cli health --verbose || health_status=$?
-  echo "[$(date --iso-8601=seconds)] scheduled pipeline finished run=$run_status health=$health_status"
+  echo "[$(date --iso-8601=seconds)] scheduled pipeline finished run=$run_status health=$health_status brief=$brief_status"
 } >>"$log_file" 2>&1
 
 if (( run_status != 0 )); then
   exit "$run_status"
+fi
+if (( brief_status != 0 )); then
+  exit "$brief_status"
 fi
 exit "$health_status"

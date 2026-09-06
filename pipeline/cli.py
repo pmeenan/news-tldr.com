@@ -16,6 +16,7 @@ from pipeline.aggregate import (
     run_grouping_experiment,
     write_experiment_result,
 )
+from pipeline.brief import brief_once
 from pipeline.collect import collect_once
 from pipeline.config import load_feeds, load_pipeline_config
 from pipeline.digest import ARTICLE_DIGEST_PROMPT_VERSION, digest_once
@@ -373,6 +374,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="news-tldr-pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db", help="Initialize or migrate the SQLite state database.")
+    brief_parser = sub.add_parser(
+        "brief", help="Publish a rolling 12-hour research packet with multi-publisher stories.",
+    )
+    brief_parser.add_argument("--output", type=Path, help="Write a preview JSON instead of publishing.")
+    brief_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
     sub.add_parser(
         "lock-status",
         help="Exit 0 when the pipeline lock is free or stale, 3 when a verified live run holds it.",
@@ -614,6 +620,11 @@ def main() -> None:
             backfill_limit=args.backfill,
         )
         print(json.dumps(stats, indent=2, sort_keys=True))
+    elif args.command == "brief":
+        stats = brief_once(output=args.output, progress=_stderr_progress if args.verbose else None)
+        print(json.dumps(stats, indent=2, sort_keys=True))
+        if stats.get("reason") == "pipeline_busy":
+            raise SystemExit(3)
     elif args.command == "present":
         progress = _stderr_progress if args.verbose else None
         migrate()

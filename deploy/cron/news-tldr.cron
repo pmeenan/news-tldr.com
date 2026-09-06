@@ -1,4 +1,4 @@
 # news-tldr.com hourly refresh. Install with `crontab -e` or the README command.
 # Cron reports a non-zero exit through its normal local-mail path; detailed logs
 # and the latest machine-readable health result live under data/state/.
-17 * * * * /home/pmeenan/src/news-tldr.com/scripts/run-scheduled.sh
+45 * * * * /home/pmeenan/src/news-tldr.com/scripts/run-scheduled.sh

@@ -770,7 +770,7 @@ calls and makes no database, artifact, static-build, or production changes.
 
 ### Scheduled Production Runs
 
-The production user crontab runs `scripts/run-scheduled.sh` at minute 17 every
+The production user crontab runs `scripts/run-scheduled.sh` at minute 45 every
 hour. The wrapper invokes the complete pipeline and its automatic production
 publish, then runs the health check. It retains detailed output in
 `data/state/scheduled-pipeline.log`, rotates at 10 MiB, and exits nonzero when
@@ -947,3 +947,22 @@ dollars from `llm.prices`, including thinking tokens billed as output.
 ## Open Design Questions
 
 - Should archived events eventually retain permanent public story pages beyond the current active/stale archive?
+
+## External briefing research packet
+
+`pipeline/brief.py` publishes `/api/brief.json` after every scheduled job as a
+rolling 12-hour UTC snapshot. This is a deliberate public full-extraction export
+for external scripting experiments, separate from the summary-only story API.
+Only active-index stories citing two canonical publishers qualify; every article
+lookup filters `is_filtered = 0`. Publication/fetch timestamps and meaningful
+story revisions select events; older event articles provide marked context.
+Ranks, public story output and article digests accompany full available text.
+Collection configuration, local paths and private `_evidence` remain excluded.
+
+The export owns its own atomic public file, outside presentation's managed-file
+manifest, and holds the existing pipeline lock while reading database/artifacts.
+It makes no LLM calls. Failed builds leave the prior packet intact. The wrapper
+attempts export after the pipeline even when it reports partial failure; freshness
+and collection status are explicit in the packet. A five-minute Nginx cache TTL
+requires an exact-path Cloudflare eligibility rule. See README for the contract
+and installation. No fixed timezone release or audio automation is implemented.

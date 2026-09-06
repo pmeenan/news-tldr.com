@@ -434,7 +434,7 @@ Summarize recorded model calls and token usage by stage, model, and prompt:
 ```
 
 The production machine runs `scripts/run-scheduled.sh` from the user's crontab
-at minute 17 of every hour. The wrapper runs the complete pipeline, publishes
+at minute 45 of every hour. The wrapper runs the complete pipeline, publishes
 successful output, runs the health check, rotates its log at 10 MiB, and exits
 nonzero on pipeline or health failure. Detailed output is stored in
 `data/state/scheduled-pipeline.log`; cron's normal mail/error path provides the
@@ -472,3 +472,54 @@ Run verification:
 ./.venv/bin/pip-audit -r requirements.txt
 ./.venv/bin/python -m pytest
 ```
+
+### External briefing packet
+
+[`/api/brief.json`](https://news-tldr.com/api/brief.json) is a public, static
+research download refreshed after every scheduled pipeline job, including jobs
+that report partial processing failures. It contains a rolling **12-hour** UTC
+window for twice-daily consumption in any timezone. It is not tied to Eastern
+release times. The hourly job starts at :45 to normally finish before the next
+hour (including 6 a.m. and 4 p.m. Eastern); delays remain possible.
+
+Only published, active-index stories citing at least **two distinct canonical
+publishers** qualify. Multiple category feeds from one publisher count once;
+this measures outlet breadth, not independent reporting. Selection includes
+reports published or first fetched in `(window_start, window_end]`, and stories
+with meaningful revisions in that interval. Older unfiltered articles attached
+to those stories are included as context with `in_window: false`. Unassigned
+articles and single-publisher stories are excluded. Every article query enforces
+`is_filtered = 0`.
+
+The packet contains `stories` (complete public editorial output, ranking fields,
+canonical publisher counts/IDs, and `article_ids`) and a deduplicated `articles`
+array (full available `content_text`, digest/impact, source metadata, extraction
+availability and processing status). Full extractions are intentionally public
+at this endpoint; collection configuration, local paths, error text, and private
+`_evidence` ledgers are not exported. `sources` carries source-policy metadata.
+Check `generated_at`, `window_start`, `window_end`, `active_index_generated_at`,
+and `latest_collection` before consuming a packet. An additional report may not
+yet be represented in the editorial summary. A 12-hour packet is not a delivery
+queue: consumers running more than 12 hours apart can miss developments, and
+consumers running more often should deduplicate story IDs/revisions.
+
+No LLM is called to create the packet. It is atomically replaced under the
+pipeline lock; failed exports retain the previous file and fail the scheduler.
+Presentation does not own this file in its deployment manifest, so hourly site
+publishing preserves it. Output uses the existing ignored runtime paths; no new
+dependency is required.
+
+```bash
+# Preview locally without changing the public packet:
+./.venv/bin/python -m pipeline.cli brief --output data/evaluations/brief.json --verbose
+# Refresh the public packet immediately:
+./.venv/bin/python -m pipeline.cli brief --verbose
+```
+
+The checked-in Nginx exact location serves JSON with `expires 5m`
+(`Cache-Control: max-age=300`) and returns 404 if missing. Install/reload the
+Nginx configuration using the command earlier in this README. In Cloudflare,
+create an exact-path Cache Rule for `/api/brief.json`: **Eligible for cache**,
+**respect origin Cache-Control** for Edge TTL and Browser TTL. Do not apply this
+rule to `/api/sync/`. JSON is not cached by Cloudflare by default. Verify response
+headers include `max-age=300`, then check `CF-Cache-Status` on repeated requests.
