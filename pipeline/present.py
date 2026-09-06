@@ -32,7 +32,7 @@ from pipeline.sources import publisher_id
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v25"
+PRESENTATION_VERSION = "presentation-v26"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
@@ -158,10 +158,15 @@ a { color: inherit; }
 .brand span { color: var(--accent); }
 .masthead-side { display: flex; align-items: flex-end; justify-content: flex-end; gap: .8rem; }
 .tagline { max-width: 30rem; margin: 0; color: var(--muted); font: 600 .78rem/1.4 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .1em; text-align: right; }
-.sync-button { flex: 0 0 auto; width: 2.45rem; height: 2.45rem; display: inline-grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
-.sync-button:hover, .sync-button.is-connected { color: var(--accent-dark); border-color: var(--accent-dark); }
-.sync-button svg { width: 1.15rem; height: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
-.sync-button.is-syncing svg { animation: sync-spin .9s linear infinite; }
+.sync-button { flex: 0 0 auto; width: 2.45rem; height: 2.45rem; display: inline-grid; place-items: center; border: 2px solid var(--muted); border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
+.sync-button:hover { color: var(--ink); border-color: var(--ink); }
+.sync-button.is-connected { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
+.sync-button:focus-visible { outline: 2px solid var(--accent-dark); outline-offset: 3px; }
+.sync-button svg { width: 1.3rem; height: 1.3rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+.sync-button svg { display: none; }
+.sync-button:not(.is-connected):not(.is-syncing) .sync-icon-disconnected,
+.sync-button.is-connected:not(.is-syncing) .sync-icon-connected { display: block; }
+.sync-button.is-syncing .sync-icon-spinner { display: block; animation: sync-spin .9s linear infinite; }
 .theme-button { flex: 0 0 auto; width: 2.45rem; height: 2.45rem; display: inline-grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
 .theme-button:hover { color: var(--accent-dark); border-color: var(--accent-dark); }
 .theme-button svg { width: 1.15rem; height: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
@@ -1896,7 +1901,15 @@ def _page(
         sync_header = (
             '<button type="button" class="sync-button" data-sync-button '
             'aria-label="Set up read-history sync" aria-haspopup="dialog" aria-controls="sync-dialog">'
-            '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-5V2"/>'
+            '<svg class="sync-icon-disconnected" viewBox="0 0 24 24" aria-hidden="true">'
+            '<path d="m8 14-2 2a4.24 4.24 0 0 0 6 6l2-2" transform="translate(-2 -2)"/>'
+            '<path d="m10 4 2-2a4.24 4.24 0 0 1 6 6l-2 2" transform="translate(2 2)"/>'
+            '<path d="M3 8h3M8 3v3M16 18v3M18 16h3"/></svg>'
+            '<svg class="sync-icon-connected" viewBox="0 0 24 24" aria-hidden="true">'
+            '<path d="m10 13a5 5 0 0 0 7 .1l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7"/>'
+            '<path d="m14 11a5 5 0 0 0-7-.1l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7"/></svg>'
+            '<svg class="sync-icon-spinner" viewBox="0 0 24 24" aria-hidden="true">'
+            '<path d="M20 7h-5V2"/>'
             '<path d="M20 7a8 8 0 0 0-13.7-2.7L4 7"/><path d="M4 17h5v5"/>'
             '<path d="M4 17a8 8 0 0 0 13.7 2.7L20 17"/></svg></button>'
         )
