@@ -622,7 +622,7 @@ untrusted text, restricts source URLs to HTTP/HTTPS, validates story paths and
 builds into a temporary sibling before replacing ignored `dist/`.
 
 The main briefing contains at most 12 stories. The cohort is selected for the
-current category/coverage preference **before** read filtering, preferring
+current category preference **before** read filtering, preferring
 curated Top News then rank. Reading a card cannot cause a replacement to enter
 that briefing. A clear stopping message separates the briefing from the topic groups and
 category remainders, which render inline below it on every viewport; nothing
@@ -646,16 +646,15 @@ dark token set applies under `prefers-color-scheme: dark` unless the root carrie
 the saved `newsTldrThemeV1` preference before the stylesheet loads, and drives
 the masthead toggle. Larger controls and complete
 labels improve mobile operation. The sticky toolbar contains category, New/All,
-All/2+ outlets, and Mark read controls. New browsers default to all outlets so
-consequential original reporting is not automatically hidden. Saved preferences
-remain respected. `coverage=top` explicitly requires two publishers; the legacy
-`coverage=all` URL remains accepted. The masthead counts unread briefing items.
+and Mark read controls. Source coverage is selected by the category admission
+policy before editorial generation. Legacy `coverage=top` and `coverage=all` links
+and saved source preferences no longer restrict the reader view. The toolbar
+counts every unread story in the selected category.
 Both site and individual story relative timestamps refresh each minute.
 
 A title at least 60% visible for **one second** still counts as read, intentionally
 supporting headline skimming. Cards remain stable during the scan; filters apply
-read history on the next render. Mark read affects currently displayed cards,
-excluding collapsed coverage. Optional sync keeps its existing three-day state,
+read history on the next render. Mark read affects currently displayed cards. Optional sync keeps its existing three-day state,
 private fragment link, one bounded initial pull and silent background writes.
 
 Publishing, CSP, noindex/social metadata and cache contracts are unchanged:
@@ -966,3 +965,36 @@ attempts export after the pipeline even when it reports partial failure; freshne
 and collection status are explicit in the packet. A five-minute Nginx cache TTL
 requires an exact-path Cloudflare eligibility rule. See README for the contract
 and installation. No fixed timezone release or audio automation is implemented.
+
+
+### Category gap admissions (September 13, 2026)
+
+Schema v11 adds `editorial_admissions` (event ID, category, immutable admission
+time), `editorial_policy_state` (one-time retrospective initialization), and
+`events.editorial_material_at` (first publication or latest material revision).
+`pipeline/eligibility.py` resolves canonical publishers from unfiltered article
+assignments. Two-publisher events qualify automatically; eligible recent singles
+are ranked by category impact, global impact, creation time and ID to fill a
+rolling 24-hour category target (12, with optional category overrides). The
+existing minimum-impact filtering and single-source hold still apply. Mere
+processing timestamps do not refresh coverage; first events and published
+material revisions do. Already-admitted singles and their material revisions
+consume slots without being counted twice when a second publisher arrives.
+
+Admissions are reserved under the pipeline lock before evidence/drafting calls,
+and survive failures, later changes in publisher counts, and category saturation.
+The same read-only eligibility preview constrains pending counts, preflight,
+health, forced work and backfill. New single-publisher candidates must originate
+within the last 24 hours; an excluded older event can qualify later when a second
+publisher joins. Ordinary runs never clear prior admissions. Deleting an event
+cascades its admission record. Final drafts without a gap admission must cite at
+least two canonical publishers.
+
+`editorial-eligibility --retroactive` initializes existing published coverage with
+an hourly retrospective selection using current memberships and stored material
+revision dates. This is a deterministic approximation, not historical replay of
+publisher arrivals. The active index excludes unadmitted single-publisher stories;
+private story/article artifacts remain intact. Static deployment removes their
+managed public pages/API files, and the archive and curation use only admitted
+coverage. Presentation v27 removes the 2+/All source toggle and ignores legacy
+source preferences/URLs. Read-history New/All and publisher labels remain.

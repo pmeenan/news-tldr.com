@@ -315,3 +315,15 @@ gantt
 - Historical archived-event pages beyond the current active/stale story archive.
 - Incremental presentation builds (skip unchanged story pages).
 - Optional dedicated event metadata-generation pass and automatic thread assignment, pending a post-launch quality/cost evaluation.
+
+
+### September 13 category gap coverage
+
+- [x] Require two canonical publishers, with ranked single-publisher gap admissions
+  toward 12 stories/category/24 hours and optional per-category targets.
+- [x] Persist admissions, count material revisions rather than processing updates,
+  and apply policy before editorial calls and across run gates/health/backfill.
+- [x] Add a one-time retrospective selection command preserving private artifacts.
+- [x] Remove the source-count toggle and legacy browser source filtering.
+- [ ] Compare a full day's actual API spend and category coverage after rollout;
+  model-routing and local-Ollama changes remain separate future work.

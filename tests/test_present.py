@@ -189,8 +189,8 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert '>Climate</button>' in home
     assert 'data-view-filter="new" aria-pressed="true"' in home
     assert 'data-view-filter="all" aria-pressed="false"' in home
-    assert 'data-coverage-filter="top" aria-pressed="false"' in home
-    assert 'data-coverage-filter="all" aria-pressed="true"' in home
+    assert 'data-coverage-filter' not in home
+    assert 'Choose source coverage filter' not in home
     assert 'data-source-count="1"' in home
     assert (
         '<span data-visible-count>1</span> <span data-count-label>unread story</span>'
@@ -211,11 +211,9 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "let savedView = 'new'" in script
     assert "localStorage.setItem(VIEW_MODE_KEY, activeView)" in script
     assert "if (activeView === 'new') next.searchParams.delete('view')" in script
-    assert "let savedCoverage = 'all'" in script
-    assert "localStorage.setItem(COVERAGE_MODE_KEY, activeCoverage)" in script
-    assert "if (activeCoverage === 'all') next.searchParams.delete('coverage')" in script
-    assert "cardSourceCount(card) >= MIN_TOP_SOURCE_COUNT" in script
-    assert "MIN_TOP_SOURCE_COUNT = 2" in script
+    assert "activeCoverage" not in script
+    assert "COVERAGE_MODE_KEY" not in script
+    assert "next.searchParams.delete('coverage')" in script
     assert "VIEW_THRESHOLD_MS = 1 * 1000" in script
     assert "VIEWED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000" in script
     assert "SYNC_TOKEN_KEY = 'newsTldrSyncTokenV1'" in script

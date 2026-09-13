@@ -34,6 +34,45 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on September 13, 2026 (Category Gap Admissions, presentation v27)
+
+- **Live**: require two canonical publishers before editorial generation, with
+  ranked single-publisher admissions to fill a rolling 24-hour category target
+  of 12. `editorial.gap_fill_category_targets` supports category overrides.
+  Existing newsworthiness floors and the single-source hold remain active.
+- **Persistence**: schema v11 adds `editorial_admissions`,
+  `editorial_policy_state`, and `events.editorial_material_at`. New events,
+  admitted singles, and material revisions count; routine processing does not.
+  Admissions persist across runs/failures and later coverage growth. Normal,
+  forced, scoped, backfill, preflight, run-gate and health paths enforce policy.
+  Final drafts without a gap admission must cite two canonical publishers.
+- **Retrospective selection**: `editorial-eligibility --retroactive --verbose`
+  replays hourly selection with current publisher memberships, once only;
+  `--dry-run` previews it. This approximates historical eligibility because
+  historical publisher-arrival snapshots are unavailable. The live pass admitted
+  1,107 singles, reduced the active index from 8,126 to 2,891 stories, and removed
+  5,235 existing stories / 10,470 managed files from public coverage. Private
+  source and story artifacts remain intact for future clustering.
+- **Presentation**: removed the 2+/All source toggle and all browser source
+  filtering; old preferences and `coverage` URLs cannot hide admitted singles.
+  New/All history remains. Homepage now has 357 stories across the 72-hour window,
+  including 23 automotive, 33 health, and 33 science stories. Methodology, README,
+  design, pipeline and plan documentation describe the new policy.
+- **Verification**: 351 tests pass; Ruff, compileall, generated JavaScript syntax,
+  diff checks, SQLite quick check and full artifact validation pass (0 errors).
+  Homepage and API return HTTP 200, public HTML has no source toggle, and no
+  excluded story HTML remains on disk. The rolling brief was refreshed (41
+  stories). No paid LLM calls or dependencies were added. No browser runtime
+  was available for an interactive rendering check.
+- **Health**: existing 15:50 editorial partial-failure status remains, with six
+  eligible pending events. Policy-excluded events no longer count as backlog.
+  Next hourly run should exercise the admission gate; compare a full day's
+  actual spend before changing model routing or adding Ollama.
+- **Backup**: database, prior active index, and replaced source files are under
+  ignored `data/state/upgrade-backups/gap-fill-20260913T163427Z/`.
+- **Not committed.** Existing user edits to feeds/source policy were preserved.
+
+
 ### State on September 5, 2026, evening (Homepage Long Scroll, presentation v25)
 
 - **Change**: removed the collapsed "Explore more coverage" `<details>` block,

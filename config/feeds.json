@@ -2,6 +2,26 @@
   "version": 1,
   "feeds": [
     {
+      "source_id": "washington-sun",
+      "source_name": "The Washington Sun",
+      "feed_url": "https://washingtonsun.com/index.rss",
+      "site_url": "https://washingtonsun.com",
+      "enabled": true,
+      "default_category": "us",
+      "category_hints": [
+        "us",
+        "politics"
+      ],
+      "content_hints": {
+        "default_content_type": "news",
+        "paywall": "none"
+      },
+      "fetch": {
+        "timeout_seconds": 30
+      },
+      "notes": "Politics, policy, and local Washington news."
+    },
+    {
       "source_id": "engadget",
       "source_name": "Engadget",
       "feed_url": "https://www.engadget.com/rss.xml",

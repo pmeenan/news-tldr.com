@@ -28,6 +28,14 @@ from pipeline.llm import GeminiEmptyResponseError, GeminiResult
 from pipeline.state import StateDB, migrate
 
 
+@pytest.fixture(autouse=True)
+def legacy_editorial_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These fixtures exercise the editorial contracts without the optional
+    # admission policy. Enabled-policy integration lives in test_eligibility.py.
+    monkeypatch.setattr("pipeline.eligibility.enabled", lambda: False)
+    monkeypatch.setattr("pipeline.editorial.gap_fill_enabled", lambda: False)
+
+
 class FakeEditorialClient:
     model = "gemini-3.7-flash"
 
@@ -433,6 +441,7 @@ def test_active_index_includes_only_current_events_with_story_files(tmp_path: Pa
     assert stats == {
         "active_index_stories": 2,
         "active_index_missing": 0,
+        "active_index_excluded_coverage": 0,
         "curation_mode": "fallback",
         "curation_sections": 0,
         "curation_top_news": 2,

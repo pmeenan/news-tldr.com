@@ -229,6 +229,29 @@ Brand-new single-article events wait `editorial.single_source_hold_minutes`
 arrive first; held events are not counted as pending by the run gate or the
 health check.
 
+The category admission policy is controlled by `editorial.gap_fill_enabled`,
+`gap_fill_target` (12), and optional `gap_fill_category_targets` overrides.
+It applies to normal, forced, event-specific, and backfill generation. Deferred
+single-publisher events remain available to clustering but do not block the run
+or count as an editorial backlog. Failed admitted stories keep their reserved
+slots; this policy does not change the existing retry behavior.
+
+Apply the policy retrospectively to existing coverage without LLM calls, then
+rebuild and publish the site:
+
+```bash
+./.venv/bin/python -m pipeline.cli editorial-eligibility --retroactive --dry-run --verbose
+./.venv/bin/python -m pipeline.cli editorial-eligibility --retroactive --verbose
+./.venv/bin/python -m pipeline.cli present --verbose
+```
+
+The one-time retrospective pass replays hourly selection using current publisher
+memberships; it cannot reconstruct historical publisher arrival times. Subsequent
+runs preserve admissions. Excluded stories leave the public index, archive,
+story pages and JSON API on publication; their private artifacts and source
+articles remain available for clustering. Ordinary publishing does not repeatedly
+reselect old stories. Gap slots are reserved before any paid editorial calls.
+
 Build and publish the static presentation without running upstream stages:
 
 ```bash
@@ -295,12 +318,16 @@ The paper palette and serif typography remain, and a dark palette follows the
 system color scheme. A masthead toggle overrides it; the choice is stored in
 local storage and applied by a tiny fingerprinted script before the stylesheet
 loads so pages never flash the wrong theme. The sticky toolbar provides
-category navigation, New/All read history, All/2+ outlets coverage, and Mark read.
-All outlets is the default for new browsers, allowing important single-outlet
-reporting into the briefing. Existing saved coverage preferences are honored.
-The optional `coverage=top` URL selects multiple publishers; `coverage=all` remains
-accepted. The count explicitly reports unread items **in the briefing**. Each
-card names its publishers (for example "Associated Press, Al Jazeera +2") and
+category navigation, New/All read history, and Mark read.
+Coverage selection happens before editorial generation: events with at least two
+canonical publishers qualify automatically; quieter categories admit their
+highest-ranked single-publisher events to fill a rolling 24-hour target of 12.
+New events and published material revisions count toward coverage; routine
+processing does not refresh the count. Admissions persist, so hourly passes do
+not refill the same slots or hide accepted stories as coverage grows. The source
+coverage toggle has been removed, and old source-filter links/preferences no
+longer restrict the view. The toolbar counts all unread stories in the selected
+category. Each card names its publishers (for example "Associated Press, Al Jazeera +2") and
 links directly to the story's reporting, so single-outlet stories are visible at
 a glance. A story's change summary appears on a card only for readers who saw
 the earlier version. A public
@@ -314,8 +341,7 @@ assumed independent. Outlet counts measure coverage, not corroboration.
 
 A title at least 60% visible for **one second** still counts as read, intentionally
 supporting headline skimming. Read markers persist for three days; cards stay in
-place during a scan. Mark read applies to displayed cards, excluding collapsed
-coverage. Meaningful new facts or corrections increment a story's revision and
+place during a scan. Mark read applies to displayed cards. Meaningful new facts or corrections increment a story's revision and
 can return in New with a short change summary. Rewording, extra citations and
 regeneration alone do not increment it. The optional private-link sync protocol
 also synchronizes these revision identities without changing its endpoints.

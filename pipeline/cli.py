@@ -20,7 +20,8 @@ from pipeline.brief import brief_once
 from pipeline.collect import collect_once
 from pipeline.config import load_feeds, load_pipeline_config
 from pipeline.digest import ARTICLE_DIGEST_PROMPT_VERSION, digest_once
-from pipeline.editorial import editorial_once, pending_editorial_sql
+from pipeline.editorial import editorial_once, pending_editorial_sql, write_active_stories_index
+from pipeline.eligibility import admit_gap_stories
 from pipeline.lock import PipelineLock
 from pipeline.maintenance import maintenance_once
 from pipeline.operations import (
@@ -108,8 +109,8 @@ def _pending_editorial_count(*, excluded_event_ids: list[str] | None = None) -> 
     excluded = sorted(set(excluded_event_ids or []))
     exclusion = f" AND event_id NOT IN ({','.join('?' for _ in excluded)})" if excluded else ""
     hold_minutes = int(load_pipeline_config().editorial.get("single_source_hold_minutes", 0) or 0)
-    clause, params = pending_editorial_sql(hold_minutes=hold_minutes)
     with StateDB() as state:
+        clause, params = pending_editorial_sql(hold_minutes=hold_minutes, state=state)
         row = state.conn.execute(
             f"SELECT COUNT(*) FROM events WHERE {clause}{exclusion}",
             [*params, *excluded],
@@ -431,6 +432,14 @@ def main() -> None:
         help="Regenerate digests even when an article already has the current digest prompt version.",
     )
     digest_stage_parser.add_argument("--verbose", action="store_true", help="Print incremental progress to stderr.")
+    eligibility_parser = sub.add_parser(
+        "editorial-eligibility", help="Apply category gap admissions without LLM calls.",
+    )
+    eligibility_parser.add_argument(
+        "--retroactive", action="store_true", help="Select existing coverage retrospectively.",
+    )
+    eligibility_parser.add_argument("--dry-run", action="store_true", help="Preview admissions without writes.")
+    eligibility_parser.add_argument("--verbose", action="store_true")
     editorial_parser = sub.add_parser("editorial", help="Run stage 3 editorial story generation.")
     editorial_parser.add_argument("--limit", type=int, help="Maximum number of events to publish.")
     editorial_parser.add_argument("--concurrency", type=int, help="Number of parallel per-event LLM calls.")
@@ -602,6 +611,18 @@ def main() -> None:
         print(json.dumps(status, indent=2, sort_keys=True))
         if status["held"]:
             sys.exit(3)
+    elif args.command == "editorial-eligibility":
+        progress = _stderr_progress if args.verbose else None
+        timeout = timedelta(minutes=int(load_pipeline_config().pipeline.get("watchdog_timeout_minutes", 50)))
+        with PipelineLock(LOCK_PATH, timeout), StateDB() as state:
+            if not args.dry_run:
+                migrate()
+            stats = admit_gap_stories(
+                state, retrospective=args.retroactive, dry_run=args.dry_run, progress=progress,
+            )
+            if not args.dry_run:
+                stats.update(write_active_stories_index(state=state, progress=progress))
+        print(json.dumps(stats, indent=2))
     elif args.command == "editorial":
         progress = _stderr_progress if args.verbose else None
         if args.limit is not None and args.limit < 1:

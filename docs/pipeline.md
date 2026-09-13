@@ -266,9 +266,9 @@ preference before styles load. Cards name their publishers, and the "Updated
 since you read" note is shown only to readers who saw the earlier revision.
 
 The main briefing fixes up to 12 candidates before applying read history; it does
-not refill when items become read. Top News opens on mobile, with additional
-coverage behind an explicit expansion. All outlets is the new-browser default;
-2+ outlets counts canonical publishers, not feed identities. The one-second
+not refill when items become read. Additional coverage follows inline on every
+viewport. The category admission policy selects source coverage before editorial
+generation; there is no browser source-count filter. The one-second
 headline-read rule is unchanged. Meaningful revisions get new opaque read IDs
 and immutable publication orders compatible with the existing sync protocol.
 Private evidence passages are excluded from public JSON.
@@ -393,3 +393,19 @@ replacement; errors preserve the previous packet and make the wrapper fail.
 The hourly cron starts at :45. The endpoint has a five-minute origin cache TTL;
 Cloudflare eligibility must be configured separately. Manual `run`/`present`
 commands do not refresh the packet; use `brief` explicitly after manual work.
+
+
+### Category gap policy
+
+Before editorial work, `pipeline/eligibility.py` reserves ranked single-publisher
+admissions to fill 12 stories per category over 24 hours, after counting eligible
+multi-publisher events and prior admissions/material revisions. These reservations
+persist across hourly passes and failures. Filtered articles never contribute to
+publisher counts. Excluded events remain clusterable but are absent from pending
+editorial counts, forced work, and backfill. Evidence extraction, drafting, and
+verification run only for admitted events. Public indexing also enforces admission.
+
+Use `editorial-eligibility --retroactive --dry-run --verbose` to preview the one-time
+selection for old coverage, then omit `--dry-run` and publish with `present`.
+This operation makes no LLM calls and retains private artifacts. Subsequent runs
+preserve prior admissions. Schema v11 stores admissions and material freshness.

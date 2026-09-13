@@ -32,6 +32,9 @@
     "filter_review_margin": 0.1
   },
   "editorial": {
+    "gap_fill_enabled": true,
+    "gap_fill_target": 12,
+    "gap_fill_category_targets": {},
     "concurrency": 6,
     "article_char_limit": 12000,
     "event_char_limit": 40000,

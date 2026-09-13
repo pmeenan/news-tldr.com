@@ -32,7 +32,7 @@ from pipeline.sources import publisher_id
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v26"
+PRESENTATION_VERSION = "presentation-v27"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
@@ -347,7 +347,6 @@ SITE_JS = """
 const VIEWED_KEY = 'newsTldrViewedStoriesV1';
 const READ_BEFORE_KEY = 'newsTldrReadBeforeV1';
 const VIEW_MODE_KEY = 'newsTldrViewModeV1';
-const COVERAGE_MODE_KEY = 'newsTldrCoverageModeV1';
 const SYNC_TOKEN_KEY = 'newsTldrSyncTokenV1';
 const SYNC_REVISION_KEY = 'newsTldrSyncRevisionV1';
 const SYNC_FRAGMENT_PREFIX = 'sync=v1.';
@@ -360,13 +359,11 @@ const SYNC_REQUEST_TIMEOUT_MS = 8 * 1000;
 const SYNC_MAX_READS = 2000;
 const VIEWED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
 const VIEW_THRESHOLD_MS = 1 * 1000;
-const MIN_TOP_SOURCE_COUNT = 2;
 const MIN_TOPIC_SECTION_STORIES = 2;
 const COVERAGE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const EDITORIAL_PRIORITY_WEIGHT = 10;
 const categoryButtons = Array.from(document.querySelectorAll('[data-category-filter]'));
 const viewButtons = Array.from(document.querySelectorAll('[data-view-filter]'));
-const coverageButtons = Array.from(document.querySelectorAll('[data-coverage-filter]'));
 const cards = Array.from(document.querySelectorAll('[data-story-category]'));
 const cardReadId = (card) => card.dataset.readId || card.dataset.storyId;
 const cardsByStoryId = new Map(cards.map((card) => [cardReadId(card), card]));
@@ -491,11 +488,6 @@ try { savedView = localStorage.getItem(VIEW_MODE_KEY) || 'new'; } catch (_) {}
 let activeView = params.get('view') || savedView;
 if (!['new', 'all'].includes(activeView)) activeView = 'new';
 try { localStorage.setItem(VIEW_MODE_KEY, activeView); } catch (_) {}
-let savedCoverage = 'all';
-try { savedCoverage = localStorage.getItem(COVERAGE_MODE_KEY) || 'all'; } catch (_) {}
-let activeCoverage = params.get('coverage') || savedCoverage;
-if (!['top', 'all'].includes(activeCoverage)) activeCoverage = 'all';
-try { localStorage.setItem(COVERAGE_MODE_KEY, activeCoverage); } catch (_) {}
 
 function cardRank(card, category) {
   const value = category === 'all' ? card.dataset.rankAll : card.dataset.rankCategory;
@@ -503,10 +495,7 @@ function cardRank(card, category) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function cardSourceCount(card) {
-  const parsed = Number.parseInt(card.dataset.sourceCount || '0', 10);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
+
 
 function relativeUpdatedLabel(timestamp) {
   const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
@@ -864,8 +853,7 @@ function updateUrl() {
   else next.searchParams.set('category', activeCategory);
   if (activeView === 'new') next.searchParams.delete('view');
   else next.searchParams.set('view', activeView);
-  if (activeCoverage === 'all') next.searchParams.delete('coverage');
-  else next.searchParams.set('coverage', activeCoverage);
+  next.searchParams.delete('coverage');
   history.replaceState(null, '', `${next.pathname}${next.search}${next.hash}`);
 }
 
@@ -878,19 +866,15 @@ function renderStories() {
   const ordered = [...cards].sort(compareCards);
   visibleCards = [];
   let categoryStoryCount = 0;
-  let coverageStoryCount = 0;
   let unreadStoryCount = 0;
   for (const card of ordered) {
     const matchesCategory = activeCategory === 'all' || card.dataset.storyCategory === activeCategory;
-    const matchesCoverage = activeCoverage === 'all'
-      || cardSourceCount(card) >= MIN_TOP_SOURCE_COUNT;
     const isRead = isStoryRead(card);
     if (matchesCategory) categoryStoryCount += 1;
-    if (matchesCategory && matchesCoverage) {
-      coverageStoryCount += 1;
+    if (matchesCategory) {
       if (!isRead) unreadStoryCount += 1;
     }
-    const show = matchesCategory && matchesCoverage && (activeView === 'all' || !isRead);
+    const show = matchesCategory && (activeView === 'all' || !isRead);
     card.hidden = !show;
     card.classList.toggle('is-read', isRead);
     const update = card.querySelector('[data-story-update]');
@@ -910,7 +894,6 @@ function renderStories() {
   // Fix the briefing cohort before applying read history so finishing it does not move the goalposts.
   const briefingPool = ordered.filter((card) =>
     (activeCategory === 'all' || card.dataset.storyCategory === activeCategory)
-    && (activeCoverage === 'all' || cardSourceCount(card) >= MIN_TOP_SOURCE_COUNT)
   ).sort((a, b) => {
     const aTop = a.dataset.topOrder === '' ? 10000 : Number(a.dataset.topOrder);
     const bTop = b.dataset.topOrder === '' ? 10000 : Number(b.dataset.topOrder);
@@ -989,21 +972,13 @@ function renderStories() {
   for (const button of viewButtons) {
     button.setAttribute('aria-pressed', String(button.dataset.viewFilter === activeView));
   }
-  for (const button of coverageButtons) {
-    button.setAttribute(
-      'aria-pressed', String(button.dataset.coverageFilter === activeCoverage)
-    );
-  }
   sectionRoot.dataset.activeCategory = activeCategory;
   updateUnreadCount();
   if (emptyState) {
     emptyState.hidden = visibleCards.length !== 0;
-    if (activeView === 'new' && coverageStoryCount > 0) {
+    if (activeView === 'new' && categoryStoryCount > 0) {
       emptyState.textContent =
         'You’re caught up. Switch the history filter to All to revisit recent stories.';
-    } else if (activeCoverage === 'top' && categoryStoryCount > 0) {
-      emptyState.textContent =
-        'No multi-source stories match this view. Switch the source filter to All for every story.';
     } else {
       emptyState.textContent = 'No stories fall within the current news window.';
     }
@@ -1055,14 +1030,6 @@ for (const button of viewButtons) {
   });
 }
 
-for (const button of coverageButtons) {
-  button.addEventListener('click', () => {
-    activeCoverage = button.dataset.coverageFilter;
-    try { localStorage.setItem(COVERAGE_MODE_KEY, activeCoverage); } catch (_) {}
-    renderStories();
-  });
-}
-
 function markViewed(card) {
   const storyId = cardReadId(card);
   if (!storyId || isStoryRead(card)) return;
@@ -1075,13 +1042,11 @@ function markViewed(card) {
 
 function updateUnreadCount() {
   if (!count) return;
-  // Count every unread story in the current category/source view, not only the briefing cohort.
+  // Count every unread story in the current category view, not only the briefing cohort.
   const unread = cards.filter((card) => {
     const matchesCategory = activeCategory === 'all'
       || card.dataset.storyCategory === activeCategory;
-    const matchesCoverage = activeCoverage === 'all'
-      || cardSourceCount(card) >= MIN_TOP_SOURCE_COUNT;
-    return matchesCategory && matchesCoverage && !isStoryRead(card);
+    return matchesCategory && !isStoryRead(card);
   }).length;
   count.textContent = String(unread);
   if (countLabel) countLabel.textContent = unread === 1 ? 'unread story' : 'unread stories';
@@ -1632,12 +1597,6 @@ def _render_home(
         'title="Hide stories whose titles have been visible for at least one second">New</button>'
         '<button type="button" data-view-filter="all" aria-pressed="false" '
         'title="Show new and previously read stories">All</button></div></div>'
-        '<div class="filter-control"><span class="filter-label">Sources</span>'
-        '<div class="view-switch" role="group" aria-label="Choose source coverage filter">'
-        '<button type="button" data-coverage-filter="top" aria-pressed="false" '
-        'title="Show stories reported by at least two publishers; this does not mean independent corroboration">2+ outlets</button>'
-        '<button type="button" data-coverage-filter="all" aria-pressed="true" '
-        'title="Show stories regardless of source count">All</button></div></div>'
         '<button type="button" class="mark-view-read" data-mark-view-read '
         'aria-label="Mark all visible stories as read" title="Mark visible stories read">'
         '✓ <span>Mark read</span></button></div></div>'
@@ -1851,7 +1810,9 @@ def _render_methodology(site_url: str) -> str:
             'the reporting; known wire provenance is identified where available.</p></section>'
             '<section><h2>Selection and perspectives</h2><p>The main briefing prioritizes public consequence '
             'and recent developments. Additional reporting remains available below it and by category. '
-            'An important story can have only one reporting outlet. Coverage comparisons describe attributed '
+            'We prioritize stories covered by at least two publishers. In quieter categories, selected '
+            'single-publisher stories fill gaps toward 12 stories over 24 hours. Already admitted stories '
+            'remain available as coverage develops. Coverage comparisons describe attributed '
             'differences in the articles; they are not proof that competing claims have equal support.</p></section>'
             '<section><h2>Reading and updates</h2><p>A headline visible for one second counts as read. '
             'Cards stay in place while you skim. New hides those stories on later views, but meaningful '

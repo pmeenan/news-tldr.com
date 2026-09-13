@@ -18,7 +18,7 @@ def _relative_to_project(path: Path) -> str:
         return str(path)
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 # Each migration is the SQL needed to take the database from the previous
@@ -284,6 +284,22 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
 
         CREATE INDEX IF NOT EXISTS idx_deduplication_prescreens_reviewed_at
           ON deduplication_prescreens(reviewed_at);
+        """,
+    ),
+    (
+        11,
+        """
+        ALTER TABLE events ADD COLUMN editorial_material_at TEXT;
+        CREATE TABLE editorial_admissions (
+          event_id TEXT PRIMARY KEY REFERENCES events(event_id) ON DELETE CASCADE,
+          category TEXT NOT NULL,
+          admitted_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_editorial_admissions_time ON editorial_admissions(admitted_at);
+        CREATE TABLE editorial_policy_state (
+          policy TEXT PRIMARY KEY,
+          initialized_at TEXT NOT NULL
+        );
         """,
     ),
 )

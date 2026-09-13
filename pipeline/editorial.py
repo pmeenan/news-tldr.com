@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pipeline.config import load_pipeline_config, load_source_policy
+from pipeline.eligibility import admit_gap_stories, eligible_event_ids, single_admissions
+from pipeline.eligibility import enabled as gap_fill_enabled
 from pipeline.evidence import (
     EVIDENCE_VERSION,
     REVIEW_VERSION,
@@ -259,6 +261,7 @@ def generate_editorial_stories(
     gate_client: JsonGenerator | None = None,
     hold_minutes: int = 0,
 ) -> dict[str, Any]:
+    admission_stats = admit_gap_stories(state, progress=progress)
     source_policy = load_source_policy()
     rows = editorial_candidate_rows(
         state=state,
@@ -268,6 +271,7 @@ def generate_editorial_stories(
         hold_minutes=hold_minutes,
     )
     stats: dict[str, Any] = {
+        **admission_stats,
         "candidates": len(rows),
         "completed": 0,
         "failed": 0,
@@ -360,7 +364,21 @@ def _finish_story(
             generated_at=generated_at,
             existing_story=_read_json(path),
         )
+        if gap_fill_enabled() and len({publisher_id(a) for a in story["sources"]}) < 2:
+            admitted = state.conn.execute(
+                "SELECT 1 FROM editorial_admissions WHERE event_id = ?", (event.event_id,),
+            ).fetchone()
+            if admitted is None:
+                _record_editorial_usage(state, run_id, generated.get("usage_records") or [])
+                exc = ValueError("multi-publisher event draft cites fewer than two publishers")
+                exc.editorial_validation_rejected = True
+                raise exc
         atomic_write_json(path, story)
+        with state.conn:
+            state.conn.execute(
+                "UPDATE events SET editorial_material_at = ? WHERE event_id = ?",
+                (story.get("revision_at") or story["created_at"], event.event_id),
+            )
         state.mark_event_editorial_completed(event.event_id, generated_at)
         usage = generated["usage"]
         _record_editorial_usage(state, run_id, generated.get("usage_records") or [{
@@ -414,6 +432,7 @@ def editorial_backfill_rows(
         ).fetchall()
     }
     excluded = set(exclude_event_ids) | recently_failed
+    eligible = eligible_event_ids(state, now=current)
     rows = state.conn.execute(
         """
         SELECT event_id, title, category, thread, status, created_at, updated_at,
@@ -430,7 +449,7 @@ def editorial_backfill_rows(
     ).fetchall()
     selected = []
     for row in rows:
-        if row["event_id"] in excluded:
+        if row["event_id"] in excluded or (eligible is not None and row["event_id"] not in eligible):
             continue
         story = _read_json(story_dir / f"{row['event_id']}.json")
         if story is None or isinstance(story.get("evidence_verification"), dict):
@@ -534,7 +553,9 @@ def _record_editorial_usage(state: StateDB, run_id: str, records: list[dict[str,
         )
 
 
-def pending_editorial_sql(*, hold_minutes: int = 0, now: datetime | None = None) -> tuple[str, list[Any]]:
+def pending_editorial_sql(
+    *, hold_minutes: int = 0, now: datetime | None = None, state: StateDB | None = None,
+) -> tuple[str, list[Any]]:
     """SQL condition selecting active/stale events that need editorial work.
 
     With a hold, brand-new single-article events wait ``hold_minutes`` before
@@ -549,6 +570,11 @@ def pending_editorial_sql(*, hold_minutes: int = 0, now: datetime | None = None)
             " AND NOT (last_editorial_at IS NULL AND COALESCE(article_count, 0) <= 1 AND created_at > ?)"
         )
         params.append(cutoff)
+    if state is not None:
+        eligible = eligible_event_ids(state, now=now)
+        if eligible is not None:
+            clause += " AND event_id IN (" + (",".join("?" for _ in eligible) or "NULL") + ")"
+            params.extend(sorted(eligible))
     return clause, params
 
 
@@ -564,9 +590,14 @@ def editorial_candidate_rows(
     where = ["status IN ('active', 'stale')"]
     params: list[Any] = []
     if not force:
-        pending_clause, pending_params = pending_editorial_sql(hold_minutes=hold_minutes, now=now)
+        pending_clause, pending_params = pending_editorial_sql(hold_minutes=hold_minutes, now=now, state=state)
         where = [f"({pending_clause})"]
         params.extend(pending_params)
+    if force:
+        eligible = eligible_event_ids(state, now=now)
+        if eligible is not None:
+            where.append("event_id IN (" + (",".join("?" for _ in eligible) or "NULL") + ")")
+            params.extend(sorted(eligible))
     if event_ids:
         clean_ids = sorted({event_id for event_id in event_ids if event_id})
         if not clean_ids:
@@ -1434,14 +1465,23 @@ def write_active_stories_index(
     story_details: dict[str, dict[str, Any]] = {}
     story_source_names: dict[str, set[str]] = {}
     missing = 0
+    excluded_coverage = 0
+    admissions = single_admissions(state) if gap_fill_enabled() else None
+    eligible = eligible_event_ids(state, preview=False)
     for row in rows:
+        if eligible is not None and row["event_id"] not in eligible:
+            excluded_coverage += 1
+            continue
         story = _read_json(story_dir / f"{row['event_id']}.json")
         if story is None or story.get("_pending_coherence"):
             missing += 1
             continue
-        story_details[row["event_id"]] = story
         sources = story.get("sources") if isinstance(story.get("sources"), list) else []
         source_metrics, source_names = _source_coverage_metrics(sources)
+        if admissions is not None and source_metrics["source_count"] < 2 and row["event_id"] not in admissions:
+            excluded_coverage += 1
+            continue
+        story_details[row["event_id"]] = story
         story_source_names[row["event_id"]] = source_names
         importance = story.get("importance") if isinstance(story.get("importance"), dict) else {}
         display_rank = _display_rank_scores(
@@ -1543,6 +1583,7 @@ def write_active_stories_index(
     return {
         "active_index_stories": len(stories),
         "active_index_missing": missing,
+        "active_index_excluded_coverage": excluded_coverage,
         "curation_mode": curation_mode,
         "curation_sections": len(public_curation.get("sections") or []),
         "curation_top_news": len(public_curation.get("top_news") or []),

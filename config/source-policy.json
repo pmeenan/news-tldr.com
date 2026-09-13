@@ -2,6 +2,14 @@
   "version": 1,
   "sources": [
     {
+      "source_id": "washington-sun",
+      "bias_label": "unknown",
+      "reliability": "unknown",
+      "paywall": "none",
+      "notes": "Politics, policy, and local Washington news. Bias and reliability have not been assessed.",
+      "publisher_id": "the-washington-sun"
+    },
+    {
       "source_id": "engadget",
       "bias_label": "center",
       "reliability": "high",

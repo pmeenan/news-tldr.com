@@ -90,7 +90,7 @@ def preflight_report(
             (range_start,),
         ).fetchone()[0]
         pending_clause, pending_params = pending_editorial_sql(
-            hold_minutes=_single_source_hold_minutes()
+            hold_minutes=_single_source_hold_minutes(), state=state
         )
         editorial_candidates = state.conn.execute(
             f"SELECT COUNT(*) FROM events WHERE {pending_clause}", pending_params
@@ -442,7 +442,7 @@ def health_report(
             checks.append(_check("stale_running_runs", stale_running == 0, {"count": stale_running}))
 
             pending_clause, pending_params = pending_editorial_sql(
-                hold_minutes=_single_source_hold_minutes()
+                hold_minutes=_single_source_hold_minutes(), state=state
             )
             pending_editorial = state.conn.execute(
                 f"SELECT COUNT(*) FROM events WHERE {pending_clause}", pending_params
