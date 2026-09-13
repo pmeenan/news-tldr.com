@@ -993,20 +993,22 @@ def aggregate_once(
     run_id = f"aggregation-{uuid.uuid4().hex}"
     state = StateDB()
     owns_generator = client is None and not dry_run
-    generator = client or (None if dry_run else create_gemini_client("bulk", purpose="aggregation"))
+    generator = client or (None if dry_run else create_gemini_client("bulk", purpose="aggregation", progress=progress))
     owns_review_generator = review_client is None and client is None and not dry_run
     review_generator = review_client or (
         generator
         if client is not None or dry_run
-        else create_gemini_client("review", include_lite=True, purpose="aggregation")
+        else create_gemini_client("review", include_lite=True, purpose="aggregation", progress=progress)
     )
     # Deduplication and coherence tolerate minutes of latency, so they get their
     # own clients with longer flex budgets when this run owns its clients.
     post_review_clients: list[Any] = []
     if owns_generator and post_review:
-        dedup_generator = create_gemini_client("bulk", purpose="deduplication")
-        dedup_review_generator = create_gemini_client("review", include_lite=True, purpose="deduplication")
-        coherence_generator = create_gemini_client("review", purpose="coherence")
+        dedup_generator = create_gemini_client("bulk", purpose="deduplication", progress=progress)
+        dedup_review_generator = create_gemini_client(
+            "review", include_lite=True, purpose="deduplication", progress=progress
+        )
+        coherence_generator = create_gemini_client("review", purpose="coherence", progress=progress)
         post_review_clients = [dedup_generator, dedup_review_generator, coherence_generator]
     else:
         dedup_generator, dedup_review_generator, coherence_generator = (

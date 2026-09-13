@@ -297,18 +297,29 @@ production.
 | Top News curation | Gemini 3.8 → 3.7 Flash | Deterministic ranked fallback |
 | Category sections | Gemini 3.5 Flash-Lite | Deterministic ranked fallback |
 
-Every chain begins with one half-price flex attempt on the configured flex
-model (3.7 Flash for review work, the bulk model for bulk work) bounded by the
-purpose's `llm.flex_budget_seconds` entry: 240 s on the critical path (digest,
-aggregation, editorial, evidence) and 900 s where an hour of latency is
-acceptable (deduplication, coherence, curation). A shed or overrun flex attempt
-falls through to the standard chain and bypasses the flex tier for
-`llm.flex_cooldown_seconds` (45 s), while standard-tier capacity failures keep
-the five-minute model cooldown. The verifier receives a map of article IDs to
-publishers so required single-outlet attribution is checkable. `GEMINI_FLEX_DISABLED=1` turns flex off. Concurrency is sized so slow
-flex calls overlap (digest 40, deduplication 16, editorial 6) and the watchdog
-allows 50 minutes; the scheduler skips an hour cleanly when the previous run
-still holds the lock.
+Review calls try half-price Flex on **3.6 → 3.8 → 3.7 Flash** before the
+standard chain. Bulk calls retry their Flash-Lite model on Flex. Retryable
+capacity/transport failures cool each model and tier for 45 seconds. Workers
+sharing a client share a ten-minute outage window (`llm.flex_retry_seconds`);
+standard pricing is allowed only after that window expires. A successful Flex
+response resets the outage for subsequent calls; in-flight calls retain their
+deadline. Queued calls reuse an expired window while the
+outage persists, instead of each waiting another ten minutes. Each Flex request
+is limited to the smaller of 60 seconds, its remaining window, and
+`llm.flex_budget_seconds[purpose]`. After expiry, a queued call may make one
+recovery probe of up to 60 seconds on a model whose cooldown has elapsed.
+Empty responses try other Flex models but are not repeatedly retried during
+the wait; wholly empty results retain the editorial compact-input repair path.
+Non-retryable errors propagate. Verbose output reports cooldowns, waits and
+standard fallback. `GEMINI_REVIEW_FLEX_MODELS` overrides the ordered Flex list;
+the legacy `GEMINI_REVIEW_FLEX_MODEL` moves one model to its front.
+`GEMINI_FLEX_DISABLED=1` or a zero purpose budget disables Flex; setting the
+retry window to zero restores immediate standard fallback. Standard-tier
+failures retain their five-minute cooldown.
+
+Concurrency remains digest 40, deduplication 16 and editorial 6; the watchdog
+allows 50 minutes. Independent stage clients can each encounter their own
+outage window. The scheduler skips an hour if the previous run holds the lock.
 
 All LLM responses use structured JSON schemas. Deterministic code owns ID
 generation, allowed enums, citations, file writes, SQLite mutations, filtering,

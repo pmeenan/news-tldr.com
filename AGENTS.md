@@ -34,6 +34,41 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on September 13, 2026 (Flex Retry Routing and Duplicate Screening Pilot)
+
+- Review Flex order is 3.6 → 3.8 → 3.7, before the existing standard chain.
+  Bulk work stays on Lite Flex. Capacity/transport failures cool model/tier
+  for 45 seconds and retry for `llm.flex_retry_seconds=600`, shared among
+  workers using the same client. Success resets the outage; queued requests
+  reuse an expired window. Flex requests are capped at 60 seconds and the
+  remaining window; expired-window recovery probes get up to 60 seconds.
+  Verbose stages report cooldown/wait/standard-fallback transitions.
+- Empty results try other Flex models without repeated paid retries; all-empty
+  results retain the compact editorial retry. Standard pricing is not used
+  early for empty content. Fatal errors propagate. Disable switch and zero
+  purpose budgets preserve standard-only operation; zero retry window restores
+  the immediate fallback behavior.
+- Duplicate rejection benchmark: 24 recent rejected candidates plus 24 split
+  current clusters, both evaluated with 3.5 Lite Flex and 3.6 Flash Flex.
+  Lite rejected 22/24 negatives, but also one mergeable Solheim Cup pair:
+  it mistook an individual win and the opposing team's tournament win for a
+  contradiction. Estimated duplicate-review savings 24.4% on this sample;
+  evaluation cost $0.09654, recorded under routing_evaluation. Automatic Lite
+  rejection is NOT enabled. Inputs, results, runner and findings are in ignored
+  `data/evaluations/duplicate-rejection-*` and `benchmark-duplicate-rejection.py`.
+  Reference labels are model judgments; the sample is small and correlated.
+- Evidence extraction and its first repair already use Lite. Keep full Flash
+  final verification and extraction fallback; earlier Lite drafting failures
+  demonstrate the value of the independent verifier.
+- Verification: 356 tests, Ruff, compileall and diff whitespace checks. No
+  frontend changes or new dependency. Source rollout applies to the next
+  scheduled process; changes remain uncommitted.
+- Follow-up: observe a complete day of Flex/standard usage after gap-fill;
+  strengthen the rejection rule and test an independent category-balanced
+  holdout before enabling it. Separate stage clients can each incur a ten-minute
+  outage, within the existing 50-minute watchdog.
+
+
 ### State on September 13, 2026 (Category Gap Admissions, presentation v27)
 
 - **Live**: require two canonical publishers before editorial generation, with

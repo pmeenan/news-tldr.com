@@ -327,3 +327,8 @@ gantt
 - [x] Remove the source-count toggle and legacy browser source filtering.
 - [ ] Compare a full day's actual API spend and category coverage after rollout;
   model-routing and local-Ollama changes remain separate future work.
+
+- [x] Prefer Flex 3.6 → 3.8 → 3.7 with 45-second capacity cooldowns and a shared ten-minute outage window before standard pricing; retain Flash factual verification.
+- [ ] Measure Flex success and standard fallback rates after a complete day with the new routing and gap-fill eligibility.
+- [x] Pilot Lite duplicate rejection on 48 pairs: 24.4% estimated duplicate-stage savings but one incorrect rejection; retain full review and leave screening disabled.
+- [ ] Evaluate a stronger reject-only screen on independent natural candidates, including sports individual/team results and reactions/consequences; shadow-test before allowing it to suppress reviews.

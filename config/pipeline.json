@@ -65,6 +65,7 @@
   },
   "llm": {
     "flex_cooldown_seconds": 45,
+    "flex_retry_seconds": 600,
     "flex_budget_seconds": {
       "digest": 240,
       "aggregation": 240,

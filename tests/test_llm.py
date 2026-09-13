@@ -348,7 +348,7 @@ def test_create_gemini_client_builds_flex_then_standard_chains(monkeypatch: pyte
     monkeypatch.setenv("GEMINI_REVIEW_MODEL", "gemini-3.8-flash")
     monkeypatch.setenv("GEMINI_BULK_MODEL", "gemini-3.5-flash-lite")
     for name in ("GEMINI_REVIEW_FALLBACK_MODELS", "GEMINI_REVIEW_LAST_RESORT_MODELS",
-                 "GEMINI_REVIEW_FLEX_MODEL", "GEMINI_FLEX_DISABLED"):
+                 "GEMINI_REVIEW_FLEX_MODEL", "GEMINI_REVIEW_FLEX_MODELS", "GEMINI_FLEX_DISABLED"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(
         "pipeline.llm.flex_budget_seconds",
@@ -356,10 +356,13 @@ def test_create_gemini_client_builds_flex_then_standard_chains(monkeypatch: pyte
     )
 
     editorial = create_gemini_client("review", purpose="editorial")
-    assert editorial.labels == ("gemini-3.7-flash:flex", "gemini-3.8-flash:standard", "gemini-3.7-flash:standard")
+    assert editorial.labels == (
+        "gemini-3.6-flash:flex", "gemini-3.8-flash:flex", "gemini-3.7-flash:flex",
+        "gemini-3.8-flash:standard", "gemini-3.7-flash:standard",
+    )
     assert editorial._clients[0].timeout_seconds == 240 and editorial._clients[0].max_attempts == 1
     verification = create_gemini_client("review", purpose="editorial", last_resort=True)
-    assert verification.models == ("gemini-3.7-flash", "gemini-3.8-flash", "gemini-3.5-flash")
+    assert verification.models == ("gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash")
     standard_only = create_gemini_client("review", purpose="digest")
     assert standard_only.labels == ("gemini-3.8-flash:standard", "gemini-3.7-flash:standard")
     dedup = create_gemini_client("review", include_lite=True, purpose="deduplication")
@@ -441,3 +444,128 @@ def test_flex_clients_use_a_short_cooldown_of_their_own() -> None:
     clock["now"] = 150.0
     chain.generate_json(system_instruction="s", prompt="p", response_schema={})
     assert calls == ["m:flex", "m:standard", "m:standard", "m:flex", "m:standard"]
+
+
+def test_flex_retries_models_and_waits_ten_minutes_before_standard() -> None:
+    from pipeline.llm import FallbackGeminiClient, GeminiResult, GeminiRetryableError
+
+    clock = [0.0]
+    calls = []
+    messages = []
+
+    class Client:
+        cooldown_seconds = 45
+
+        def __init__(self, model, tier):
+            self.model, self.service_tier = model, tier
+            self.label = f"{model}:{tier}"
+
+        def generate_json(self, **kwargs):
+            calls.append((self.label, clock[0]))
+            if self.service_tier == "flex":
+                raise GeminiRetryableError("busy", status_code=503)
+            return GeminiResult({}, self.model, 0, {})
+
+    def sleep(delay):
+        assert 0 < delay <= 45
+        clock[0] += delay
+
+    chain = FallbackGeminiClient(
+        [Client("3.6", "flex"), Client("3.8", "flex"), Client("3.7", "flex"), Client("3.8", "standard")],
+        flex_retry_seconds=600, monotonic=lambda: clock[0], sleep=sleep, progress=messages.append,
+    )
+    kwargs = dict(system_instruction="s", prompt="p", response_schema={})
+    chain.generate_json(**kwargs)
+    assert calls[:3] == [("3.6:flex", 0), ("3.8:flex", 0), ("3.7:flex", 0)]
+    assert calls[3:6] == [("3.6:flex", 45), ("3.8:flex", 45), ("3.7:flex", 45)]
+    assert calls[-1] == ("3.8:standard", 600)
+    # A queued call shares the known outage, instead of blocking ten more minutes.
+    chain.generate_json(**kwargs)
+    assert calls[-1] == ("3.8:standard", 600)
+    assert any("standard pricing" in message for message in messages)
+
+
+def test_flex_recovery_resets_outage_and_never_uses_standard() -> None:
+    from pipeline.llm import FallbackGeminiClient, GeminiResult, GeminiRetryableError
+
+    clock = [0.0]
+    calls = []
+
+    class Client:
+        cooldown_seconds = 45
+        service_tier = "flex"
+        model = "3.6"
+        label = "3.6:flex"
+
+        def generate_json(self, **kwargs):
+            calls.append(clock[0])
+            if len(calls) == 1:
+                raise GeminiRetryableError("busy")
+            return GeminiResult({}, self.model, 0, {})
+
+    def sleep(delay):
+        clock[0] += delay
+
+    chain = FallbackGeminiClient([Client()], flex_retry_seconds=600,
+                                monotonic=lambda: clock[0], sleep=sleep)
+    chain.generate_json(system_instruction="", prompt="", response_schema={})
+    assert calls == [0, 45]
+    assert chain._flex_started is None
+
+
+def test_flex_empty_content_does_not_trigger_repeated_paid_retries() -> None:
+    from pipeline.llm import FallbackGeminiClient, GeminiEmptyResponseError
+
+    class Client:
+        service_tier = "flex"
+        model = "3.6"
+        label = "3.6:flex"
+
+        def generate_json(self, **kwargs):
+            raise GeminiEmptyResponseError("empty")
+
+    chain = FallbackGeminiClient([Client()], flex_retry_seconds=600,
+                                sleep=lambda _: pytest.fail("must not retry empty responses"))
+    with pytest.raises(GeminiEmptyResponseError):
+        chain.generate_json(system_instruction="", prompt="", response_schema={})
+
+
+def test_flex_recovery_probe_gets_a_usable_timeout_after_window_expires() -> None:
+    import httpx
+
+    from pipeline.llm import FallbackGeminiClient, GeminiClient
+
+    timeouts = []
+    def respond(request):
+        timeouts.append(request.extensions['timeout']['read'])
+        return httpx.Response(200, json={
+            'candidates': [{'content': {'parts': [{'text': '{}'}]}}],
+        })
+
+    with GeminiClient(api_key='k', model='3.6', service_tier='flex',
+                      transport=httpx.MockTransport(respond)) as client:
+        chain = FallbackGeminiClient([client], flex_retry_seconds=600, monotonic=lambda: 700)
+        chain._flex_started = 0
+        chain.generate_json(system_instruction='', prompt='', response_schema={})
+        assert timeouts == [60]
+        assert chain._flex_started is None
+
+
+def test_flex_request_timeout_respects_remaining_window() -> None:
+    import httpx
+
+    from pipeline.llm import FallbackGeminiClient, GeminiClient
+
+    timeouts = []
+    def respond(request):
+        timeouts.append(request.extensions['timeout']['read'])
+        return httpx.Response(200, json={
+            'candidates': [{'content': {'parts': [{'text': '{}'}]}}],
+        })
+
+    with GeminiClient(api_key='k', model='3.6', service_tier='flex',
+                      transport=httpx.MockTransport(respond)) as client:
+        chain = FallbackGeminiClient([client], flex_retry_seconds=600, monotonic=lambda: 590)
+        chain._flex_started = 0
+        chain.generate_json(system_instruction='', prompt='', response_schema={})
+        assert timeouts == [10]

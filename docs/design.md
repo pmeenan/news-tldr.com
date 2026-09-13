@@ -919,11 +919,15 @@ Model chains are built per purpose by `create_gemini_client`. Review work runs
 3.8 Flash with 3.7 Flash as the capacity fallback; 3.5 Flash costs twice as
 much and is appended only for editorial verification. Bulk work (digests,
 grouping, prescreen, evidence extraction, the regeneration gate, category
-sections) runs 3.5 Flash-Lite. Each chain starts with one flex-tier attempt at
-half price on the flex model, bounded by `llm.flex_budget_seconds[purpose]`;
-flex requests can be shed with 429/503 and are never upgraded server-side, so
-the fallback chain treats a shed or overrun flex attempt like any capacity
-failure and cools that model-plus-tier for five minutes. Implicit context
+sections) runs 3.5 Flash-Lite. Review calls prefer Flex 3.6 → 3.8 → 3.7; bulk calls use Lite Flex.
+Retryable failures cool a model/tier for 45 seconds and retry during a shared
+600-second outage window per client. Standard pricing is permitted only after
+that window expires; a Flex success resets it. Each request is capped at 60
+seconds and the remaining window; after expiry each queued call may make
+one recovery probe of up to 60 seconds when a model cooldown has elapsed.
+Empty content is not repeatedly billed while waiting. Standard model cooldowns
+remain five minutes. See `docs/pipeline.md` for overrides and stage timing.
+Implicit context
 caching is not pursued: the reusable instruction prefixes are far below the
 4,096-token minimum and the costly tokens are per-article content.
 

@@ -154,16 +154,16 @@ def editorial_once(
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"editorial-{uuid.uuid4().hex}"
     owns_client = client is None
-    generator = client or create_gemini_client("review", purpose="editorial")
+    generator = client or create_gemini_client("review", purpose="editorial", progress=progress)
     # Evidence extraction and the regeneration gate are mechanical, code-validated
     # steps that run on the bulk tier; verification alone may reach the expensive
     # last-resort models. Injected test clients serve every role.
     owned_clients: list[Any] = []
     if client is None:
-        evidence_client = create_gemini_client("bulk", purpose="evidence")
-        verification_client = create_gemini_client("review", purpose="editorial", last_resort=True)
-        curation_client = create_gemini_client("review", purpose="curation")
-        sections_client = create_gemini_client("bulk", purpose="curation")
+        evidence_client = create_gemini_client("bulk", purpose="evidence", progress=progress)
+        verification_client = create_gemini_client("review", purpose="editorial", last_resort=True, progress=progress)
+        curation_client = create_gemini_client("review", purpose="curation", progress=progress)
+        sections_client = create_gemini_client("bulk", purpose="curation", progress=progress)
         owned_clients = [generator, evidence_client, verification_client, curation_client, sections_client]
     else:
         evidence_client = verification_client = curation_client = sections_client = client

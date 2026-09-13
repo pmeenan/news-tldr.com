@@ -57,7 +57,7 @@ GEMINI_BULK_MODEL=gemini-3.5-flash-lite
 GEMINI_REVIEW_MODEL=gemini-3.8-flash
 GEMINI_REVIEW_FALLBACK_MODELS=gemini-3.7-flash
 GEMINI_REVIEW_LAST_RESORT_MODELS=gemini-3.5-flash
-GEMINI_REVIEW_FLEX_MODEL=gemini-3.7-flash
+GEMINI_REVIEW_FLEX_MODELS=gemini-3.6-flash,gemini-3.8-flash,gemini-3.7-flash
 GEMINI_REVIEW_LITE_FALLBACK_MODEL=gemini-3.5-flash-lite
 ```
 
@@ -75,15 +75,27 @@ validated responses. Safety-sensitive editorial inputs that produce empty
 responses across all full-Flash tiers get one compact digest/key-fact retry on
 the same full-Flash chain; drafting and verification never use Lite.
 
-Every chain starts with one half-price **flex** attempt on
-`GEMINI_REVIEW_FLEX_MODEL` (bulk chains use the bulk model itself). The flex
-budget per purpose lives in `llm.flex_budget_seconds` in `config/pipeline.json`
-(production: 240 s on the digest, aggregation, editorial and evidence paths;
-900 s for deduplication, coherence and curation). A flex request that is shed
-(429/503) or exceeds its budget falls through to the standard chain and the
-flex tier is bypassed for `llm.flex_cooldown_seconds` (45 s; shedding is per
-request, unlike a model outage). Set `GEMINI_FLEX_DISABLED=1` to turn flex
-off. `llm.prices` holds per-million-token rates so `llm-usage` reports
+Review calls try half-price Flex on **3.6 → 3.8 → 3.7 Flash** before the
+standard chain. Bulk calls retry their Flash-Lite model on Flex. Retryable
+capacity/transport failures cool each model and tier for 45 seconds. Workers
+sharing a client share a ten-minute outage window (`llm.flex_retry_seconds`);
+standard pricing is allowed only after that window expires. A successful Flex
+response resets the outage for subsequent calls; in-flight calls retain their
+deadline. Queued calls reuse an expired window while the
+outage persists, instead of each waiting another ten minutes. Each Flex request
+is limited to the smaller of 60 seconds, its remaining window, and
+`llm.flex_budget_seconds[purpose]`. After expiry, a queued call may make one
+recovery probe of up to 60 seconds on a model whose cooldown has elapsed.
+Empty responses try other Flex models but are not repeatedly retried during
+the wait; wholly empty results retain the editorial compact-input repair path.
+Non-retryable errors propagate. Verbose output reports cooldowns, waits and
+standard fallback. `GEMINI_REVIEW_FLEX_MODELS` overrides the ordered Flex list;
+the legacy `GEMINI_REVIEW_FLEX_MODEL` moves one model to its front.
+`GEMINI_FLEX_DISABLED=1` or a zero purpose budget disables Flex; setting the
+retry window to zero restores immediate standard fallback. Standard-tier
+failures retain their five-minute cooldown.
+
+`llm.prices` holds per-million-token rates so `llm-usage` reports
 dollars; usage rows record thinking tokens, cached tokens and the service tier
 returned by the API.
 

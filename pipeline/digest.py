@@ -319,11 +319,11 @@ def digest_once(
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"article-digest-{uuid.uuid4().hex}"
     owns_generator = client is None
-    generator = client or create_gemini_client("bulk", purpose="digest")
+    generator = client or create_gemini_client("bulk", purpose="digest", progress=progress)
     owns_review_generator = review_client is None and client is None and review_enabled
     reviewer = review_client
     if reviewer is None and client is None and review_enabled:
-        reviewer = create_gemini_client("review", purpose="digest")
+        reviewer = create_gemini_client("review", purpose="digest", progress=progress)
     state = StateDB()
     stats: dict[str, Any] = {"run_id": run_id}
     try:

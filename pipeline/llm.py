@@ -31,16 +31,16 @@ FLEX_SERVICE_TIER = "flex"
 # verification rather than a general fallback.
 DEFAULT_REVIEW_FALLBACK_MODELS = ("gemini-3.7-flash",)
 DEFAULT_REVIEW_LAST_RESORT_MODELS = ("gemini-3.5-flash",)
-# Flex attempts go to 3.7 Flash: same price as 3.8 on flex, but 3.8's flex pool
-# shed every probe during rollout while 3.7 answered in under a second.
-DEFAULT_REVIEW_FLEX_MODEL = "gemini-3.7-flash"
+# Prefer the capacity pool that performed best in real editorial probes.
+DEFAULT_REVIEW_FLEX_MODEL = "gemini-3.6-flash"
+DEFAULT_REVIEW_FLEX_MODELS = (DEFAULT_REVIEW_FLEX_MODEL, "gemini-3.8-flash", "gemini-3.7-flash")
 DEFAULT_REVIEW_LITE_FALLBACK_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_CAPACITY_COOLDOWN_SECONDS = 300.0
 # Flex shedding is per request, not a model outage: retry the half-price tier
 # again soon instead of abandoning it for the rest of the run.
 DEFAULT_FLEX_COOLDOWN_SECONDS = 45.0
-# Per-purpose flex budgets (seconds). A flex attempt that exceeds its budget or
-# is shed with 429/503 falls back to the standard tier; 0 disables flex.
+# Per-purpose request timeouts; the separate retry window controls standard fallback.
+# A zero request budget disables Flex for the purpose.
 DEFAULT_FLEX_BUDGET_SECONDS: dict[str, int] = {}
 
 
@@ -182,6 +182,7 @@ class GeminiClient:
         response_schema: dict[str, Any],
         max_output_tokens: int | None = None,
         thinking_level: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> GeminiResult:
         selected_thinking_level = thinking_level or self.thinking_level
         if (
@@ -217,6 +218,7 @@ class GeminiClient:
                 response = self._http_client.post(
                     url,
                     content=body,
+                    timeout=self.timeout_seconds if timeout_seconds is None else timeout_seconds,
                     headers={
                         "Content-Type": "application/json",
                         "x-goog-api-key": self.api_key,
@@ -284,6 +286,9 @@ class FallbackGeminiClient:
         *,
         cooldown_seconds: float = DEFAULT_CAPACITY_COOLDOWN_SECONDS,
         monotonic: Callable[[], float] | None = None,
+        flex_retry_seconds: float = 0,
+        sleep: Callable[[float], None] | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> None:
         if not clients:
             raise ValueError("fallback client requires at least one Gemini client")
@@ -295,6 +300,10 @@ class FallbackGeminiClient:
         self._monotonic = monotonic or time.monotonic
         self._unavailable_until: dict[str, float] = {}
         self._lock = threading.Lock()
+        self.flex_retry_seconds = max(0.0, float(flex_retry_seconds))
+        self._sleep = sleep or time.sleep
+        self._progress = progress
+        self._flex_started: float | None = None
 
     def close(self) -> None:
         for client in self._clients:
@@ -315,15 +324,25 @@ class FallbackGeminiClient:
         max_output_tokens: int | None = None,
         thinking_level: str | None = None,
     ) -> GeminiResult:
+        kwargs = dict(system_instruction=system_instruction, prompt=prompt,
+                      response_schema=response_schema, max_output_tokens=max_output_tokens,
+                      thinking_level=thinking_level)
+        flex = [c for c in self._clients if getattr(c, "service_tier", None) == "flex"]
+        if flex and self.flex_retry_seconds:
+            result = self._try_flex(flex, kwargs)
+            if result is not None:
+                return result
+        clients = [c for c in self._clients if not (flex and self.flex_retry_seconds
+                   and getattr(c, "service_tier", None) == "flex")]
         last_error: GeminiRetryableError | None = None
         empty_response_count = 0
         now = self._monotonic()
         attempted = 0
-        for index, client in enumerate(self._clients):
+        for index, client in enumerate(clients):
             label = getattr(client, "label", client.model)
             with self._lock:
                 unavailable_until = self._unavailable_until.get(label, 0.0)
-            if unavailable_until > now and index < len(self._clients) - 1:
+            if unavailable_until > now and index < len(clients) - 1:
                 continue
             attempted += 1
             try:
@@ -353,6 +372,65 @@ class FallbackGeminiClient:
             f"({models}): {last_error}",
             status_code=getattr(last_error, "status_code", None),
         )
+
+    def _try_flex(self, clients: list[GeminiClient], kwargs: dict[str, Any]) -> GeminiResult | None:
+        # Workers share capacity cooldowns and the start of this outage. Success
+        # closes the episode for future calls; in-flight calls retain their deadline.
+        # Queued requests do not each incur ten more minutes during an outage.
+        empty: set[str] = set()
+        with self._lock:
+            if self._flex_started is None:
+                self._flex_started = self._monotonic()
+            started = self._flex_started
+        deadline = started + self.flex_retry_seconds
+        recovery_probe = self._monotonic() >= deadline
+        while True:
+            for client in clients:
+                label = client.label
+                if label in empty:
+                    continue
+                now = self._monotonic()
+                if now >= deadline and not recovery_probe:
+                    break
+                with self._lock:
+                    until = self._unavailable_until.get(label, 0.0)
+                if until > now:
+                    continue
+                try:
+                    call_kwargs = dict(kwargs)
+                    if isinstance(client, GeminiClient):
+                        call_kwargs["timeout_seconds"] = min(
+                            client.timeout_seconds, 60.0 if recovery_probe else max(1.0, deadline - now), 60.0
+                        )
+                    result = client.generate_json(**call_kwargs)
+                    with self._lock:
+                        self._flex_started = None
+                        self._unavailable_until.pop(label, None)
+                    return result
+                except GeminiEmptyResponseError:
+                    empty.add(label)
+                except GeminiRetryableError:
+                    cooldown = max(1.0, client.cooldown_seconds or 45.0)
+                    with self._lock:
+                        self._unavailable_until[label] = self._monotonic() + cooldown
+                    if self._progress:
+                        self._progress(f"llm: {label} unavailable; cooling for {cooldown:g}s")
+                if self._monotonic() >= deadline:
+                    break
+            if len(empty) == len(clients):
+                raise GeminiEmptyResponseError("all Flex models returned empty responses")
+            now = self._monotonic()
+            if now >= deadline:
+                if self._progress:
+                    self._progress("llm: Flex retry window exhausted; trying standard pricing")
+                return None
+            with self._lock:
+                next_attempt = min(self._unavailable_until.get(c.label, now)
+                                   for c in clients if c.label not in empty)
+            delay = min(45.0, deadline - now, max(1.0, next_attempt - now))
+            if self._progress:
+                self._progress(f"llm: waiting {delay:.0f}s before retrying Flex")
+            self._sleep(delay)
 
 
 def gemini_model_for_stage(stage: str) -> str:
@@ -425,23 +503,22 @@ def _model_chain(
     *,
     budget_seconds: int,
     standard_attempts: int,
-    flex_model: str | None = None,
+    flex_models: tuple[str, ...] = (),
 ) -> list[GeminiClient]:
-    """One flex attempt (on ``flex_model`` or the primary) when budgeted, then
-    every model at the standard tier in order."""
+    """Ordered Flex pools followed by the standard model chain."""
     clients: list[GeminiClient] = []
     if budget_seconds > 0:
-        selected = flex_model or models[0]
-        clients.append(
-            GeminiClient(
-                model=selected,
-                thinking_level=_thinking_level_for(selected),
-                service_tier=FLEX_SERVICE_TIER,
-                timeout_seconds=float(budget_seconds),
-                max_attempts=1,
-                cooldown_seconds=flex_cooldown_seconds(),
+        for selected in dict.fromkeys(flex_models or (models[0],)):
+            clients.append(
+                GeminiClient(
+                    model=selected,
+                    thinking_level=_thinking_level_for(selected),
+                    service_tier=FLEX_SERVICE_TIER,
+                    timeout_seconds=float(budget_seconds),
+                    max_attempts=1,
+                    cooldown_seconds=flex_cooldown_seconds(),
+                )
             )
-        )
     clients.extend(
         GeminiClient(
             model=model,
@@ -459,6 +536,7 @@ def create_gemini_client(
     include_lite: bool = False,
     purpose: str | None = None,
     last_resort: bool = False,
+    progress: Callable[[str], None] | None = None,
 ) -> GeminiClient | FallbackGeminiClient:
     """Build the client chain for a stage.
 
@@ -472,6 +550,9 @@ def create_gemini_client(
         )
     )
     budget = flex_budget_seconds(purpose)
+    from pipeline.config import load_pipeline_config
+
+    retry_seconds = max(0.0, float(load_pipeline_config().llm.get("flex_retry_seconds", 600)))
     if stage == "review":
         primary = gemini_model_for_stage(stage)
         models = tuple(
@@ -481,10 +562,14 @@ def create_gemini_client(
             ))
         )
         attempts = max(1, int(os.environ.get("GEMINI_REVIEW_ATTEMPTS_PER_MODEL", "1")))
-        flex_model = os.environ.get("GEMINI_REVIEW_FLEX_MODEL", DEFAULT_REVIEW_FLEX_MODEL).strip() or None
+        override = os.environ.get("GEMINI_REVIEW_FLEX_MODEL", "").strip()
+        flex_models = _model_list("GEMINI_REVIEW_FLEX_MODELS", DEFAULT_REVIEW_FLEX_MODELS)
+        if override:
+            flex_models = tuple(dict.fromkeys((override, *flex_models)))
         return FallbackGeminiClient(
-            _model_chain(models, budget_seconds=budget, standard_attempts=attempts, flex_model=flex_model),
+            _model_chain(models, budget_seconds=budget, standard_attempts=attempts, flex_models=flex_models),
             cooldown_seconds=cooldown,
+            flex_retry_seconds=retry_seconds, progress=progress,
         )
     if stage == "bulk":
         model = gemini_model_for_stage(stage)
@@ -493,6 +578,7 @@ def create_gemini_client(
         return FallbackGeminiClient(
             _model_chain((model,), budget_seconds=budget, standard_attempts=DEFAULT_MAX_ATTEMPTS),
             cooldown_seconds=cooldown,
+            flex_retry_seconds=retry_seconds, progress=progress,
         )
     raise ValueError("stage must be 'bulk' or 'review'")
 
