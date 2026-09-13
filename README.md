@@ -229,10 +229,15 @@ first briefing bullet. Violations are rejected and repaired once. Change
 summaries for meaningful revisions must read as one sentence of news rather
 than a description of the edit.
 
-Each story costs at most three full-Flash calls plus cheap Flash-Lite work:
-Flash-Lite extracts the exact-passage evidence ledger (at most three passages
-of 320 characters per claim, with one full-Flash retry if Lite fails twice),
-full Flash drafts from the digests plus that ledger rather than the full
+An ordinary story uses Flash-Lite evidence extraction plus full-Flash drafting
+and verification; validation repairs can add calls. Evidence extraction selects
+up to 12 claims and numbered source passages. Code resolves the selected IDs
+into exact source quotes (at most three passages of 320 characters per claim),
+rejecting missing or duplicate IDs. Short referring sentences share a passage with their preceding context when
+they fit; long sentences
+use overlapping passages to retain context. Lite receives one repair attempt,
+then one full-Flash extraction attempt if it fails twice.
+Full Flash drafts from the digests plus that ledger rather than the full
 article text, and full Flash verifies. When an already verified story's event
 gains articles, a Flash-Lite gate first checks whether the new reports add a
 material fact; if not, the checkpoint advances and the story is left as is.

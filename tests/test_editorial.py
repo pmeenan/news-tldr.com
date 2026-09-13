@@ -49,8 +49,8 @@ class FakeEditorialClient:
         payload = self.payload
         if "claims" in properties:
             articles = json.loads(kwargs["prompt"].rsplit("\n", 1)[1])
-            payload = {"claims": [{"text": "A supported claim.", "status": "reported", "evidence": [
-                {"article_id": a["article_id"], "quote": a["text"][:80]} for a in articles
+            payload = {"claims": [{"text": "A supported claim.", "status": "reported", "passage_ids": [
+                next(iter(a["passages"])) for a in articles
             ]}]}
         elif "approved" in properties:
             payload = {"approved": True, "reason": "", "material_update": False, "change_summary": ""}
@@ -628,7 +628,7 @@ def test_evidence_retry_preserves_usage_and_constrains_draft_citations() -> None
                 kwargs = {**kwargs, "prompt": kwargs["prompt"].split("\nRepair the previous extraction:")[0]}
             result = super().generate_json(**kwargs)
             if len(self.calls) == 1:
-                result.payload["claims"][0]["evidence"][0]["quote"] = "Invented passage that must fail."
+                result.payload["claims"][0]["passage_ids"][0] = "invented"
             return result
 
     client = RepairClient(_response())
@@ -878,7 +878,7 @@ def test_evidence_extractor_falls_back_to_full_client_after_two_failures() -> No
         def generate_json(self, **kwargs: Any) -> GeminiResult:
             result = super().generate_json(**kwargs)
             if "claims" in kwargs["response_schema"]["properties"]:
-                result.payload["claims"][0]["evidence"][0]["quote"] = "Not present in the article."
+                result.payload["claims"][0]["passage_ids"][0] = "invented"
             return result
 
     lite = BadLite(_response())

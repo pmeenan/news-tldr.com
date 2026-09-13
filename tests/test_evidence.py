@@ -110,3 +110,83 @@ def test_evidence_caps_passage_count_and_length() -> None:
         validate_evidence({"claims": [claim]}, event)
     claim["evidence"] = claim["evidence"][:3]
     assert validate_evidence({"claims": [claim]}, event)[0]["claim_id"] == "c1"
+
+
+def test_source_passages_preserve_abbreviations_numbers_and_quote_attribution() -> None:
+    from pipeline.evidence import source_passages
+
+    text = ('U.S. officials met Dr. Jones and Lt. Smith on Jan. 9 at 3.5 percent. '
+            '“No,” she said. A second report followed.')
+    passages = source_passages(text)
+    assert passages == [
+        'U.S. officials met Dr. Jones and Lt. Smith on Jan. 9 at 3.5 percent.',
+        '“No,” she said.', 'A second report followed.',
+    ]
+    assert all(p in text for p in passages)
+
+
+def test_long_source_passages_cover_text_with_overlap_and_keep_short_tail() -> None:
+    from pipeline.evidence import source_passages
+
+    text = ' '.join(f'word{i}' for i in range(180)) + '. End.'
+    passages = source_passages(text)
+    assert all(8 <= len(p) <= 320 and p in text for p in passages)
+    assert set(text.split()) == {word for p in passages for word in p.split()}
+    assert 'End.' in passages[-1]
+    for first, second in zip(passages, passages[1:]):
+        assert set(first.split()) & set(second.split())
+
+
+def test_passage_ids_resolve_to_exact_sources_not_model_supplied_quotes() -> None:
+    from pipeline.evidence import evidence_passages, resolve_evidence_passages
+
+    event = SimpleNamespace(articles=[
+        SimpleNamespace(article_id='original-a', source_name='Outlet A', headline='Headline only',
+                        published_at='2026-09-13', content='Officials reported 12 cases.\nTesting continues.'),
+        SimpleNamespace(article_id='original-b', source_name='Outlet B', headline='Another headline',
+                        published_at='2026-09-13', content='Another outlet reported 15 cases.'),
+    ])
+    articles, lookup = evidence_passages(event)
+    assert list(articles[0]['passages']) == ['a0p0', 'a0p1']
+    payload = {'claims': [{'text': 'Reports disagree on the count.', 'status': 'disputed',
+                           'passage_ids': ['a0p0', 'a1p0'],
+                           'evidence': [{'article_id': 'invented', 'quote': 'Invented quotation.'}]}]}
+    ledger = resolve_evidence_passages(payload, lookup, event)
+    assert ledger[0]['evidence'] == [
+        {'article_id': 'original-a', 'quote': 'Officials reported 12 cases.'},
+        {'article_id': 'original-b', 'quote': 'Another outlet reported 15 cases.'},
+    ]
+    assert 'passage_ids' not in ledger[0]
+    assert 'Headline only' not in str(lookup)
+
+
+@pytest.mark.parametrize('ids', [['missing'], ['a0p0', 'a0p0'], [], [True], [{}], ['a0p0'] * 4])
+def test_passage_resolution_rejects_invalid_ids(ids) -> None:
+    from pipeline.evidence import resolve_evidence_passages
+
+    event = SimpleNamespace(articles=[SimpleNamespace(article_id='a', content='A supported passage.')])
+    lookup = {'a0p0': {'article_id': 'a', 'quote': 'A supported passage.'}}
+    with pytest.raises(ValueError):
+        resolve_evidence_passages({'claims': [{'text': 'Claim.', 'status': 'reported', 'passage_ids': ids}]},
+                                  lookup, event)
+
+
+def test_passage_validation_failure_retains_usage_for_accounting() -> None:
+    from pipeline.evidence import EVIDENCE_VERSION, collect_evidence
+
+    result = SimpleNamespace(payload={'claims': [{'text': 'Claim.', 'status': 'reported',
+                                                 'passage_ids': ['missing']}]}, usage={'promptTokenCount': 100})
+    client = SimpleNamespace(generate_json=lambda **kwargs: result)
+    event = SimpleNamespace(title='Event', articles=[SimpleNamespace(
+        article_id='a', source_name='Outlet', headline='Headline', published_at=None, content='A supported passage.',
+    )])
+    with pytest.raises(ValueError) as error:
+        collect_evidence(event, client)
+    assert error.value.editorial_unrecorded_result == (result, EVIDENCE_VERSION)
+
+
+def test_related_short_sentences_retain_names_and_custody_context() -> None:
+    from pipeline.evidence import source_passages
+
+    text = 'Alex Smith appeared in court charged with violent disorder. He was remanded in custody.'
+    assert source_passages(text) == [text]

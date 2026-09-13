@@ -205,18 +205,21 @@ Command:
 ```
 
 Editorial selects active/stale events whose `updated_at` is newer than
-`last_editorial_at`. Each event gets evidence extraction, drafting, and a separate
-verification operation through the ordered full-Flash chain:
+`last_editorial_at`. Each event gets Flash-Lite evidence extraction, full-Flash
+drafting and independent full-Flash verification. The model allocation table
+below describes the Flex-first and standard fallback chains. Retryable capacity
+failures use the shared Flex retry window; safety-sensitive empty responses may
+receive a compact digest/key-fact retry. Drafting and verification never use Lite.
 
-```text
-gemini-3.7-flash -> gemini-3.6-flash -> gemini-3.5-flash
-```
-
-Retryable transport, 429, and 5xx failures open a five-minute in-process circuit
-for the failing model tier. Safety-sensitive empty responses may receive one
-compact digest/key-fact retry through the same chain. Editorial never uses Lite.
-
-Invalid evidence extraction receives one retry with validation feedback.
+Evidence v3 supplies numbered source passages and asks for claim text plus
+1–3 passage IDs. Code copies the source quotes and original article IDs into
+the existing private ledger. Short referring sentences retain preceding context, abbreviations and attribution;
+long sentences use overlapping windows capped at 320 characters. Unknown,
+duplicate or excessive IDs fail deterministically. Supporting IDs do not prove
+that a quote supports a claim; semantic verification remains mandatory.
+Invalid extraction receives one Lite retry with validation feedback and then
+one full-Flash extraction attempt. Existing verified stories are not regenerated
+solely because the evidence prompt version changes.
 The result must pass exact-passage, claim-link, schema and citation validation,
 then an independent semantic verification call. A rejected draft gets one repair
 attempt; a remaining failure retains the previous artifact/checkpoint. Validation

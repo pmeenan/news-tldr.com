@@ -825,7 +825,7 @@ def generate_story(
             except ValueError as retry_exc:
                 if extractor is client:
                     raise
-                # The bulk extractor could not produce exact passages; give the
+                # The bulk extractor could not select valid evidence; give the
                 # full-Flash client one attempt before failing the story.
                 if pending := getattr(retry_exc, "editorial_unrecorded_result", None):
                     record(*pending)

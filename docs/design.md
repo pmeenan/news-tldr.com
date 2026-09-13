@@ -472,15 +472,28 @@ Editorial selects changed active/stale events using `last_editorial_at` and
 
 ### Evidence, drafting, and verification
 
-`pipeline/editorial.py` and `pipeline/evidence.py` implement three full-Flash
-operations per ordinary story, using the existing ordered 3.7 → 3.6 → 3.5 chain:
+`pipeline/editorial.py` and `pipeline/evidence.py` separate evidence extraction,
+drafting and independent verification. Evidence uses Flash-Lite with a full-Flash
+repair fallback; drafting and verification use the review Flex/standard chains
+described under Cost Awareness.
 
-1. **Evidence (`editorial-evidence-v1`)**: choose essential claims, attribution,
-   contradictions, numbers, dates and qualifications. Every claim carries one
-   or more short verbatim passages and an offered article ID. Code checks each
-   passage against the supplied article text after whitespace normalization.
-   Invalid extraction receives one bounded retry with validation feedback.
-2. **Draft (`editorial-v4`, or `editorial-framing-v3`)**: generate a sentence-case
+1. **Evidence (`editorial-evidence-v3`)**: code numbers short source passages;
+   the extractor selects up to 12 essential claims, each with 1–3 distinct
+   passage IDs. Code resolves these into the existing ledger of original
+   article IDs and exact source quotes, each at most 320 characters, and checks
+   them against article text after whitespace normalization. Unknown/duplicate
+   IDs and invalid claims fail validation. Passage construction keeps ordinary
+   sentences, abbreviations, decimals and trailing quoted attribution together,
+   attaching short referring sentences to their preceding context when they fit;
+   long sentences use overlapping word-boundary windows. All source words are
+   retained for context; unrelated inline promotions are not made trustworthy
+   by numbering them. Prompts require every selected passage to support the
+   complete claim, including attribution, and explicitly retain conflicting
+   counts/dates/outcomes. A valid ID alone does not establish semantic support.
+   Invalid extraction receives one Lite repair, then one full-Flash extraction
+   attempt. All attempts preserve usage accounting. Stored/public contracts
+   remain unchanged: the private ledger contains quotes, not passage IDs.
+2. **Draft (`editorial-v5`, or `editorial-framing-v4`)**: generate a sentence-case
    headline, dek, 2–4 TL;DR bullets, exactly two short briefing bullets (15–22
    words, at most 230 characters), cited key facts and uncertainties. Headline,
    dek and both summary forms link to ledger claim IDs. Citations containing any

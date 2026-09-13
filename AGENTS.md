@@ -34,6 +34,34 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on September 13, 2026 (Gemini Passage-ID Evidence v3)
+
+- Evidence extraction now returns up to 12 claims with 1–3 distinct passage
+  IDs. Code builds bounded source passages and resolves IDs into the existing
+  private exact-quote ledger. Preserve abbreviations, decimals and attributions;
+  short referring sentences share preceding context when they fit, and long
+  sentences use overlapping windows. Unknown/duplicate IDs fail validation.
+- Flash-Lite remains the extractor, with one Lite repair then full-Flash
+  extraction fallback. Full-Flash drafting and verification are unchanged.
+  Prompt version is editorial-evidence-v3; public/storage contracts and story
+  checkpoints are unchanged. No automatic regeneration of existing verified
+  stories and no local routing change.
+- Matched live evaluation: 12 cases/41 reports; extraction cost down
+  62.0%, combined extraction/draft/verification cost down 27.3%.
+  12 first-attempt Lite extractions versus 15 old extraction calls including
+  repairs. Final story verification passed 9/12 versus 8/12 on the old path;
+  every accepted final story also passed the extra selected-passage audit.
+  Three final drafts remained rejected for unsupported assertions and were
+  not published. The sample is small/stochastic, not a quality or daily-cost
+  guarantee. All development evaluations cost $0.5084 and are recorded
+  under routing_evaluation. See ignored data/evaluations/gemini-passage-findings.md.
+- Verification: 367 tests, Ruff, compileall, diff whitespace checks, and exact
+  passage/complete-source coverage checks on the 41 reports passed. No frontend
+  or dependency changes. Next scheduled process uses v3; source uncommitted.
+- Follow-up: measure extraction repairs, editorial rejection rate and daily
+  spend after a full day before pursuing local Qwen routing.
+
+
 ### State on September 13, 2026 (Flex Retry Routing and Duplicate Screening Pilot)
 
 - Review Flex order is 3.6 → 3.8 → 3.7, before the existing standard chain.

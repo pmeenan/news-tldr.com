@@ -332,3 +332,6 @@ gantt
 - [ ] Measure Flex success and standard fallback rates after a complete day with the new routing and gap-fill eligibility.
 - [x] Pilot Lite duplicate rejection on 48 pairs: 24.4% estimated duplicate-stage savings but one incorrect rejection; retain full review and leave screening disabled.
 - [ ] Evaluate a stronger reject-only screen on independent natural candidates, including sports individual/team results and reactions/consequences; shadow-test before allowing it to suppress reviews.
+
+- [x] Introduce Gemini passage-ID evidence extraction v3, preserve the quoted ledger and full-Flash verifier, and benchmark costs and rejection behavior against v2.
+- [ ] Observe a full day of v3 extraction costs, repair calls and editorial rejections before extrapolating monthly savings or enabling local Qwen extraction.
