@@ -199,6 +199,9 @@ gantt
 
 ### [x] Post-launch Reader Polish
 
+- [x] Open homepage stories in an accessible mobile-friendly overlay; preserve the
+  current list, scroll position and focus on Close/Escape/Back, support Forward,
+  and retain direct story URLs and normal new-tab navigation.
 - [x] Add concise category navigation labels that fit in one desktop row while preserving full category names elsewhere.
 - [x] Add freshness-aware homepage and category-specific display ranks, with category views re-sorted by vertical impact.
 - [x] Add a device-local New/All revisit control using a one-second, 60%-title-visibility threshold and three-day retention.

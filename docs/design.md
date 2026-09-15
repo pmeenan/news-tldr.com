@@ -670,6 +670,19 @@ supporting headline skimming. Cards remain stable during the scan; filters apply
 read history on the next render. Mark read affects currently displayed cards. Optional sync keeps its existing three-day state,
 private fragment link, one bounded initial pull and silent background writes.
 
+Homepage story links progressively open a native modal dialog, fetching only the
+generated page's `article.story-page` content. The original homepage DOM stays
+mounted. A history entry uses the canonical story path (including `#sources` for
+publisher links); Back/Close/Escape dismiss without rendering or filtering the
+list, and Forward reloads the overlay. The dialog traps keyboard focus, keeps
+Close visible while scrolling, locks background scrolling, and restores the
+opener's focus and homepage scroll position. Headline read timers pause while the
+dialog covers the page and restart on dismissal; a successfully opened story is
+marked read without hiding its card. Fetches time out after 15 seconds and are
+cancelled on dismissal. Errors retain Close and Open full page actions. Normal
+new-tab clicks, direct visits, refreshes and browsers without dialog support use
+the standalone static pages. No additional browser dependency is required.
+
 Publishing, CSP, noindex/social metadata and cache contracts are unchanged:
 HTML has a 10-minute freshness lifetime; fingerprinted CSS/JavaScript have one
 year immutable caching. Deployment preserves unknown files and old asset paths,

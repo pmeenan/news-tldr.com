@@ -32,7 +32,7 @@ from pipeline.sources import publisher_id
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v27"
+PRESENTATION_VERSION = "presentation-v28"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
@@ -282,6 +282,16 @@ main[data-reader-pending]::before { content: "Loading latest read status…"; po
 .story-page section { margin-top: 2.4rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
 .story-page section h2 { margin: 0 0 1rem; font-size: .85rem; font-family: system-ui, sans-serif; text-transform: uppercase; letter-spacing: .12em; }
 .story-page .tldr-list { font-size: 1.2rem; }
+.story-overlay { width: min(960px, 100%); height: 100%; max-width: 100%; max-height: 100dvh; margin: auto;
+  padding: 0; border: 0; background: var(--paper); color: var(--ink); overscroll-behavior: contain; }
+.story-overlay::backdrop { background: var(--backdrop); }
+.story-overlay-bar { position: sticky; top: 0; z-index: 1; display: flex; justify-content: space-between;
+  align-items: center; gap: 1rem; padding: 1rem; background: var(--paper); border-bottom: 1px solid var(--line);
+  font: 700 .85rem/1.4 system-ui, sans-serif; }
+.story-overlay-bar button { min-height: 44px; padding: .5rem 1rem; border: 1px solid var(--line);
+  border-radius: .3rem; background: var(--paper); color: var(--ink); cursor: pointer; font: inherit; }
+.story-overlay-content { padding: clamp(1rem, 4vw, 2.5rem); }
+html.story-overlay-open { overflow: hidden; scrollbar-gutter: stable; }
 .fact-list { list-style: none; margin: 0; padding: 0; }
 .fact-list li { padding: .9rem 0; border-bottom: 1px dotted var(--line); font-size: 1.05rem; line-height: 1.55; }
 .citations { margin-left: .4rem; white-space: nowrap; font: 700 .68rem/1 system-ui, sans-serif; }
@@ -388,6 +398,7 @@ const syncDisconnectButton = document.querySelector('[data-sync-disconnect]');
 const syncDeleteButton = document.querySelector('[data-sync-delete]');
 const syncActionButtons = Array.from(document.querySelectorAll('[data-sync-action]'));
 const timers = new Map();
+let readObserver = null;
 let visibleCards = [];
 let syncToken = '';
 let syncTimer = null;
@@ -1074,7 +1085,8 @@ function startReadObserver() {
   if (readerReady) return;
   readerReady = true;
   if (!('IntersectionObserver' in window)) return;
-  const observer = new IntersectionObserver((entries) => {
+  readObserver = new IntersectionObserver((entries) => {
+    if (document.querySelector('.story-overlay[open]')) return;
     for (const entry of entries) {
       const title = entry.target;
       const card = title.closest('[data-story-id]');
@@ -1092,9 +1104,143 @@ function startReadObserver() {
   }, { threshold: [0.6] });
   for (const card of cards) {
     const title = card.querySelector('[data-story-title]');
-    if (title) observer.observe(title);
+    if (title) readObserver.observe(title);
   }
 }
+
+// Keep the homepage DOM alive: returning from a story must never reapply read filters.
+function initializeStoryOverlay() {
+  if (!sectionRoot || typeof HTMLDialogElement === 'undefined'
+      || !HTMLDialogElement.prototype.showModal) return;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'story-overlay';
+  dialog.setAttribute('aria-label', 'Article');
+  const bar = document.createElement('div');
+  bar.className = 'story-overlay-bar';
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.textContent = '← Close article';
+  const permalink = document.createElement('a');
+  permalink.textContent = 'Open full page';
+  const content = document.createElement('div');
+  content.className = 'story-overlay-content';
+  bar.append(close, permalink);
+  dialog.append(bar, content);
+  document.body.append(dialog);
+  const homeTitle = document.title;
+  const session = `${Date.now()}-${Math.random()}`;
+  let homeScroll = 0;
+  let opener = null;
+  let request = null;
+  let closing = false;
+  let previousScrollRestoration = history.scrollRestoration;
+
+  function dismiss() {
+    request?.abort();
+    request = null;
+    if (!dialog.open) return;
+    dialog.close();
+    document.documentElement.classList.remove('story-overlay-open');
+    document.title = homeTitle;
+    opener?.focus({ preventScroll: true });
+    window.scrollTo({ top: homeScroll, behavior: 'instant' });
+    history.scrollRestoration = previousScrollRestoration;
+    // Reobserve to start a fresh one-second exposure after the overlay is gone.
+    for (const card of cards) {
+      const title = card.querySelector('[data-story-title]');
+      if (title && readObserver) {
+        readObserver.unobserve(title);
+        readObserver.observe(title);
+      }
+    }
+    closing = false;
+  }
+
+  function requestClose() {
+    if (closing) return;
+    closing = true;
+    history.back();
+  }
+
+  async function openStory(url) {
+    request?.abort();
+    const controller = new AbortController();
+    request = controller;
+    if (!dialog.open) {
+      homeScroll = window.scrollY;
+      previousScrollRestoration = history.scrollRestoration;
+      history.scrollRestoration = 'manual';
+      for (const timer of timers.values()) window.clearTimeout(timer);
+      timers.clear();
+      document.documentElement.classList.add('story-overlay-open');
+      dialog.showModal();
+      close.focus({ preventScroll: true });
+    }
+    permalink.href = url;
+    dialog.removeAttribute('aria-labelledby');
+    const status = document.createElement('p');
+    status.setAttribute('role', 'status');
+    status.textContent = 'Loading article…';
+    content.replaceChildren(status);
+    dialog.scrollTop = 0;
+    const timeout = window.setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok || new URL(response.url).origin !== location.origin) throw new Error('Unavailable');
+      const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+      const article = page.querySelector('article.story-page');
+      const heading = article?.querySelector('h1');
+      if (!article || !heading) throw new Error('Missing article');
+      if (request !== controller || !dialog.open) return;
+      article.querySelector('.back')?.remove();
+      heading.id = 'overlay-story-title';
+      content.replaceChildren(article);
+      dialog.setAttribute('aria-labelledby', heading.id);
+      document.title = page.title;
+      if (new URL(url).hash === '#sources') {
+        const sources = article.querySelector('#sources');
+        if (sources) dialog.scrollTop = sources.getBoundingClientRect().top
+          - dialog.getBoundingClientRect().top - bar.offsetHeight;
+      }
+      const card = opener?.closest('[data-story-id]');
+      if (card) markViewed(card);
+    } catch (_) {
+      if (request !== controller || !dialog.open) return;
+      status.textContent = 'This article could not be loaded. Close to keep your place, or open the full page.';
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  sectionRoot.addEventListener('click', (event) => {
+    const link = event.target.closest('a[href]');
+    if (!link || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey
+        || event.shiftKey || event.altKey || link.hasAttribute('download')
+        || (link.target && link.target !== '_self')) return;
+    const url = new URL(link.href);
+    if (url.origin !== location.origin || !/^[/]stories[/][A-Za-z0-9._-]+[/]$/.test(url.pathname)) return;
+    event.preventDefault();
+    opener = link;
+    history.pushState({ storyOverlay: session }, '', url.href);
+    void openStory(url.href);
+  });
+  close.addEventListener('click', requestClose);
+  dialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    requestClose();
+  });
+  dialog.addEventListener('click', (event) => {
+    if (event.target !== dialog) return;
+    const bounds = dialog.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right
+        || event.clientY < bounds.top || event.clientY > bounds.bottom) requestClose();
+  });
+  window.addEventListener('popstate', (event) => {
+    if (event.state?.storyOverlay === session) void openStory(location.href);
+    else dismiss();
+  });
+}
+initializeStoryOverlay();
 
 function revealReader() {
   if (readerMain) {

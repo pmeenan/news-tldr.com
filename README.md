@@ -363,6 +363,13 @@ can return in New with a short change summary. Rewording, extra citations and
 regeneration alone do not increment it. The optional private-link sync protocol
 also synchronizes these revision identities without changing its endpoints.
 
+Homepage story links open in an article overlay, with a full-height layout on
+phones. Close, Escape, or browser Back returns to the same visible cards, filters,
+scroll position, and focused link without reapplying read-history filtering.
+Browser Forward reopens the article. The address bar uses the normal story URL
+for sharing or refreshing; modified clicks and Open full page retain ordinary
+navigation. Loading failures leave the overlay closable so readers keep their place.
+
 Each revision has an immutable publication-order value. Revision 1 retains the
 legacy story ID and original creation order; later revisions use a deterministic
 opaque ID and their first revision-publication time. This keeps existing read
