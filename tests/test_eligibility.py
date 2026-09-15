@@ -168,7 +168,7 @@ def test_material_revisions_count_but_routine_updates_do_not(state: StateDB) -> 
     assert "single" not in eligible_event_ids(state, now=NOW)
 
 
-def test_multisource_admission_cannot_publish_a_single_publisher_draft(
+def test_multisource_event_can_publish_evidence_from_one_publisher(
     state: StateDB, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from concurrent.futures import Future
@@ -181,10 +181,10 @@ def test_multisource_admission_cannot_publish_a_single_publisher_draft(
         "sources": [{"publisher_id": "A"}], "created_at": isoformat_z(NOW),
     })
     future = Future()
-    future.set_result({"usage_records": []})
-    stats = {"failed": 0, "rejected_event_ids": []}
-    assert not _finish_story(_event(), future, state=state, run_id="test", stats=stats,
+    future.set_result({"usage_records": [], "usage": {}, "model": "test", "prompt_version": "test"})
+    stats = {"failed": 0, "completed": 0, "rejected_event_ids": [], "usage": {}}
+    assert _finish_story(_event(), future, state=state, run_id="test", stats=stats,
                              story_dir=tmp_path, progress=None, label="test")
-    assert stats == {"failed": 1, "rejected_event_ids": ["event-1"]}
-    assert not (tmp_path / "event-1.json").exists()
-    assert state.conn.execute("SELECT last_editorial_at FROM events WHERE event_id='event-1'").fetchone()[0] is None
+    assert stats["failed"] == 0 and stats["completed"] == 1
+    assert (tmp_path / "event-1.json").exists()
+    assert state.conn.execute("SELECT last_editorial_at FROM events WHERE event_id='event-1'").fetchone()[0] is not None

@@ -288,7 +288,7 @@ gantt
 - [x] Raise the base impact floor to 0.30 and hold single-article events for an hour before their first story.
 - [x] Adopt 3.8 Flash as the review model with 3.7 Flash as fallback, reserve 3.5 Flash for verification, and add half-price flex attempts (3.7 Flash) with per-purpose budgets, standard fallback, higher concurrency, a 50-minute watchdog, and a clean scheduler skip.
 - [ ] Compare `llm-usage --hours 24` after a full day against the $41/day baseline and revisit the flex fallback rate and gate skip rate.
-- [ ] Add a retry cooldown for validation-rejected events that have not changed, so a story the verifier keeps rejecting does not cost five calls every hour.
+- [x] Add a retry cooldown for validation-rejected events that have not changed, so a story the verifier keeps rejecting does not cost five calls every hour.
 - [ ] Human review of Lite-drafted stories before considering drafting on Flash-Lite.
 
 ### External briefing experiments
@@ -335,3 +335,14 @@ gantt
 
 - [x] Introduce Gemini passage-ID evidence extraction v3, preserve the quoted ledger and full-Flash verifier, and benchmark costs and rejection behavior against v2.
 - [ ] Observe a full day of v3 extraction costs, repair calls and editorial rejections before extrapolating monthly savings or enabling local Qwen extraction.
+
+
+### September 15 remaining spend controls
+
+- [x] Count grouped publishers for eligibility; remove the late evidence-outlet rejection.
+- [x] Bound unchanged validation failures to one retry after six hours; reopen on changed inputs/prompts.
+- [x] Persist exact-quote evidence for reuse across attempts, retaining independent verification.
+- [x] Group only new articles with relevant existing-event context; preserve membership review.
+- [ ] Measure a complete day after rollout: cost, deferred failures, evidence cache hits,
+  grouping throughput and duplicate queue. Do not extrapolate the earlier $7.37/day
+  baseline while downstream throughput is changing.

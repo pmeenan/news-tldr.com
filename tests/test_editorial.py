@@ -956,3 +956,63 @@ def test_verifier_receives_publisher_names_for_attribution_checks() -> None:
     verify_call = next(c for c in client.calls if "approved" in c["response_schema"]["properties"])
     assert '"publishers": {"a1": "Source a1"}' in verify_call["prompt"]
     assert "must not be rejected" in verify_call["prompt"]
+
+
+def test_evidence_cache_reuses_quotes_but_reverifies_and_invalidates(tmp_path: Path, monkeypatch) -> None:
+    from dataclasses import replace
+
+    event = _event()
+    first = FakeEditorialClient(_response())
+    generate_story(event, client=first, evidence_cache_dir=tmp_path)
+    second = FakeEditorialClient(_response())
+    result = generate_story(replace(event, updated_at="2026-08-25T00:00:00Z"),
+                            client=second, evidence_cache_dir=tmp_path)
+    assert result["evidence_reused"] and len(second.calls) == 2
+    assert "approved" in second.calls[-1]["response_schema"]["properties"]
+    changed = replace(event, articles=(replace(event.articles[0], content="New reporting changed the facts."),))
+    third = FakeEditorialClient(_response())
+    assert not generate_story(changed, client=third, evidence_cache_dir=tmp_path)["evidence_reused"]
+    monkeypatch.setattr("pipeline.editorial.EVIDENCE_VERSION", "new-extractor")
+    assert not generate_story(changed, client=third, evidence_cache_dir=tmp_path)["evidence_reused"]
+    path = next(tmp_path.glob("*.json"))
+    data = json.loads(path.read_text())
+    data["ledger"][0]["evidence"][0]["quote"] = "Fabricated text that is absent."
+    path.write_text(json.dumps(data))
+    assert not generate_story(changed, client=third, evidence_cache_dir=tmp_path)["evidence_reused"]
+
+
+def test_rejection_retry_is_bounded_and_reopens_for_content_and_prompt_changes(tmp_path: Path, monkeypatch) -> None:
+    from datetime import timedelta
+
+    from pipeline.editorial import _load_editorial_event, _record_rejection, deferred_editorial_ids
+
+    migrate(tmp_path / "pipeline.db")
+    with StateDB(tmp_path / "pipeline.db") as state:
+        _insert_event_and_articles(state, tmp_path, filtered_article=True)
+        def load():
+            row = state.conn.execute("SELECT * FROM events WHERE event_id='event-1'").fetchone()
+            return _load_editorial_event(state, row, source_policy={}, article_char_limit=12000, event_char_limit=40000)
+        # Use the same policy in selection and rejection signatures.
+        monkeypatch.setattr("pipeline.editorial.load_source_policy", lambda: {})
+        event = load()
+        _record_rejection(state, event)
+        assert deferred_editorial_ids(state) == {"event-1"}
+        assert editorial_candidate_rows(state=state) == []
+        assert len(editorial_candidate_rows(state=state, force=True)) == 1
+        later = datetime.now(UTC) + timedelta(hours=7)
+        assert deferred_editorial_ids(state, now=later) == set()
+        _record_rejection(state, event)
+        assert deferred_editorial_ids(state, now=later) == {"event-1"}
+        # Processing timestamps and filtered source changes do not reopen it.
+        state.conn.execute("UPDATE events SET updated_at='2026-09-15T12:00:00Z'")
+        (tmp_path / "filtered.article.json").write_text('{"content_text":"Changed spam."}')
+        assert deferred_editorial_ids(state, now=later) == {"event-1"}
+        source = tmp_path / "a1.article.json"
+        data = json.loads(source.read_text())
+        data["content_text"] += " Officials corrected the number."
+        source.write_text(json.dumps(data))
+        assert deferred_editorial_ids(state, now=later) == set()
+        _record_rejection(state, load())
+        assert state.conn.execute("SELECT attempts FROM editorial_rejections").fetchone()[0] == 1
+        monkeypatch.setattr("pipeline.editorial.EDITORIAL_PROMPT_VERSION", "changed-prompt")
+        assert deferred_editorial_ids(state) == set()

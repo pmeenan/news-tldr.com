@@ -566,3 +566,22 @@ create an exact-path Cache Rule for `/api/brief.json`: **Eligible for cache**,
 **respect origin Cache-Control** for Edge TTL and Browser TTL. Do not apply this
 rule to `/api/sync/`. JSON is not cached by Cloudflare by default. Verify response
 headers include `max-age=300`, then check `CF-Cache-Status` on repeated requests.
+
+### Avoiding repeated editorial work
+
+Publisher eligibility is based on unfiltered articles grouped into an event;
+selected evidence need not quote two publishers. Single-publisher gap admissions
+remain unchanged. Every new draft still receives independent full-Flash verification.
+
+Validation-rejected inputs receive one delayed retry after six hours. After a
+second rejection, automatic retries wait for changed source inputs or prompt
+versions. These deferred rejections are reported separately from runnable backlog;
+`editorial --force --event-id <id>` permits an explicit retry. Transport errors
+retain the normal Flex retry policy. No rejection advances a story checkpoint.
+
+Private evidence is cached under `data/state/editorial-evidence-cache/`, keyed
+by source content, article metadata, event title and extraction version. Reuse
+revalidates exact quotes and does not bypass draft verification. Archived-event
+cache files are removed during editorial processing. Ordinary grouping submits
+only unassigned articles, with relevant existing-event headlines as context;
+forced replay, membership review, coherence review and deduplication remain available.

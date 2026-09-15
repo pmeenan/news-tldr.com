@@ -21,7 +21,7 @@ from pipeline.paths import EVENT_DIR, LOCK_PATH, PROJECT_ROOT, STORY_DIR
 from pipeline.state import StateDB
 from pipeline.util import atomic_write_json, isoformat_z, sanitize_id
 
-AGGREGATION_PROMPT_VERSION = "aggregation-v7"
+AGGREGATION_PROMPT_VERSION = "aggregation-v8"
 AGGREGATION_EXPERIMENT_PROMPT_VERSION = "aggregation-experiment-v6"
 NEWSWORTHINESS_PROMPT_VERSION = "newsworthiness-v1"
 DEDUPLICATION_PRESCREEN_PROMPT_VERSION = "deduplication-prescreen-v1"
@@ -388,6 +388,7 @@ def load_window_articles(
     max_article_rowid: int | None = None,
     category_impact_floors: dict[str, float] | None = None,
     feeds_by_source: dict[str, Any] | None = None,
+    unassigned_only: bool = False,
 ) -> list[ArticleForAggregation]:
     _validate_iso_timestamp(window_start)
     _validate_iso_timestamp(window_end)
@@ -397,6 +398,7 @@ def load_window_articles(
         feeds_by_source = {feed.source_id: feed for feed in load_feeds(enabled_only=False)}
     try:
         rowid_clause = " AND rowid <= ?" if max_article_rowid is not None else ""
+        assignment_clause = " AND event_id IS NULL" if unassigned_only else ""
         params: list[Any] = [window_start, window_end]
         if max_article_rowid is not None:
             params.append(max_article_rowid)
@@ -407,6 +409,7 @@ def load_window_articles(
             WHERE published_at >= ? AND published_at < ?
               AND is_filtered = 0
               {rowid_clause}
+              {assignment_clause}
             ORDER BY published_at DESC, fetched_at DESC
             """,
             params,
@@ -807,8 +810,13 @@ def _process_category_batch_llm(
     candidates: list[dict[str, Any]] = []
     for cat in _candidate_categories_for_group(batch["categories"]):
         for ev in active_rows_by_category.get(cat, []):
-            if any(_headlines_have_cohesion_edge(ev["title"], art.headline) for art in group_articles):
-                candidates.append(ev)
+            anchors = [ev["title"], *ev.get("headlines", [])]
+            matching = [title for title in anchors if any(
+                _headlines_have_cohesion_edge(title, art.headline) for art in group_articles
+            )]
+            if matching:
+                # Match against every retained headline, then send only relevant anchors.
+                candidates.append({**ev, "headlines": list(dict.fromkeys(matching))[:8]})
 
     active_filter = _filter_active_events_with_llm_result(
         articles=group_articles,
@@ -1171,6 +1179,7 @@ def aggregate_once(
                             max_article_rowid=max_article_rowid,
                             category_impact_floors=impact_floors,
                             feeds_by_source=feeds_by_source,
+                            unassigned_only=not force,
                         )
                         if not articles:
                             if not dry_run:
@@ -1201,12 +1210,12 @@ def aggregate_once(
                             continue
 
                         # Pre-fetch active events once per window, partition by category in Python.
-                        since = _recent_event_cutoff()
+                        since = _recent_event_cutoff(deduplication_lookback_hours)
                         all_active_rows = state.conn.execute(
                             """
                             SELECT event_id, title, category, updated_at
                             FROM events
-                            WHERE status = 'active'
+                            WHERE status IN ('active', 'stale')
                               AND updated_at >= ?
                             ORDER BY updated_at DESC
                             """,
@@ -1214,7 +1223,13 @@ def aggregate_once(
                         ).fetchall()
                         active_rows_by_category: dict[str, list[dict[str, Any]]] = {}
                         for row in all_active_rows:
-                            active_rows_by_category.setdefault(row["category"], []).append(dict(row))
+                            context = dict(row)
+                            # Keep established event anchors without reclassifying old reports.
+                            context["headlines"] = [r["headline"] for r in state.conn.execute(
+                                "SELECT headline FROM articles WHERE event_id = ? AND is_filtered = 0 "
+                                "ORDER BY published_at DESC, article_id", (row["event_id"],),
+                            )]
+                            active_rows_by_category.setdefault(row["category"], []).append(context)
 
                         window_group_count = 0
                         window_singleton_count = 0
@@ -1959,7 +1974,8 @@ def _component_matches_existing_event(
     title = str(event.get("title", ""))
     if not _headline_word_set(title):
         return False
-    return any(_headlines_have_cohesion_edge(title, articles[index].headline) for index in indexes)
+    return any(_headlines_have_cohesion_edge(anchor, articles[index].headline)
+               for anchor in [title, *event.get("headlines", [])] for index in indexes)
 
 
 def _headline_cohesion_components(
@@ -2143,12 +2159,13 @@ def _build_active_events_filter_prompt(
 ) -> str:
     headlines = [art.headline for art in articles]
     event_list = [
-        {"event_id": ev["event_id"], "title": ev["title"], "category": ev["category"]}
+        {"event_id": ev["event_id"], "title": ev["title"], "category": ev["category"],
+             "headlines": ev.get("headlines", [])}
         for ev in active_events
     ]
     return (
         "We have a list of new article headlines in the current time window, "
-        "and a list of active news events from the last 48 hours.\n"
+        "and a list of active/recent news events.\n"
         "Identify which active events from the list cover the same underlying "
         "news story/thread as any of the new articles.\n"
         "Be conservative: only match if an event is directly related to at least one article headline.\n"
@@ -2198,11 +2215,12 @@ def _build_grouping_prompt(
     active_events_section = ""
     if active_events:
         active_events_list = [
-            {"event_id": ev["event_id"], "title": ev["title"], "category": ev["category"]}
+            {"event_id": ev["event_id"], "title": ev["title"], "category": ev["category"],
+             "headlines": ev.get("headlines", [])}
             for ev in active_events
         ]
         active_events_section = (
-            "\n\nExisting Active Events (from the last 48 hours):\n"
+            "\n\nExisting Recent Events:\n"
             f"{json.dumps(active_events_list, ensure_ascii=False, separators=(',', ':'))}\n"
             "If any article in the input list belongs to one of these existing events, assign it to that event "
             "by returning its event_id in the 'existing_event_id' property of the group."
@@ -2515,7 +2533,7 @@ def _build_event_payload(
         "title": title,
         "category": category,
         "thread": (existing or {}).get("thread"),
-        "keywords": _keywords_for_articles(articles),
+        "keywords": sorted(set((existing or {}).get("keywords", [])) | set(_keywords_for_articles(articles))),
         "entities": (existing or {}).get("entities", []),
         "created_at": created_at,
         "updated_at": now,

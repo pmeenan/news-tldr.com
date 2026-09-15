@@ -34,6 +34,26 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on September 15, 2026 (Retry, Evidence Cache, Incremental Grouping)
+
+- User clarified that two-publisher eligibility means grouped articles, not two
+  publishers in the evidence ledger. Removed the late draft-source count rejection;
+  gap admissions and eligibility remain. Evidence v3 and full-Flash verification stay.
+- Schema v12 adds input-versioned editorial rejections: one six-hour retry, then
+  defer until inputs/prompts change or explicit force. Shared pending/backfill/health
+  handling prevents these rejections blocking fresh news; old checkpoints remain.
+- Private evidence cache revalidates exact quotes and invalidates on changed source
+  content/metadata, title or extraction version. Verification still runs on each draft.
+- Aggregation v8 groups unassigned reports only, matching against existing unfiltered
+  headlines and sending up to eight relevant anchors. Forced replay and full
+  membership/coherence/dedup checks remain.
+- Verification: 370 tests, Ruff, compileall and diff whitespace checks passed.
+  Source rollout applies to the next scheduled process; changes are uncommitted.
+- Follow-up: compare a complete day of cost, cache hits, deferred rejections and
+  clustering throughput. Final verification is intentionally retained pending a
+  human audit of its rejection precision. No dependencies or frontend changes.
+
+
 ### State on September 13, 2026 (Gemini Passage-ID Evidence v3)
 
 - Evidence extraction now returns up to 12 claims with 1–3 distinct passage

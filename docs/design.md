@@ -1004,8 +1004,8 @@ The same read-only eligibility preview constrains pending counts, preflight,
 health, forced work and backfill. New single-publisher candidates must originate
 within the last 24 hours; an excluded older event can qualify later when a second
 publisher joins. Ordinary runs never clear prior admissions. Deleting an event
-cascades its admission record. Final drafts without a gap admission must cite at
-least two canonical publishers.
+cascades its admission record. Publisher eligibility comes from grouped unfiltered article memberships, not
+from the subset selected for evidence or citations.
 
 `editorial-eligibility --retroactive` initializes existing published coverage with
 an hourly retrospective selection using current memberships and stored material
@@ -1015,3 +1015,24 @@ private story/article artifacts remain intact. Static deployment removes their
 managed public pages/API files, and the archive and curation use only admitted
 coverage. Presentation v27 removes the 2+/All source toggle and ignores legacy
 source preferences/URLs. Read-history New/All and publisher labels remain.
+
+
+### September 15 cost controls
+
+Schema v12 adds `editorial_rejections`, keyed by event with an exact editorial-input
+fingerprint, rejection count and retry time. One retry is allowed after six hours;
+a second rejection waits for changed inputs or prompts. Processing timestamps do
+not reset the count. Pending queries, backfill and health share the deferred-input
+check; explicit force bypasses it. Old error rows are not retroactively suppressed.
+
+Evidence v3 is unchanged. A private per-event cache retains validated ledgers across
+scheduled attempts, including failed drafts. Its signature includes selected source
+content/metadata, event title and evidence version. Cached quotes are revalidated
+against current sources; every draft still receives full-Flash verification. Caches
+for events outside active/stale status are pruned during editorial processing.
+
+Aggregation v8 submits only unassigned, unfiltered reports on normal runs; force
+retains full replay. Candidate matching uses retained event titles and unfiltered
+article headlines, with up to eight matching anchors sent as context. Existing
+event membership and keywords are preserved on extension. Membership adjudication,
+coherence and duplicate review retain their existing safeguards and limits.

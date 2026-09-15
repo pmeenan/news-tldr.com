@@ -18,7 +18,7 @@ def _relative_to_project(path: Path) -> str:
         return str(path)
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 # Each migration is the SQL needed to take the database from the previous
@@ -302,6 +302,14 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         );
         """,
     ),
+    (12, """
+        CREATE TABLE editorial_rejections (
+          event_id TEXT PRIMARY KEY REFERENCES events(event_id) ON DELETE CASCADE,
+          input_signature TEXT NOT NULL,
+          attempts INTEGER NOT NULL,
+          retry_after TEXT NOT NULL
+        );
+    """),
 )
 
 

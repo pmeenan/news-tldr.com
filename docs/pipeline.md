@@ -423,3 +423,18 @@ Use `editorial-eligibility --retroactive --dry-run --verbose` to preview the one
 selection for old coverage, then omit `--dry-run` and publish with `present`.
 This operation makes no LLM calls and retains private artifacts. Subsequent runs
 preserve prior admissions. Schema v11 stores admissions and material freshness.
+
+
+### September 15 execution refinements
+
+Normal aggregation submits unassigned articles only, retaining relevant event
+headlines as context and full membership review before attachment. Forced replay
+continues to load the full window.
+
+Editorial admits stories using grouped publisher memberships; the evidence subset
+has no additional outlet minimum. Validated evidence can be reused from its private
+source/version cache, with exact quotes checked again and fresh draft verification.
+Validation failures get one delayed retry after six hours, then wait for changed
+inputs/prompts or explicit force. Deferred rejections appear in verbose output, run
+stats and health details without blocking fresh work. Existing stories/checkpoints
+remain intact. Transport failures still follow the Flex retry and backlog rules.

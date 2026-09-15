@@ -2230,7 +2230,7 @@ def test_group_articles_with_gemini_with_active_events() -> None:
     )
 
     assert result["groups"][0]["existing_event_id"] == "event-123"
-    assert "Existing Active Events" in client.prompts[0]
+    assert "Existing Recent Events" in client.prompts[0]
     assert "event-123" in client.prompts[0]
 
 
@@ -4461,3 +4461,44 @@ def test_aggregate_once_skips_post_review_when_disabled(tmp_path, monkeypatch) -
     assert stats["post_review_skipped"] is True and calls == []
     stats = aggregate_once(client=FakeJsonGenerator({}))
     assert calls == ["coherence", "dedup"] and "post_review_skipped" not in stats
+
+
+def test_incremental_grouping_only_loads_unassigned_and_preserves_existing_event(tmp_path, monkeypatch) -> None:
+    from dataclasses import replace
+
+    from pipeline.aggregate import _build_grouping_prompt, _component_matches_existing_event
+
+    migrate(tmp_path / "pipeline.db")
+    monkeypatch.setattr("pipeline.aggregate.EVENT_DIR", tmp_path / "events")
+    articles = _articles()[:2]
+    with StateDB(tmp_path / "pipeline.db") as state:
+        for article in articles:
+            path = tmp_path / f"{article.article_id}.json"
+            payload = {"article_id": article.article_id, "source_id": article.source_id,
+                       "source_name": article.source_name, "url": f"https://example.test/{article.article_id}",
+                       "headline": article.headline, "published_at": article.published_at,
+                       "fetched_at": article.published_at, "collection": {}, "fingerprints": {},
+                       "llm_digest": {"summary": article.summary}}
+            path.write_text(json.dumps(payload))
+            state.insert_article(payload, path)
+        apply_grouping_result(articles=articles[:1], groups=[{"article_indexes": [0]}], state=state)
+        eid = state.conn.execute("SELECT event_id FROM events").fetchone()[0]
+        args = dict(window_start="2026-05-24T00:00:00Z", window_end="2026-05-25T00:00:00Z", db=state)
+        loaded = load_window_articles(**args, unassigned_only=True)
+        assert [a.article_id for a in loaded] == ["a2"]
+        assert len(load_window_articles(**args)) == 2  # Explicit replay still includes assigned reports.
+        context = {"event_id": eid, "title": "Company holds annual event", "category": "technology",
+                   "headlines": ["Company unveils new phone"]}
+        assert _component_matches_existing_event([0], loaded, eid, {eid: context})
+        prompt = _build_grouping_prompt(loaded, mode="titles_summaries", valid_categories=["technology"],
+                                        active_events=[context])
+        assert "Company unveils new phone" in prompt
+        apply_grouping_result(articles=loaded, groups=[{"article_indexes": [0], "existing_event_id": eid}],
+                              state=state)
+        assert state.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+        assert state.conn.execute("SELECT article_count FROM events").fetchone()[0] == 2
+        assert load_window_articles(**args, unassigned_only=True) == []
+        state.conn.execute("UPDATE articles SET event_id=NULL, is_filtered=1 WHERE article_id='a2'")
+        assert load_window_articles(**args, unassigned_only=True) == []
+        unrelated = [replace(loaded[0], headline="Team wins playoff game")]
+        assert not _component_matches_existing_event([0], unrelated, eid, {eid: context})

@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from pipeline.config import load_feeds, load_pipeline_config
-from pipeline.editorial import pending_editorial_sql
+from pipeline.editorial import deferred_editorial_ids, pending_editorial_sql
 from pipeline.paths import (
     ACTIVE_STORIES_PATH,
     ARTICLE_DIR,
@@ -451,7 +451,7 @@ def health_report(
                 _check(
                     "pending_editorial_events",
                     pending_editorial == 0,
-                    {"count": pending_editorial},
+                    {"count": pending_editorial, "deferred_rejections": len(deferred_editorial_ids(state))},
                 )
             )
 

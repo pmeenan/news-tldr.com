@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -21,6 +21,7 @@ from pipeline.evidence import (
     REVIEW_VERSION,
     collect_evidence,
     validate_claim_links,
+    validate_evidence,
     verify_story,
 )
 from pipeline.llm import GeminiEmptyResponseError, GeminiResult, create_gemini_client
@@ -262,6 +263,16 @@ def generate_editorial_stories(
     hold_minutes: int = 0,
 ) -> dict[str, Any]:
     admission_stats = admit_gap_stories(state, progress=progress)
+    deferred_count = len(deferred_editorial_ids(state)) if not force else 0
+    if progress and deferred_count:
+        progress(f"editorial: {deferred_count} unchanged rejected event(s) deferred")
+    cache_dir = state.path.parent / "editorial-evidence-cache"
+    active_keys = {hashlib.sha256(row[0].encode()).hexdigest() for row in state.conn.execute(
+        "SELECT event_id FROM events WHERE status IN ('active', 'stale')"
+    )}
+    for path in cache_dir.glob("*.json"):
+        if path.stem not in active_keys:
+            path.unlink(missing_ok=True)
     source_policy = load_source_policy()
     rows = editorial_candidate_rows(
         state=state,
@@ -273,6 +284,7 @@ def generate_editorial_stories(
     stats: dict[str, Any] = {
         **admission_stats,
         "candidates": len(rows),
+        "deferred_rejections": deferred_count,
         "completed": 0,
         "failed": 0,
         "skipped_unchanged": 0,
@@ -319,6 +331,7 @@ def generate_editorial_stories(
                 previous=_read_json(story_dir / f"{event.event_id}.json"),
                 evidence_client=evidence_client, verification_client=verification_client,
                 gate_client=None if force else gate_client,
+                evidence_cache_dir=state.path.parent / "editorial-evidence-cache",
             ): event for event in events
         }
         processed = 0
@@ -357,6 +370,10 @@ def _finish_story(
             if progress:
                 progress(f"{label} unchanged {event.event_id} ({generated['skipped']})")
             return True
+        if generated.get("evidence_reused"):
+            stats["evidence_cache_hits"] = stats.get("evidence_cache_hits", 0) + 1
+            if progress:
+                progress(f"{label} reused evidence {event.event_id}")
         path = story_dir / f"{event.event_id}.json"
         story = build_story_payload(
             event,
@@ -364,15 +381,8 @@ def _finish_story(
             generated_at=generated_at,
             existing_story=_read_json(path),
         )
-        if gap_fill_enabled() and len({publisher_id(a) for a in story["sources"]}) < 2:
-            admitted = state.conn.execute(
-                "SELECT 1 FROM editorial_admissions WHERE event_id = ?", (event.event_id,),
-            ).fetchone()
-            if admitted is None:
-                _record_editorial_usage(state, run_id, generated.get("usage_records") or [])
-                exc = ValueError("multi-publisher event draft cites fewer than two publishers")
-                exc.editorial_validation_rejected = True
-                raise exc
+        with state.conn:
+            state.conn.execute("DELETE FROM editorial_rejections WHERE event_id = ?", (event.event_id,))
         atomic_write_json(path, story)
         with state.conn:
             state.conn.execute(
@@ -394,6 +404,7 @@ def _finish_story(
         stats[f"{prefix}failed"] += 1
         if getattr(exc, "editorial_validation_rejected", False):
             stats[f"{prefix}rejected_event_ids"].append(event.event_id)
+            _record_rejection(state, event)
         _record_editorial_usage(state, run_id, getattr(exc, "editorial_usage_records", []))
         state.record_error(run_id, "editorial", "event", event.event_id, None, exc)
         if progress:
@@ -431,7 +442,7 @@ def editorial_backfill_rows(
             (error_cutoff,),
         ).fetchall()
     }
-    excluded = set(exclude_event_ids) | recently_failed
+    excluded = set(exclude_event_ids) | recently_failed | deferred_editorial_ids(state, now=current)
     eligible = eligible_event_ids(state, now=current)
     rows = state.conn.execute(
         """
@@ -525,6 +536,7 @@ def backfill_editorial_stories(
                     generate_story, event, client=client,
                     previous=_read_json(story_dir / f"{event.event_id}.json"),
                     evidence_client=evidence_client, verification_client=verification_client,
+                    evidence_cache_dir=state.path.parent / "editorial-evidence-cache",
                 )
                 in_flight[future] = event
             if not in_flight:
@@ -571,6 +583,10 @@ def pending_editorial_sql(
         )
         params.append(cutoff)
     if state is not None:
+        deferred = deferred_editorial_ids(state, now=now)
+        if deferred:
+            clause += " AND event_id NOT IN (" + ",".join("?" for _ in deferred) + ")"
+            params.extend(sorted(deferred))
         eligible = eligible_event_ids(state, now=now)
         if eligible is not None:
             clause += " AND event_id IN (" + (",".join("?" for _ in eligible) or "NULL") + ")"
@@ -716,6 +732,76 @@ def _load_editorial_event(
     )
 
 
+def editorial_input_signature(event: EditorialEvent) -> str:
+    data = asdict(event)
+    # Processing timestamps and lifecycle changes do not constitute new reporting.
+    data.pop("updated_at")
+    data.pop("status")
+    versions = [EVIDENCE_VERSION, REVIEW_VERSION, EDITORIAL_PROMPT_VERSION,
+                EDITORIAL_FRAMING_PROMPT_VERSION, EDITORIAL_COMPACT_PROMPT_VERSION,
+                EDITORIAL_FRAMING_COMPACT_PROMPT_VERSION, "event-publisher-eligibility-v2"]
+    return hashlib.sha256(json.dumps([versions, data], sort_keys=True).encode()).hexdigest()
+
+
+def _record_rejection(state: StateDB, event: EditorialEvent) -> None:
+    signature = editorial_input_signature(event)
+    prior = state.conn.execute(
+        "SELECT attempts FROM editorial_rejections WHERE event_id = ? AND input_signature = ?",
+        (event.event_id, signature),
+    ).fetchone()
+    attempts = (prior["attempts"] if prior else 0) + 1
+    retry_after = isoformat_z(datetime.now(UTC) + timedelta(hours=6))
+    with state.conn:
+        state.conn.execute(
+            "INSERT OR REPLACE INTO editorial_rejections VALUES (?, ?, ?, ?)",
+            (event.event_id, signature, attempts, retry_after),
+        )
+
+
+def deferred_editorial_ids(state: StateDB, *, now: datetime | None = None) -> set[str]:
+    """One delayed retry, then wait for changed inputs; shared by health and run gates."""
+    current = isoformat_z(now or datetime.now(UTC))
+    rows = state.conn.execute(
+        "SELECT e.*, r.input_signature FROM events e JOIN editorial_rejections r USING(event_id) "
+        "WHERE e.status IN ('active', 'stale') AND (r.attempts >= 2 OR r.retry_after > ?)",
+        (current,),
+    ).fetchall()
+    config = load_pipeline_config().editorial
+    policy = load_source_policy()
+    deferred = set()
+    for row in rows:
+        try:
+            event = _load_editorial_event(
+                state, row, source_policy=policy,
+                article_char_limit=int(config.get("article_char_limit", DEFAULT_ARTICLE_CHAR_LIMIT)),
+                event_char_limit=int(config.get("event_char_limit", DEFAULT_EVENT_CHAR_LIMIT)),
+            )
+        except (ValueError, OSError):
+            continue
+        if editorial_input_signature(event) == row["input_signature"]:
+            deferred.add(event.event_id)
+    return deferred
+
+
+def evidence_input_signature(event: EditorialEvent) -> str:
+    data = {"title": event.title, "articles": [asdict(a) for a in event.articles]}
+    return hashlib.sha256(json.dumps([EVIDENCE_VERSION, data], sort_keys=True).encode()).hexdigest()
+
+
+def _cached_evidence(event: EditorialEvent, directory: Path | None) -> tuple[Any, Path | None]:
+    if directory is None:
+        return None, None
+    path = directory / (hashlib.sha256(event.event_id.encode()).hexdigest() + ".json")
+    cached = _read_json(path)
+    if cached and cached.get("signature") == evidence_input_signature(event):
+        try:
+            ledger = validate_evidence({"claims": cached["ledger"]}, event)
+            return ledger, path
+        except (ValueError, KeyError, TypeError):
+            pass
+    return None, path
+
+
 def _new_article_ids(event: EditorialEvent, previous: dict[str, Any]) -> list[str]:
     """Article IDs attached to the event since the previous story was generated."""
     known = {
@@ -795,6 +881,7 @@ def generate_story(
     evidence_client: JsonGenerator | None = None,
     verification_client: JsonGenerator | None = None,
     gate_client: JsonGenerator | None = None,
+    evidence_cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Generate one story. ``evidence_client`` (bulk tier) extracts passages with a
     fallback to ``client`` when its extraction fails validation twice;
@@ -815,22 +902,28 @@ def generate_story(
                     "skipped": "no_new_articles" if gate_result is None else "no_material_update",
                     "usage_records": records,
                 }
-        try:
-            ledger, evidence_result = collect_evidence(event, extractor)
-        except ValueError as exc:
-            if pending := getattr(exc, "editorial_unrecorded_result", None):
-                record(*pending)
+        ledger, cache_path = _cached_evidence(event, evidence_cache_dir)
+        evidence_reused = ledger is not None
+        if ledger is None:
             try:
-                ledger, evidence_result = collect_evidence(event, extractor, feedback=str(exc))
-            except ValueError as retry_exc:
-                if extractor is client:
-                    raise
-                # The bulk extractor could not select valid evidence; give the
-                # full-Flash client one attempt before failing the story.
-                if pending := getattr(retry_exc, "editorial_unrecorded_result", None):
+                ledger, evidence_result = collect_evidence(event, extractor)
+            except ValueError as exc:
+                if pending := getattr(exc, "editorial_unrecorded_result", None):
                     record(*pending)
-                ledger, evidence_result = collect_evidence(event, client, feedback=str(retry_exc))
-        record(evidence_result, EVIDENCE_VERSION)
+                try:
+                    ledger, evidence_result = collect_evidence(event, extractor, feedback=str(exc))
+                except ValueError as retry_exc:
+                    if extractor is client:
+                        raise
+                    # The bulk extractor could not select valid evidence; give the
+                    # full-Flash client one attempt before failing the story.
+                    if pending := getattr(retry_exc, "editorial_unrecorded_result", None):
+                        record(*pending)
+                    ledger, evidence_result = collect_evidence(event, client, feedback=str(retry_exc))
+            record(evidence_result, EVIDENCE_VERSION)
+            if cache_path is not None:
+                atomic_write_json(cache_path, {"signature": evidence_input_signature(event), "ledger": ledger,
+                                               "model": evidence_result.model})
         supported_ids = {e["article_id"] for c in ledger for e in c["evidence"]}
         selected_event = replace(event, articles=tuple(a for a in event.articles if a.article_id in supported_ids))
         framing_eligible = _political_framing_eligible(selected_event)
@@ -886,6 +979,7 @@ def generate_story(
             "usage": {key: sum(int(r["usage"].get(key) or 0) for r in records)
                       for key in ("promptTokenCount", "candidatesTokenCount")},
             "usage_records": records, "evidence": ledger, "review": review,
+            "evidence_reused": evidence_reused,
         }
     except Exception as exc:
         if pending := getattr(exc, "editorial_unrecorded_result", None):
