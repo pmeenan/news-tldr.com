@@ -306,9 +306,16 @@ def generate_editorial_stories(
     if not rows:
         return stats
 
+    stats["frozen_summaries"] = 0
     events: list[EditorialEvent] = []
     for row in rows:
         try:
+            if not force and _refresh_frozen_sources(state, row["event_id"], story_dir):
+                stats["frozen_summaries"] += 1
+                stats["skipped_unchanged"] += 1
+                if progress:
+                    progress(f"editorial: frozen summary, refreshed sources {row['event_id']}")
+                continue
             events.append(
                 _load_editorial_event(
                     state,
@@ -343,6 +350,38 @@ def generate_editorial_stories(
                 progress=progress, label=f"editorial: {processed}/{len(events)}",
             )
     return stats
+
+
+def _refresh_frozen_sources(state: StateDB, event_id: str, story_dir: Path) -> bool:
+    """Keep verified prose and evidence unchanged; add grouped coverage without LLM calls."""
+    path = story_dir / f"{event_id}.json"
+    story = _read_json(path)
+    if not story or story.get("_pending_coherence"):
+        return False
+    verification = story.get("evidence_verification")
+    if not isinstance(verification, dict) or verification.get("approved") is not True:
+        return False
+    rows = state.conn.execute(
+        "SELECT article_id, source_id, source_name, headline, url FROM articles "
+        "WHERE event_id = ? AND is_filtered = 0 ORDER BY published_at, article_id",
+        (event_id,),
+    ).fetchall()
+    sources = list(story.get("sources") or [])
+    known = {source["article_id"] for source in sources}
+    for row in rows:
+        if row["article_id"] not in known:
+            source = dict(row)
+            source["publisher_id"] = publisher_id(source)
+            source["reporting_origin"] = None
+            sources.append(source)
+            known.add(row["article_id"])
+    if sources != story.get("sources"):
+        # These are additional coverage links, not new evidence for the frozen claims.
+        atomic_write_json(path, {**story, "sources": sources})
+    with state.conn:
+        state.conn.execute("DELETE FROM editorial_rejections WHERE event_id = ?", (event_id,))
+    state.mark_event_editorial_completed(event_id, isoformat_z())
+    return True
 
 
 def _finish_story(

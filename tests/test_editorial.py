@@ -835,7 +835,7 @@ def test_update_gate_skips_regeneration_when_new_reports_add_nothing() -> None:
     assert "payload" in regenerated and strict_gate.calls == []
 
 
-def test_skipped_stories_advance_checkpoint_without_rewriting(tmp_path: Path) -> None:
+def test_frozen_stories_extend_sources_without_llm_calls(tmp_path: Path) -> None:
     class GateOnly(FakeEditorialClient):
         def generate_json(self, **kwargs: Any) -> GeminiResult:
             self.calls.append(kwargs)
@@ -851,7 +851,7 @@ def test_skipped_stories_advance_checkpoint_without_rewriting(tmp_path: Path) ->
     path.write_text(json.dumps({"headline": "Verified story", "evidence_verification": {"approved": True},
                                 "sources": [], "claim_sources": {}, "key_facts": [], "briefing": []}))
     with StateDB(db_path) as state:
-        _insert_event_and_articles(state, tmp_path)
+        _insert_event_and_articles(state, tmp_path, filtered_article=True)
         state.start_run("gate", "editorial")
         gate = GateOnly({})
         stats = generate_editorial_stories(state=state, run_id="gate", concurrency=1,
@@ -859,8 +859,31 @@ def test_skipped_stories_advance_checkpoint_without_rewriting(tmp_path: Path) ->
                                           story_dir=story_dir)
         assert stats["skipped_unchanged"] == 1 and stats["completed"] == 0 and stats["failed"] == 0
         assert state.conn.execute("SELECT last_editorial_at FROM events").fetchone()[0] is not None
-        assert state.conn.execute("SELECT COUNT(*) FROM llm_usage").fetchone()[0] == 1
+        assert state.conn.execute("SELECT COUNT(*) FROM llm_usage").fetchone()[0] == 0
+        assert gate.calls == []
+        assert stats["frozen_summaries"] == 1
     assert json.loads(path.read_text())["headline"] == "Verified story"
+
+    story = json.loads(path.read_text())
+    assert [source["article_id"] for source in story["sources"]] == ["a1"]
+    assert story["claim_sources"] == {}
+    assert story["briefing"] == []
+    assert "updated_at" not in story
+
+
+@pytest.mark.parametrize("approved,pending", [(False, False), (True, True)])
+def test_freeze_does_not_preserve_unverified_or_contaminated_story(tmp_path, approved, pending):
+    from pipeline.editorial import _refresh_frozen_sources
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    path = tmp_path / "event-1.json"
+    original = {"evidence_verification": {"approved": approved}, "_pending_coherence": pending}
+    path.write_text(json.dumps(original))
+    with StateDB(db_path) as state:
+        _insert_event_and_articles(state, tmp_path)
+        assert not _refresh_frozen_sources(state, "event-1", tmp_path)
+    assert json.loads(path.read_text()) == original
 
 
 def test_evidence_extractor_falls_back_to_full_client_after_two_failures() -> None:

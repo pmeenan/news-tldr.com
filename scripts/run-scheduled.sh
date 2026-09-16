@@ -3,6 +3,13 @@
 set -uo pipefail
 
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# Cron wakes hourly in the host timezone; decide the cadence in Eastern time.
+if [[ "${1:-}" == "--scheduled" ]]; then
+  if ! "$project_dir/.venv/bin/python" "$project_dir/pipeline/schedule.py"; then
+    exit 0
+  fi
+fi
+
 state_dir="$project_dir/data/state"
 log_file="$state_dir/scheduled-pipeline.log"
 old_log_file="$state_dir/scheduled-pipeline.log.1"

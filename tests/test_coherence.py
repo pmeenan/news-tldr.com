@@ -191,9 +191,101 @@ def test_split_preserves_prior_read_identity_and_underlying_news_dates(tmp_path:
         state.assign_articles_to_event(["stylus", "ceo"], "original")
         state.start_run("partition", "aggregation")
         stats = coherence.review_event_coherence(state=state, client=Client(), run_id="partition", limit=1)
-        assert stats == {"reviewed": 1, "split": 1, "failed": 0}
+        assert stats == {"reviewed": 1, "split": 1, "failed": 0, "cache_hits": 0}
         original_row = state.conn.execute("SELECT updated_at,status FROM events WHERE event_id='original'").fetchone()
         assert tuple(original_row) == (old_date, "stale")
         assert state.conn.execute("SELECT event_id FROM articles WHERE article_id='ceo'").fetchone()[0] != "original"
     retained = json.loads((story_dir / "original.json").read_text())
     assert retained == {**prior, "_pending_coherence": True}
+
+
+def test_coherence_cache_survives_rebuild_and_rechecks_changed_inputs(tmp_path, monkeypatch):
+    import json
+    from datetime import UTC, datetime
+
+    import pipeline.coherence as coherence
+    from pipeline.aggregate import ArticleForAggregation, _build_event_payload
+    from pipeline.llm import GeminiResult
+    from pipeline.util import isoformat_z
+
+    event_dir = tmp_path / "events"
+    event_dir.mkdir()
+    monkeypatch.setattr(coherence, "EVENT_DIR", event_dir)
+    path = event_dir / "original.json"
+    now = isoformat_z(datetime.now(UTC))
+    event = {"event_id": "original", "title": "Officials announce launch", "category": "technology",
+             "created_at": now, "updated_at": now, "article_ids": ["a", "b"], "article_count": 2}
+    path.write_text(json.dumps(event))
+    db = tmp_path / "pipeline.db"
+    migrate(db)
+
+    class Client:
+        calls = 0
+
+        def generate_json(self, **kwargs):
+            self.calls += 1
+            return GeminiResult(payload={"confidence": 0.99, "groups": [{"article_indexes": [0, 1]}]},
+                                model="gemini-3.6-flash", usage={}, elapsed_ms=1)
+
+    client = Client()
+    with StateDB(db) as state:
+        state.upsert_event(event, path)
+        state.start_run("cache", "aggregation")
+        articles = []
+        for aid in ("b", "a", "excluded"):
+            article_path = tmp_path / f"{aid}.json"
+            article_path.write_text(json.dumps({"llm_digest": {
+                "summary": "The launch happened today.", "key_facts": []}}))
+            data = {"article_id": aid, "source_id": aid, "source_name": aid,
+                    "url": f"https://example.test/{aid}", "headline": "Officials announce launch",
+                    "published_at": now, "fetched_at": now, "content_type": "news",
+                    "collection": {}, "fingerprints": {}}
+            state.insert_article(data, article_path)
+            state.assign_articles_to_event([aid], "original")
+            if aid != "excluded":
+                articles.append(ArticleForAggregation(article_id=aid, source_id=aid, source_name=aid,
+                                headline=data["headline"], summary=None, published_at=now,
+                                article_path=str(article_path)))
+        state.conn.execute("UPDATE articles SET is_filtered=1 WHERE article_id='excluded'")
+        state.conn.commit()
+        assert coherence.review_event_coherence(state=state, client=client, run_id="cache")["reviewed"] == 1
+        reviewed = json.loads(path.read_text())
+        rebuilt = _build_event_payload(event_id="original", event_path=path, articles=articles,
+                                       existing=reviewed, feeds_by_source={})
+        assert rebuilt["coherence_review"] == reviewed["coherence_review"]
+        rebuilt["title"] = "A changed event title"
+        path.write_text(json.dumps(rebuilt))
+        state.upsert_event(rebuilt, path)
+        stats = coherence.review_event_coherence(state=state, client=client, run_id="cache")
+        assert stats["cache_hits"] == 1 and stats["reviewed"] == 0 and client.calls == 1
+        # A source's actual review summary changes, even though its ID does not.
+        (tmp_path / "a.json").write_text(json.dumps({"llm_digest": {
+            "summary": "An unrelated new appointment.", "key_facts": []}}))
+        assert coherence.review_event_coherence(state=state, client=client, run_id="cache")["reviewed"] == 1
+        assert client.calls == 2
+        # Removing a member cannot reuse the previous whole-event assessment.
+        from types import SimpleNamespace
+        first = SimpleNamespace(article_id="a", headline="h", summary="s", digest_summary=None)
+        second = SimpleNamespace(article_id="b", headline="h", summary="s", digest_summary=None)
+        assert coherence._coherence_signature([first]) != coherence._coherence_signature([second])
+
+
+def test_legacy_coherence_cache_requires_unchanged_digest_provenance():
+    import hashlib
+    import json
+
+    from pipeline.coherence import COHERENCE_VERSION, _legacy_review_unchanged
+
+    rows = [{"article_id": "b", "published_at": "2026-09-15T11:00:00Z",
+             "digest_generated_at": "2026-09-15T12:00:00Z"},
+            {"article_id": "a", "published_at": "2026-09-15T10:00:00Z",
+             "digest_generated_at": "2026-09-15T12:00:00Z"}]
+    stamp = {"signature": hashlib.sha256(json.dumps([COHERENCE_VERSION, ["a", "b"]]).encode()).hexdigest(),
+             "prompt_version": COHERENCE_VERSION, "reviewed_at": "2026-09-15T13:00:00Z"}
+    assert _legacy_review_unchanged(stamp, rows)
+    assert not _legacy_review_unchanged({**stamp, "prompt_version": "older"}, rows)
+    assert not _legacy_review_unchanged(stamp, rows[:1])
+    rows[0]["digest_generated_at"] = "2026-09-15T14:00:00Z"
+    assert not _legacy_review_unchanged(stamp, rows)
+    rows[0]["digest_generated_at"] = None
+    assert not _legacy_review_unchanged(stamp, rows)

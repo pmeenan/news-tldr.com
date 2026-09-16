@@ -34,6 +34,72 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+
+### State on September 16, 2026 (Grouping Confidence and Coherence Cache)
+
+- Aggregation v9 requires per-article grouping_confidence, finite numeric 0–1.
+  Private article JSON llm_grouping stores the original model proposal, score,
+  model, prompt version and time before deterministic/membership guards. Scores
+  are observational only; no confidence-based routing or quality bypass. Existing
+  event-level confidence=0.7 is still a legacy default, not a model score.
+- Event payload rebuilds preserve coherence_review. Signatures now cover exact
+  bounded review text plus article IDs in stable order. Split subsets carry their
+  own signatures. Legacy cache entries can be promoted without paid calls when
+  membership, prompt version and digest timestamps prove unchanged inputs under
+  frozen article collection. Missing provenance requires bounded re-review.
+  Coherence stats expose cache_hits; full-Flash partition safeguards remain.
+- Duplicate tightening was tested, NOT enabled: hard overlap removed known merges;
+  conservative Lite development sample 240 and held-out 192 still had a confirmed
+  Meta safety-story false rejection on fresh Flash adjudication. Historical anchor
+  reconstruction also exposed noisy old merge labels. All trial code/results are
+  ignored data/evaluations/, not production. Report:
+  data/evaluations/screening-coherence-confidence-20260916.md.
+- Retained first-published story counts do not consistently exceed 50/category/day;
+  no impact floors changed. Local evaluation explicitly on hold per user.
+- Verification: 392 tests, Ruff, compileall, diff checks, live six-article Gemini
+  confidence smoke test; all evaluation calls recorded under routing_evaluation,
+  total $0.06168731. Source applies next scheduled run; no active lock at verification.
+  No dependencies, frontend changes or schema migration. Changes uncommitted.
+
+
+### State on September 16, 2026 (Frozen Summaries and Eastern Batches)
+
+- Ordinary editorial updates retain approved summaries and append newly grouped,
+  unfiltered source references with zero LLM calls. Text, evidence, claim links,
+  timestamps and reader revisions stay unchanged; the checkpoint advances.
+  Explicit force and pending coherence repair still regenerate. Existing stories
+  freeze at their current version, since older prose was overwritten.
+- Installed cron wakes at :00 hourly; the wrapper's `--scheduled` timezone gate
+  admits 2am and every two hours from 6am to 10pm America/New_York (ten/day).
+  Spring's nonexistent 2am slot is skipped; manual wrapper calls remain immediate.
+  Health maximum pipeline age is six hours. Unrelated crontab entries preserved;
+  prior crontab saved in ignored upgrade-backups/frozen-schedule-20260916T210406Z/.
+- Verification: 381 tests, Ruff, compileall, shell syntax and diff whitespace
+  checks passed; installed crontab was read back and matched. Next run is 6pm ET
+  September 16. No paid evaluation, dependencies or frontend change.
+- Follow-up: measure complete days under the new cadence; source remains uncommitted.
+
+### State on September 16, 2026 (Duplicate Cache and Rollback Measurement)
+
+- Schema v13 stores exact review-input signatures and candidate priority. Legacy
+  decisions retain timestamp matching until refreshed; new entries ignore mere
+  timestamp changes but invalidate on actual review text changes.
+- Prescreen v2 uses a canonical request/cache payload and stable binary hash-prefix
+  partitions. Shared anchors remain for recall; their real changes still invalidate
+  dependent chunks. No candidate thresholds or verification models were weakened.
+- Event keywords are capped at 12 by frequency across unfiltered members; existing
+  overgrown lists are corrected for discovery. Aggregation stats record cache
+  hits, prescreen requests, selected/deferred pairs and decisions by priority.
+- `aggregation.incremental_grouping=false` restores full-window grouping without
+  discarding other cost/quality improvements. The read-only comparison script uses
+  equal 24-hour windows and total production cost, excluding routing evaluations.
+- User's acceptance condition: beat the $7.34393/day pre-incremental reference after
+  a full day; otherwise revert incremental grouping. Reference had nine grouping
+  passes, so report throughput alongside cost. No automatic rollback is installed.
+- Verification: 377 tests passed; final lint/compile and production checks recorded
+  in the task. Changes are uncommitted and apply to the next scheduled process.
+
+
 ### State on September 15, 2026 (Retry, Evidence Cache, Incremental Grouping)
 
 - User clarified that two-publisher eligibility means grouped articles, not two

@@ -238,9 +238,12 @@ they fit; long sentences
 use overlapping passages to retain context. Lite receives one repair attempt,
 then one full-Flash extraction attempt if it fails twice.
 Full Flash drafts from the digests plus that ledger rather than the full
-article text, and full Flash verifies. When an already verified story's event
-gains articles, a Flash-Lite gate first checks whether the new reports add a
-material fact; if not, the checkpoint advances and the story is left as is.
+article text, and full Flash verifies. Verified summaries then stay frozen:
+new grouped articles extend the source list without evidence extraction, drafting,
+verification, or an update-gate call. Claim evidence, summary text, timestamps and
+reader revision stay unchanged. Additional links indicate grouped coverage, not
+new claim-level verification. Explicit `editorial --force` and repairs of detected
+incoherent groups can still replace a summary.
 Brand-new single-article events wait `editorial.single_source_hold_minutes`
 (production 60) before their first story so a second outlet or a merge can
 arrive first; held events are not counted as pending by the run gate or the
@@ -484,7 +487,12 @@ Summarize recorded model calls and token usage by stage, model, and prompt:
 ```
 
 The production machine runs `scripts/run-scheduled.sh` from the user's crontab
-at minute 45 of every hour. The wrapper runs the complete pipeline, publishes
+with `--scheduled` at minute zero each hour. An America/New_York timezone check
+admits only 2am and every two hours from 6am through 10pm Eastern (ten runs/day).
+Daylight saving follows the timezone database; the nonexistent spring 2am slot
+is skipped. Direct invocation without `--scheduled` still runs immediately.
+The health age allowance is six hours for overnight gaps.
+The wrapper runs the complete pipeline, publishes
 successful output, runs the health check, rotates its log at 10 MiB, and exits
 nonzero on pipeline or health failure. Detailed output is stored in
 `data/state/scheduled-pipeline.log`; cron's normal mail/error path provides the
@@ -529,8 +537,7 @@ Run verification:
 research download refreshed after every scheduled pipeline job, including jobs
 that report partial processing failures. It contains a rolling **12-hour** UTC
 window for twice-daily consumption in any timezone. It is not tied to Eastern
-release times. The hourly job starts at :45 to normally finish before the next
-hour (including 6 a.m. and 4 p.m. Eastern); delays remain possible.
+release times. It refreshes after each Eastern-time scheduled batch; completion delays remain possible.
 
 Only published, active-index stories citing at least **two distinct canonical
 publishers** qualify. Multiple category feeds from one publisher count once;
@@ -592,3 +599,53 @@ revalidates exact quotes and does not bypass draft verification. Archived-event
 cache files are removed during editorial processing. Ordinary grouping submits
 only unassigned articles, with relevant existing-event headlines as context;
 forced replay, membership review, coherence review and deduplication remain available.
+
+
+### Comparing cost and rolling back incremental grouping
+
+`aggregation.incremental_grouping` defaults to `true`. Set it to `false` in
+`config/pipeline.json` to restore full-window grouping on the next scheduled run.
+This keeps the evidence, rejection-retry and duplicate-cache improvements; it
+does not force old stories to regenerate or alter publisher eligibility.
+
+Compare equal, complete windows with the read-only report (timestamps require a timezone):
+
+```bash
+./.venv/bin/python scripts/compare-pipeline-costs.py --verbose \
+  --baseline-start 2026-09-14T12:20:00Z \
+  --candidate-start <first-run-timestamp-after-rollout>
+```
+
+Replace the candidate timestamp with the rollout's first scheduled-run timestamp.
+The default window is 24 hours. The report excludes evaluation calls, includes
+all production stages and shows processing volume alongside cost. An unfinished
+window cannot pass or fail the comparison. The September 14–15 pre-incremental
+reference cost is $7.34393; it completed only nine aggregation passes, so inspect
+throughput too. If complete-window total cost does not beat the reference, the
+report recommends disabling incremental grouping; it does not change config.
+
+New duplicate decisions cache the exact review prompt instead of invalidating
+on processing timestamps alone. Legacy entries retain their previous timestamp
+rules until replaced by a fresh review. Prescreen cache keys use the exact same
+payload as requests; stable hash-prefix partitions avoid population-wide reshuffles.
+Shared anchor comparisons remain enabled for cross-partition discovery.
+
+
+### Grouping confidence and coherence reuse
+
+Aggregation v9 requests `grouping_confidence` (0–1) for each article's proposed
+group placement, including a singleton or an existing-event attachment. This is
+not factual confidence or impact. The score and original proposed article IDs /
+existing-event ID are retained in private article JSON `llm_grouping`, with model,
+prompt version and timestamp. Later guards may change placement; the saved score
+continues to describe the original proposal. It does not yet control filtering,
+Flash fallback or bypass of membership/coherence checks. Existing articles are not
+regrouped just to obtain scores; the event-level 0.7 remains a legacy default.
+
+Event rebuilding preserves coherence-review metadata. Cache signatures cover the
+reviewed article IDs and exact bounded headline/summary inputs in stable order;
+metadata-only changes reuse the review. Legacy entries can be promoted when
+membership and digest timestamps establish unchanged inputs. Missing provenance
+requires review under the existing per-run cap. Coherence stats include cache hits.
+The September 16 weak-pair screening pilot failed a held-out merge check, so no
+new automatic rejection screen was enabled.

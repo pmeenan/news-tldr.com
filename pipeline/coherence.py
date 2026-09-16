@@ -15,6 +15,37 @@ from pipeline.util import atomic_write_json, isoformat_z
 COHERENCE_VERSION = "event-coherence-v1"
 
 
+def _coherence_inputs(articles: Any) -> list[dict[str, Any]]:
+    return [{"index": i, "headline": a.headline, "summary": (a.digest_summary or a.summary or "")[:650]}
+            for i, a in enumerate(articles)]
+
+
+def _coherence_signature(articles: Any) -> str:
+    # Article identity plus precisely the content sent for review. Timestamps and
+    # event metadata do not affect the decision; changed digest text does.
+    return hashlib.sha256(json.dumps(
+        [COHERENCE_VERSION, [a.article_id for a in articles], _coherence_inputs(articles)],
+        ensure_ascii=False, sort_keys=True,
+    ).encode()).hexdigest()
+
+
+def _legacy_review_unchanged(stamp: dict[str, Any], rows: Any) -> bool:
+    """Promote a membership-only cache only when no digest changed since its review.
+
+    Collected source content is frozen. Missing provenance requires a fresh review.
+    """
+    if stamp.get("signature_version") or stamp.get("prompt_version") != COHERENCE_VERSION:
+        return False
+    reviewed_at = stamp.get("reviewed_at")
+    if not isinstance(reviewed_at, str) or not all(
+        row["digest_generated_at"] and row["digest_generated_at"] <= reviewed_at for row in rows
+    ):
+        return False
+    ordered = sorted(rows, key=lambda row: (row["published_at"] or "", row["article_id"]))
+    legacy = hashlib.sha256(json.dumps([COHERENCE_VERSION, [r["article_id"] for r in ordered]]).encode()).hexdigest()
+    return stamp.get("signature") == legacy
+
+
 def validate_partition(payload: Any, count: int) -> list[list[int]]:
     groups = payload.get("groups") if isinstance(payload, dict) else None
     if not isinstance(groups, list) or not groups or len(groups) > count:
@@ -53,7 +84,7 @@ def review_event_coherence(
         "AND updated_at >= ? AND article_count >= 2 ORDER BY article_count DESC, updated_at DESC",
         (cutoff,),
     ).fetchall()
-    stats = {"reviewed": 0, "split": 0, "failed": 0}
+    stats = {"reviewed": 0, "split": 0, "failed": 0, "cache_hits": 0}
     for row in rows:
         if stats["reviewed"] >= limit:
             break
@@ -61,28 +92,33 @@ def review_event_coherence(
         if not old:
             continue
         article_rows = state.conn.execute(
-            "SELECT article_id, source_id, source_name, headline, summary, published_at, article_path, event_id "
-            "FROM articles WHERE event_id = ? AND is_filtered = 0 ORDER BY published_at, article_id",
+            "SELECT article_id, source_id, source_name, headline, summary, published_at, article_path, event_id, "
+            "digest_generated_at "
+            "FROM articles WHERE event_id = ? AND is_filtered = 0 ORDER BY article_id",
             (row["event_id"],),
         ).fetchall()
-        signature = hashlib.sha256(
-            json.dumps([COHERENCE_VERSION, [r["article_id"] for r in article_rows]]).encode()
-        ).hexdigest()
-        if old.get("coherence_review", {}).get("signature") == signature or len(article_rows) < 2:
+        if len(article_rows) < 2:
             continue
-        stats["reviewed"] += 1
-        if progress:
-            progress(
-                f"coherence: {stats['reviewed']}/{limit} reviewing {row['event_id']} ({len(article_rows)} articles)"
-            )
         try:
             articles = [
-                ArticleForAggregation(**dict(r), **_load_digest_fields(r["article_path"])) for r in article_rows
+                ArticleForAggregation(**{k: v for k, v in dict(r).items() if k != "digest_generated_at"},
+                                      **_load_digest_fields(r["article_path"])) for r in article_rows
             ]
-            inputs = [
-                {"index": i, "headline": a.headline, "summary": (a.digest_summary or a.summary or "")[:650]}
-                for i, a in enumerate(articles)
-            ]
+            signature = _coherence_signature(articles)
+            previous_review = old.get("coherence_review", {})
+            if previous_review.get("signature") == signature or _legacy_review_unchanged(previous_review, article_rows):
+                stats["cache_hits"] += 1
+                if previous_review.get("signature") != signature:
+                    old["coherence_review"] = {**previous_review, "signature": signature,
+                                               "signature_version": "inputs-v1"}
+                    atomic_write_json(EVENT_DIR / f"{row['event_id']}.json", old)
+                continue
+            stats["reviewed"] += 1
+            if progress:
+                progress(
+                    f"coherence: {stats['reviewed']}/{limit} reviewing {row['event_id']} ({len(article_rows)} articles)"
+                )
+            inputs = _coherence_inputs(articles)
             feedback = ""
             for attempt in range(2):
                 result = client.generate_json(
@@ -133,6 +169,7 @@ def review_event_coherence(
                     feedback = "\nPrevious response failed validation: " + str(exc) + ". Recheck all indexes."
             stamp = {
                 "signature": signature,
+                "signature_version": "inputs-v1",
                 "prompt_version": COHERENCE_VERSION,
                 "model": result.model,
                 "reviewed_at": isoformat_z(),
@@ -182,9 +219,7 @@ def review_event_coherence(
                 payload["coherence_review"] = {
                     **stamp,
                     "split_from": row["event_id"],
-                    "signature": hashlib.sha256(
-                        json.dumps([COHERENCE_VERSION, [a.article_id for a in subset]]).encode()
-                    ).hexdigest(),
+                    "signature": _coherence_signature(subset),
                 }
                 replacements.append((payload, path))
             previous_path = STORY_DIR / f"{row['event_id']}.json"

@@ -611,3 +611,19 @@ def test_record_llm_usage_stores_tier_thinking_cache_and_cost(tmp_path: Path, mo
         assert state.get_cached_prescreen_pairs(chunk_signature="s", prompt_version="other") is None
         assert state.prune_cached_prescreens(older_than="2999-01-01T00:00:00Z") == 1
         assert state.get_cached_prescreen_pairs(chunk_signature="s", prompt_version="v") is None
+
+
+def test_dedup_exact_signature_and_legacy_cache_transition(tmp_path: Path) -> None:
+    migrate(tmp_path / "db")
+    with StateDB(tmp_path / "db") as state:
+        keys = dict(event_a="a", event_b="b", event_a_updated_at="old", event_b_updated_at="old",
+                    prompt_version="v")
+        state.record_deduplication_review(**keys, should_merge=False, confidence=1, rationale="different", model="m")
+        assert state.get_cached_deduplication_review(**keys, input_signature="payload")
+        newer = {**keys, "event_a_updated_at": "new"}
+        assert not state.get_cached_deduplication_review(**newer, input_signature="payload")
+        state.record_deduplication_review(**newer, should_merge=False, confidence=1, rationale="different", model="m",
+                                          input_signature="payload", candidate_priority=0)
+        assert state.get_cached_deduplication_review(**keys, input_signature="payload")
+        assert not state.get_cached_deduplication_review(**newer, input_signature="changed")
+        assert not state.get_cached_deduplication_review(**{**newer, "prompt_version": "v2"}, input_signature="payload")

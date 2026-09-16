@@ -404,7 +404,7 @@ one public `/api/brief.json` with the preceding 12 hours of qualifying stories
 (two canonical publishers minimum), ranks, and full available article extractions.
 Older attached reports are marked as context. It uses the pipeline lock and atomic
 replacement; errors preserve the previous packet and make the wrapper fail.
-The hourly cron starts at :45. The endpoint has a five-minute origin cache TTL;
+The scheduled batches start on the hour in Eastern time. The endpoint has a five-minute origin cache TTL;
 Cloudflare eligibility must be configured separately. Manual `run`/`present`
 commands do not refresh the packet; use `brief` explicitly after manual work.
 
@@ -438,3 +438,47 @@ Validation failures get one delayed retry after six hours, then wait for changed
 inputs/prompts or explicit force. Deferred rejections appear in verbose output, run
 stats and health details without blocking fresh work. Existing stories/checkpoints
 remain intact. Transport failures still follow the Flex retry and backlog rules.
+
+
+Duplicate cost telemetry is in aggregation run stats under `deduplication`: cache
+hits, prescreen requests, selected/deferred pairs and decisions by signal priority.
+Prescreen v2 uses stable prefix partitions and exact payload signatures; full
+review decisions use exact prompt signatures (legacy entries transition lazily).
+Use `scripts/compare-pipeline-costs.py --help` for the complete-window cost report.
+Disable `aggregation.incremental_grouping` to restore full-window grouping while
+retaining independent verification, duplicate safeguards and retry improvements.
+
+
+### Frozen summaries and batch cadence (September 16)
+
+Verified story prose, evidence, timestamps and reader revisions are retained on
+ordinary updates. All newly grouped unfiltered reports extend the source list
+without paid editorial calls. The links represent related coverage; existing
+claim/evidence mappings remain unchanged. Explicit force and coherence repair
+remain regeneration paths. Existing summaries freeze at their current version;
+previous overwritten versions cannot be restored automatically.
+
+Cron wakes hourly at :00; `--scheduled` checks America/New_York and admits 2am,
+6am, 8am, 10am, noon, 2pm, 4pm, 6pm, 8pm and 10pm. The spring DST transition
+skips the nonexistent 2am slot. Health allows six hours between successful runs.
+Manual wrapper invocation without the flag bypasses the schedule check.
+
+
+### Grouping confidence and coherence reuse
+
+Aggregation v9 requests `grouping_confidence` (0–1) for each article's proposed
+group placement, including a singleton or an existing-event attachment. This is
+not factual confidence or impact. The score and original proposed article IDs /
+existing-event ID are retained in private article JSON `llm_grouping`, with model,
+prompt version and timestamp. Later guards may change placement; the saved score
+continues to describe the original proposal. It does not yet control filtering,
+Flash fallback or bypass of membership/coherence checks. Existing articles are not
+regrouped just to obtain scores; the event-level 0.7 remains a legacy default.
+
+Event rebuilding preserves coherence-review metadata. Cache signatures cover the
+reviewed article IDs and exact bounded headline/summary inputs in stable order;
+metadata-only changes reuse the review. Legacy entries can be promoted when
+membership and digest timestamps establish unchanged inputs. Missing provenance
+requires review under the existing per-run cap. Coherence stats include cache hits.
+The September 16 weak-pair screening pilot failed a held-out merge check, so no
+new automatic rejection screen was enabled.

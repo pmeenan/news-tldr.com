@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 import uuid
 from collections import Counter
@@ -21,10 +20,10 @@ from pipeline.paths import EVENT_DIR, LOCK_PATH, PROJECT_ROOT, STORY_DIR
 from pipeline.state import StateDB
 from pipeline.util import atomic_write_json, isoformat_z, sanitize_id
 
-AGGREGATION_PROMPT_VERSION = "aggregation-v8"
+AGGREGATION_PROMPT_VERSION = "aggregation-v9"
 AGGREGATION_EXPERIMENT_PROMPT_VERSION = "aggregation-experiment-v6"
 NEWSWORTHINESS_PROMPT_VERSION = "newsworthiness-v1"
-DEDUPLICATION_PRESCREEN_PROMPT_VERSION = "deduplication-prescreen-v1"
+DEDUPLICATION_PRESCREEN_PROMPT_VERSION = "deduplication-prescreen-v2"
 DEDUPLICATION_REVIEW_PROMPT_VERSION = "deduplication-review-v3"
 GROUPING_MODES = ("titles", "titles_summaries")
 DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD = 0.8
@@ -1053,6 +1052,7 @@ def aggregate_once(
         "bulk_model": getattr(generator, "model", None),
         "review_model": getattr(review_generator, "model", None),
         "max_article_rowid": max_article_rowid,
+        "incremental_grouping": bool(config.aggregation.get("incremental_grouping", True)),
     }
     try:
         lock_context = PipelineLock(LOCK_PATH, lock_timeout, run_id=run_id) if acquire_lock else nullcontext()
@@ -1179,7 +1179,7 @@ def aggregate_once(
                             max_article_rowid=max_article_rowid,
                             category_impact_floors=impact_floors,
                             feeds_by_source=feeds_by_source,
-                            unassigned_only=not force,
+                            unassigned_only=not force and bool(config.aggregation.get("incremental_grouping", True)),
                         )
                         if not articles:
                             if not dry_run:
@@ -1464,6 +1464,7 @@ def aggregate_once(
                             max_pairs=deduplication_max_pairs,
                             max_passes=deduplication_max_passes,
                             lookback_hours=deduplication_lookback_hours,
+                            metrics=stats.setdefault("deduplication", {}),
                         )
                     except Exception as exc:
                         if progress:
@@ -1526,6 +1527,8 @@ def apply_grouping_result(
                     with abs_path.open("r", encoding="utf-8") as f:
                         data = json.load(f)
                     data["content_type"] = content_type
+                    if "grouping_assessment" in classification:
+                        data["llm_grouping"] = classification["grouping_assessment"]
                     atomic_write_json(abs_path, data)
                 except Exception as exc:
                     if progress:
@@ -1673,6 +1676,7 @@ def apply_grouping_result(
         )
         event_payload["article_ids"] = sorted(merged_article_ids)
         event_payload["article_count"] = len(merged_article_ids)
+        event_payload["keywords"] = _member_keywords(state, event_id, group_articles)
 
         atomic_write_json(event_path, event_payload)
         state.upsert_event(event_payload, event_path)
@@ -1804,7 +1808,19 @@ def group_articles_with_gemini(
                 article_count=len(articles),
                 valid_categories=valid_categories,
                 valid_existing_event_ids=valid_existing_event_ids,
+                require_confidence=True,
             )
+            # Confidence describes the model's proposed placement, before deterministic
+            # splitting and membership review. Keep that proposal for later calibration.
+            for proposed in groups:
+                for i in proposed["article_indexes"]:
+                    classifications[i]["grouping_assessment"] = {
+                        "confidence": classifications[i]["grouping_confidence"],
+                        "proposed_article_ids": [articles[j].article_id for j in proposed["article_indexes"]],
+                        "proposed_existing_event_id": proposed.get("existing_event_id"),
+                        "model": result.model, "prompt_version": AGGREGATION_PROMPT_VERSION,
+                        "generated_at": isoformat_z(),
+                    }
             groups = _split_weakly_connected_groups(
                 groups,
                 articles,
@@ -1844,6 +1860,7 @@ def validate_grouping_response(
     article_count: int,
     valid_categories: list[str],
     valid_existing_event_ids: set[str] | None = None,
+    require_confidence: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
     raw_groups = payload.get("groups")
     if not isinstance(raw_groups, list):
@@ -1879,6 +1896,11 @@ def validate_grouping_response(
             "content_type": content_type,
             "category": category,
         }
+        confidence = item.get("grouping_confidence")
+        if require_confidence or "grouping_confidence" in item:
+            if type(confidence) not in (int, float) or not 0 <= confidence <= 1:
+                raise ValueError("grouping_confidence must be a finite number from 0 to 1 for every article")
+            classifications[idx]["grouping_confidence"] = float(confidence)
 
     if len(classifications) != article_count:
         missing_idxs = sorted(set(range(article_count)) - set(classifications.keys()))
@@ -2262,7 +2284,14 @@ def _build_grouping_prompt(
         "- content_type: Choose from: 'news', 'opinion', 'analysis', 'review', 'unknown'. "
         "Use 'opinion' for editorial columns, op-eds, or heavily biased commentary. "
         "Use 'analysis' for explanatory/deep-dive reports. Use 'news' for standard factual reporting.\n"
-        f"- category: Choose the strongest category from this exact list: {', '.join(valid_categories)}.\n\n"
+        f"- category: Choose the strongest category from this exact list: {', '.join(valid_categories)}.\n"
+        "- grouping_confidence: A number from 0 to 1 for THIS article's placement in its proposed group, "
+        "including any existing_event_id. Assess whether it covers the same specific development as that "
+        "group, not whether its facts are true or its impact is high. 0.95-1 means an explicit same-event "
+        "match; 0.8-0.94 strong but indirect; 0.5-0.79 ambiguous; below 0.5 weak. For a singleton, score "
+        "confidence that it should stand alone among the supplied articles and existing events. "
+        "Use lower confidence when details are missing or several groups plausibly fit. Do not give "
+        "every article the same score by default.\n\n"
         f"Input fields: {fields}.\n"
         "Every article index must appear exactly once in exactly one group. Singletons are allowed.\n"
         f"Audit the final JSON: every integer from 0 through {len(articles) - 1} must appear "
@@ -2284,6 +2313,7 @@ def _grouping_response_schema(valid_categories: list[str]) -> dict[str, Any]:
                     "type": "OBJECT",
                     "properties": {
                         "article_index": {"type": "INTEGER"},
+                        "grouping_confidence": {"type": "NUMBER"},
                         "content_type": {
                             "type": "STRING",
                             "enum": ["news", "opinion", "analysis", "review", "unknown"],
@@ -2293,7 +2323,7 @@ def _grouping_response_schema(valid_categories: list[str]) -> dict[str, Any]:
                             "enum": valid_categories,
                         },
                     },
-                    "required": ["article_index", "content_type", "category"],
+                    "required": ["article_index", "content_type", "category", "grouping_confidence"],
                 },
             },
             "groups": {
@@ -2533,7 +2563,7 @@ def _build_event_payload(
         "title": title,
         "category": category,
         "thread": (existing or {}).get("thread"),
-        "keywords": sorted(set((existing or {}).get("keywords", [])) | set(_keywords_for_articles(articles))),
+        "keywords": _keywords_for_articles(articles),
         "entities": (existing or {}).get("entities", []),
         "created_at": created_at,
         "updated_at": now,
@@ -2541,6 +2571,8 @@ def _build_event_payload(
         "article_ids": article_ids,
         "article_count": len(article_ids),
         "confidence": (existing or {}).get("confidence", 0.7),
+        **({"coherence_review": existing["coherence_review"]}
+           if existing and isinstance(existing.get("coherence_review"), dict) else {}),
         "newsworthiness": newsworthiness
         or (existing or {}).get("newsworthiness")
         or _baseline_newsworthiness(
@@ -2926,6 +2958,20 @@ def _headlines_have_cohesion_edge(left: str, right: str) -> bool:
     return _headline_cohesion_strength(left, right) > 0
 
 
+def _member_keywords(
+    state: StateDB, event_id: str, incoming: Sequence[ArticleForAggregation] = (),
+) -> list[str]:
+    from types import SimpleNamespace
+
+    members = {row["article_id"]: SimpleNamespace(headline=row["headline"], summary=row["summary"])
+               for row in state.conn.execute(
+                   "SELECT article_id, headline, summary FROM articles "
+                   "WHERE event_id = ? AND is_filtered = 0 ORDER BY published_at, article_id", (event_id,),
+               )}
+    members.update({article.article_id: article for article in incoming})
+    return _keywords_for_articles(list(members.values()))
+
+
 def _keywords_for_articles(articles: Sequence[ArticleForAggregation]) -> list[str]:
     counter: Counter[str] = Counter()
     for article in articles:
@@ -3152,6 +3198,10 @@ def _event_merge_response_schema() -> dict[str, Any]:
     }
 
 
+def _review_signature(payload1: dict[str, Any], payload2: dict[str, Any]) -> str:
+    return hashlib.sha256(_build_event_merge_prompt(payload1, payload2).encode("utf-8")).hexdigest()
+
+
 def _evaluate_deduplication_pair(
     *,
     client: JsonGenerator,
@@ -3194,6 +3244,8 @@ def _evaluate_and_apply_deduplication_candidates(
     concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
     usage_stage: str = "deduplication",
     prompt_version: str = "deduplication-v1",
+    metrics: dict[str, Any] | None = None,
+    candidate_priorities: dict[frozenset[str], int] | None = None,
 ) -> int:
     pending = list(candidates)
     merges_count = 0
@@ -3316,7 +3368,13 @@ def _evaluate_and_apply_deduplication_candidates(
                     rationale=decision.rationale,
                     model=decision.model,
                     prompt_version=prompt_version,
+                    input_signature=_review_signature(*payloads[index]),
+                    candidate_priority=(candidate_priorities or {}).get(frozenset((e1["event_id"], e2["event_id"]))),
                 )
+            if metrics is not None:
+                signal = str((candidate_priorities or {}).get(frozenset((e1["event_id"], e2["event_id"])), -1))
+                bucket = metrics.setdefault("decisions_by_priority", {}).setdefault(signal, {"merge": 0, "reject": 0})
+                bucket["merge" if decision.should_merge else "reject"] += 1
             if (
                 decision.should_merge
                 and decision.confidence >= DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD
@@ -3496,6 +3554,23 @@ def _prescreen_response_schema() -> dict[str, Any]:
     }
 
 
+def _prescreen_payload(
+    chunk: Sequence[dict[str, Any]], article_headlines_by_event: dict[str, list[str]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": event["event_id"],
+            "title": event["title"],
+            "keywords": _filtered_event_keywords(event.get("keywords") or [], set()),
+            "headlines": list(article_headlines_by_event.get(event["event_id"], []))[
+                :DEDUPLICATION_HEADLINES_PER_EVENT
+            ],
+        }
+        for event in chunk
+    ]
+
+
+
 def _run_prescreen_chunk(
     *,
     chunk_label: str,
@@ -3505,17 +3580,7 @@ def _run_prescreen_chunk(
     dynamic_stopwords: set[str],
     client: JsonGenerator,
 ) -> PrescreenChunkResult:
-    payload = [
-        {
-            "id": event["event_id"],
-            "title": event["title"],
-            "keywords": _filtered_event_keywords(event.get("keywords") or [], dynamic_stopwords),
-            "headlines": list(article_headlines_by_event.get(event["event_id"], []))[
-                :DEDUPLICATION_HEADLINES_PER_EVENT
-            ],
-        }
-        for event in chunk
-    ]
+    payload = _prescreen_payload(chunk, article_headlines_by_event)
 
     result = client.generate_json(
         system_instruction=(
@@ -3565,17 +3630,22 @@ def _prescreen_chunk_specs_for_events(
         anchor_ids = {event["event_id"] for event in anchors}
         non_anchor_events = [event for event in events if event["event_id"] not in anchor_ids]
         non_anchor_chunk_size = max(1, chunk_size - len(anchors))
-        # Bucket by a hash of the event ID so one new event perturbs only its own
-        # chunk; sequential slicing would shift every chunk and defeat the cache.
-        bucket_count = max(1, math.ceil(len(non_anchor_events) / non_anchor_chunk_size))
-        buckets: list[list[dict[str, Any]]] = [[] for _ in range(bucket_count)]
-        for event in sorted(non_anchor_events, key=lambda item: item["event_id"]):
-            digest = hashlib.sha256(str(event["event_id"]).encode("utf-8")).hexdigest()
-            buckets[int(digest[:8], 16) % bucket_count].append(event)
+        # Split only the overflowing hash-prefix branch. Population changes cannot
+        # remap every event as they did with hash % ceil(population / capacity).
         chunks = []
-        for bucket in buckets:
-            for start in range(0, len(bucket), non_anchor_chunk_size):
-                chunks.append(tuple([*anchors, *bucket[start : start + non_anchor_chunk_size]]))
+        def partition(items: list[dict[str, Any]], bit: int = 0) -> None:
+            if len(items) <= non_anchor_chunk_size or bit >= 256:
+                for start in range(0, len(items), non_anchor_chunk_size):
+                    chunks.append(tuple([*anchors, *items[start:start + non_anchor_chunk_size]]))
+                return
+            buckets: list[list[dict[str, Any]]] = [[], []]
+            for event in items:
+                key = int(hashlib.sha256(event["event_id"].encode()).hexdigest(), 16)
+                buckets[(key >> (255 - bit)) & 1].append(event)
+            for bucket in buckets:
+                if bucket:
+                    partition(bucket, bit + 1)
+        partition(sorted(non_anchor_events, key=lambda event: event["event_id"]))
 
     return [
         PrescreenChunkSpec(
@@ -3608,23 +3678,8 @@ def _prescreen_anchor_events(
 def _prescreen_chunk_signature(
     spec: PrescreenChunkSpec, article_headlines_by_event: dict[str, list[str]]
 ) -> str:
-    """Content signature of the chunk: IDs, titles, raw keywords and headlines.
-
-    Raw keywords are used instead of the stopword-filtered list because the
-    per-batch dynamic stopwords shift whenever the batch changes; that would
-    invalidate every chunk each hour for a cosmetic prompt difference."""
-    payload = [
-        [
-            event["event_id"],
-            event.get("title"),
-            [str(k).lower() for k in (event.get("keywords") or [])[:DEDUPLICATION_KEYWORDS_PER_EVENT]],
-            sorted(article_headlines_by_event.get(event["event_id"], []))[:DEDUPLICATION_HEADLINES_PER_EVENT],
-        ]
-        for event in spec.chunk
-    ]
-    return hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+    prompt = _build_prescreen_prompt(_prescreen_payload(spec.chunk, article_headlines_by_event))
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
 
 def _run_prescreen_chunk_spec(
@@ -3652,6 +3707,7 @@ def _execute_prescreen_chunk_specs(
     state: StateDB | None = None,
     run_id: str | None = None,
     concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
+    metrics: dict[str, Any] | None = None,
 ) -> list[tuple[str, str]]:
     if not specs:
         return []
@@ -3678,6 +3734,9 @@ def _execute_prescreen_chunk_specs(
             pending.append(spec)
     if progress and cache_hits:
         progress(f"deduplicate: prescreen cache reused {cache_hits} chunk(s); {len(pending)} to run")
+    if metrics is not None:
+        metrics["prescreen_cache_hits"] = metrics.get("prescreen_cache_hits", 0) + cache_hits
+        metrics["prescreen_requests"] = metrics.get("prescreen_requests", 0) + len(pending)
     specs = pending
     if not specs:
         return collected
@@ -3801,6 +3860,7 @@ def deduplicate_active_events_llm(
     max_pairs: int | None = None,
     max_passes: int = DEDUPLICATION_MAX_PASSES,
     lookback_hours: int = DEFAULT_DEDUPLICATION_LOOKBACK_HOURS,
+    metrics: dict[str, Any] | None = None,
 ) -> int:
     total_merges = 0
     for pass_index in range(1, max(1, max_passes) + 1):
@@ -3814,6 +3874,7 @@ def deduplicate_active_events_llm(
             concurrency=concurrency,
             max_pairs=max_pairs,
             lookback_hours=lookback_hours,
+            metrics=metrics,
         )
         total_merges += merges_count
         if merges_count == 0:
@@ -3837,6 +3898,7 @@ def _deduplicate_active_events_llm_pass(
     concurrency: int = DEFAULT_DEDUPLICATION_CONCURRENCY,
     max_pairs: int | None = None,
     lookback_hours: int = DEFAULT_DEDUPLICATION_LOOKBACK_HOURS,
+    metrics: dict[str, Any] | None = None,
 ) -> int:
     since = _recent_event_cutoff(lookback_hours)
     try:
@@ -3864,6 +3926,8 @@ def _deduplicate_active_events_llm_pass(
             event["title"] = published["headline"]
         try:
             event["keywords"] = json.loads(event.get("keywords_json") or "[]") or []
+            if len(event["keywords"]) > 12:
+                event["keywords"] = _member_keywords(state, event["event_id"])
         except (TypeError, ValueError):
             event["keywords"] = []
     article_headlines_by_event: dict[str, list[str]] = {}
@@ -3986,6 +4050,7 @@ def _deduplicate_active_events_llm_pass(
         state=state,
         run_id=run_id,
         concurrency=concurrency,
+        metrics=metrics,
     )
     for eid1, eid2 in prescreen_pairs:
         pair = frozenset((eid1, eid2))
@@ -4020,6 +4085,9 @@ def _deduplicate_active_events_llm_pass(
         if is_second_pass_review
         else "deduplication-v1"
     )
+    review_articles = _load_events_articles_summary(
+        {eid for pair in ordered_pairs for eid in pair}, state,
+    )
     for pair in ordered_pairs:
         ids = sorted(pair)
         if len(ids) != 2:
@@ -4034,6 +4102,10 @@ def _deduplicate_active_events_llm_pass(
             event_a_updated_at=e1["updated_at"],
             event_b_updated_at=e2["updated_at"],
             prompt_version=prompt_version,
+            input_signature=_review_signature(
+                {"event_id": e1["event_id"], "title": e1["title"], "articles": review_articles.get(e1["event_id"], [])},
+                {"event_id": e2["event_id"], "title": e2["title"], "articles": review_articles.get(e2["event_id"], [])},
+            ),
         ):
             cached_count += 1
             continue
@@ -4048,6 +4120,10 @@ def _deduplicate_active_events_llm_pass(
             f"deduplicate: review work new={len(candidates)}, cached={cached_count}, "
             f"deferred={deferred_count}"
         )
+    if metrics is not None:
+        for key, value in {"candidate_pairs": len(candidate_pairs), "cache_hits": cached_count,
+                           "selected_pairs": len(candidates), "deferred_pairs": deferred_count}.items():
+            metrics[key] = metrics.get(key, 0) + value
     if not candidates:
         return 0
 
@@ -4061,6 +4137,7 @@ def _deduplicate_active_events_llm_pass(
         concurrency=concurrency,
         usage_stage="deduplication_review" if is_second_pass_review else "deduplication",
         prompt_version=prompt_version,
+        metrics=metrics, candidate_priorities=candidate_priorities,
     )
 
     if progress and merges_count > 0:

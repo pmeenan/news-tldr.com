@@ -349,3 +349,36 @@ gantt
 - [ ] Measure a complete day after rollout: cost, deferred failures, evidence cache hits,
   grouping throughput and duplicate queue. Do not extrapolate the earlier $7.37/day
   baseline while downstream throughput is changing.
+
+
+### September 16 duplicate review follow-up
+
+- [x] Restore bounded frequency-ranked member keywords; correct overgrown discovery inputs.
+- [x] Cache strict review by exact input and preserve legacy entries during transition.
+- [x] Unify prescreen request/signature payloads and stabilize hash-prefix partitions.
+- [x] Record candidate-priority decisions and cache/request counters for measurement.
+- [x] Add a non-incremental rollback setting and equal-window total-cost report.
+- [ ] After a complete day, compare total spend with $7.34393/day pre-incremental
+  reference, inspecting throughput and failures. If cost does not beat it, revert
+  `aggregation.incremental_grouping` to false as the user requested.
+- [ ] Consider tightening low-yield candidate signals only after replaying retained
+  merge/reject cases; preserve shared-anchor discovery and full merge adjudication.
+
+### September 16 frozen summaries and larger batches
+
+- [x] Freeze verified prose and evidence; extend grouped source references without LLM calls.
+- [x] Preserve explicit force and coherence repair; keep reader revisions unchanged for source additions.
+- [x] Run ten Eastern-time batches daily, with four-hour overnight gaps and timezone-aware scheduling.
+- [ ] Measure a complete day under the reduced schedule and frozen-summary policy.
+
+### September 16 screening validation and grouping confidence
+
+- [x] Test weak-pair rejection on historical cases and a held-out sample; leave
+  disabled after a confirmed Meta safety-story false rejection.
+- [x] Preserve coherence cache across event rebuilding and match actual review
+  inputs; promote unchanged legacy entries with digest provenance.
+- [x] Add validated per-article grouping confidence and private proposal provenance.
+- [x] Check category volume: no retained category consistently exceeds 50/day;
+  leave impact floors unchanged.
+- [ ] Calibrate confidence against grouping/guard outcomes before changing routing.
+- [ ] Keep local-model evaluation on hold per user; larger hardware is being considered.

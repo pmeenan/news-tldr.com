@@ -10,6 +10,7 @@
     "backoff_max_seconds": 60
   },
   "aggregation": {
+    "incremental_grouping": true,
     "window_hours": 3,
     "window_overlap_hours": 1,
     "window_step_hours": 3,
@@ -51,7 +52,7 @@
     "publish_dir": "/var/www/news-tldr.com"
   },
   "operations": {
-    "max_pipeline_age_hours": 3,
+    "max_pipeline_age_hours": 6,
     "max_failed_feeds": 5,
     "max_article_failures": 25
   },

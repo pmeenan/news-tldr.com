@@ -18,7 +18,7 @@ def _relative_to_project(path: Path) -> str:
         return str(path)
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 # Each migration is the SQL needed to take the database from the previous
@@ -309,6 +309,10 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
           attempts INTEGER NOT NULL,
           retry_after TEXT NOT NULL
         );
+    """),
+    (13, """
+        ALTER TABLE deduplication_reviews ADD COLUMN input_signature TEXT;
+        ALTER TABLE deduplication_reviews ADD COLUMN candidate_priority INTEGER;
     """),
 )
 
@@ -965,6 +969,7 @@ class StateDB:
         event_a_updated_at: str,
         event_b_updated_at: str,
         prompt_version: str,
+        input_signature: str | None = None,
     ) -> sqlite3.Row | None:
         event_a, event_b, event_a_updated_at, event_b_updated_at = (
             self._canonical_deduplication_pair(
@@ -974,6 +979,13 @@ class StateDB:
                 event_b_updated_at,
             )
         )
+        if input_signature is not None:
+            return self.conn.execute(
+                "SELECT * FROM deduplication_reviews WHERE event_a = ? AND event_b = ? "
+                "AND prompt_version = ? AND (input_signature = ? OR "
+                "(input_signature IS NULL AND event_a_updated_at = ? AND event_b_updated_at = ?))",
+                (event_a, event_b, prompt_version, input_signature, event_a_updated_at, event_b_updated_at),
+            ).fetchone()
         return self.conn.execute(
             """
             SELECT *
@@ -999,6 +1011,8 @@ class StateDB:
         rationale: str,
         model: str,
         prompt_version: str,
+        input_signature: str | None = None,
+        candidate_priority: int | None = None,
     ) -> None:
         event_a, event_b, event_a_updated_at, event_b_updated_at = (
             self._canonical_deduplication_pair(
@@ -1013,9 +1027,10 @@ class StateDB:
                 """
                 INSERT INTO deduplication_reviews (
                   event_a, event_b, event_a_updated_at, event_b_updated_at,
-                  should_merge, confidence, rationale, model, prompt_version, reviewed_at
+                  should_merge, confidence, rationale, model, prompt_version, reviewed_at,
+                  input_signature, candidate_priority
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(event_a, event_b, prompt_version) DO UPDATE SET
                   event_a_updated_at = excluded.event_a_updated_at,
                   event_b_updated_at = excluded.event_b_updated_at,
@@ -1023,7 +1038,9 @@ class StateDB:
                   confidence = excluded.confidence,
                   rationale = excluded.rationale,
                   model = excluded.model,
-                  reviewed_at = excluded.reviewed_at
+                  reviewed_at = excluded.reviewed_at,
+                  input_signature = excluded.input_signature,
+                  candidate_priority = excluded.candidate_priority
                 """,
                 (
                     event_a,
@@ -1035,7 +1052,7 @@ class StateDB:
                     rationale,
                     model,
                     prompt_version,
-                    isoformat_z(),
+                    isoformat_z(), input_signature, candidate_priority,
                 ),
             )
 

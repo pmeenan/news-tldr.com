@@ -9,7 +9,7 @@ news-tldr.com is a filesystem-backed RSS aggregator that collects source article
 - Preserve source attribution from collection through presentation.
 - Separate data collection, aggregation, editorial, and rendering so each stage can be tested and rerun independently.
 - Prefer neutral factual summaries. Surface partisan framing transparently when present, without adopting it.
-- Support hourly pipeline runs with incremental processing. Stories evolve as new articles arrive across runs.
+- Support scheduled incremental batches. Verified summaries freeze while grouped source lists grow.
 
 ## Technology Stack
 
@@ -795,8 +795,8 @@ calls and makes no database, artifact, static-build, or production changes.
 
 ### Scheduled Production Runs
 
-The production user crontab runs `scripts/run-scheduled.sh` at minute 45 every
-hour. The wrapper invokes the complete pipeline and its automatic production
+The production crontab wakes `scripts/run-scheduled.sh --scheduled` hourly at :00.
+The wrapper runs only at 2am and 6am–10pm every two hours, America/New_York. The wrapper invokes the complete pipeline and its automatic production
 publish, then runs the health check. It retains detailed output in
 `data/state/scheduled-pipeline.log`, rotates at 10 MiB, and exits nonzero when
 either the pipeline or health check fails so cron's normal error-mail path can
@@ -1049,3 +1049,67 @@ retains full replay. Candidate matching uses retained event titles and unfiltere
 article headlines, with up to eight matching anchors sent as context. Existing
 event membership and keywords are preserved on extension. Membership adjudication,
 coherence and duplicate review retain their existing safeguards and limits.
+
+
+### September 16 duplicate-review cost control
+
+Schema v13 adds `input_signature` and `candidate_priority` to duplicate decisions.
+New entries use the complete rendered review prompt as their fingerprint. A
+changed title or article summary invalidates the entry even if event timestamps
+are unchanged; timestamp-only changes do not invalidate identical inputs. Legacy
+rows retain timestamp matching until refreshed, avoiding a mass cold-cache review.
+
+Prescreen v2 uses one canonical payload for both requests and cache signatures,
+preserving actual headline order. Keyword filtering for that payload uses the
+static stopword list so unrelated category membership cannot invalidate a chunk.
+Binary hash-prefix partitions split only overflowing branches. Shared anchors
+remain in each chunk to preserve cross-partition discovery; changes to their actual
+payload still invalidate dependent chunks. No candidate threshold is tightened.
+
+Event extensions rebuild at most 12 frequency-ranked keywords from all unfiltered
+members plus incoming reports. Overgrown existing keyword lists are repaired in
+memory for discovery immediately. New per-run metrics record prescreen hits/requests,
+review cache hits, selected/deferred pairs, and decisions by candidate priority
+(4 title/slug, 3 headline/keyword/prescreen, 2 strong cohesion, 0 weak cohesion).
+
+`aggregation.incremental_grouping=false` restores non-incremental window loading.
+The read-only `scripts/compare-pipeline-costs.py` compares equal complete windows
+of total production cost and reports throughput. Acceptance requires beating the
+pre-incremental $7.34393/day reference; lack of improvement calls for rollback,
+not a claim of savings based solely on grouping costs. No automatic rollback job
+is installed.
+
+
+### Frozen summaries and batch cadence (September 16)
+
+Verified story prose, evidence, timestamps and reader revisions are retained on
+ordinary updates. All newly grouped unfiltered reports extend the source list
+without paid editorial calls. The links represent related coverage; existing
+claim/evidence mappings remain unchanged. Explicit force and coherence repair
+remain regeneration paths. Existing summaries freeze at their current version;
+previous overwritten versions cannot be restored automatically.
+
+Cron wakes hourly at :00; `--scheduled` checks America/New_York and admits 2am,
+6am, 8am, 10am, noon, 2pm, 4pm, 6pm, 8pm and 10pm. The spring DST transition
+skips the nonexistent 2am slot. Health allows six hours between successful runs.
+Manual wrapper invocation without the flag bypasses the schedule check.
+
+
+### Grouping confidence and coherence reuse
+
+Aggregation v9 requests `grouping_confidence` (0–1) for each article's proposed
+group placement, including a singleton or an existing-event attachment. This is
+not factual confidence or impact. The score and original proposed article IDs /
+existing-event ID are retained in private article JSON `llm_grouping`, with model,
+prompt version and timestamp. Later guards may change placement; the saved score
+continues to describe the original proposal. It does not yet control filtering,
+Flash fallback or bypass of membership/coherence checks. Existing articles are not
+regrouped just to obtain scores; the event-level 0.7 remains a legacy default.
+
+Event rebuilding preserves coherence-review metadata. Cache signatures cover the
+reviewed article IDs and exact bounded headline/summary inputs in stable order;
+metadata-only changes reuse the review. Legacy entries can be promoted when
+membership and digest timestamps establish unchanged inputs. Missing provenance
+requires review under the existing per-run cap. Coherence stats include cache hits.
+The September 16 weak-pair screening pilot failed a held-out merge check, so no
+new automatic rejection screen was enabled.

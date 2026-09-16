@@ -49,8 +49,11 @@ class FakeJsonGenerator:
 
     def generate_json(self, **kwargs: Any) -> GeminiResult:
         self.prompts.append(kwargs["prompt"])
+        payload = self.payload
+        if "articles" in payload and "groups" in payload:
+            payload = {**payload, "articles": [{"grouping_confidence": 0.9, **a} for a in payload["articles"]]}
         return GeminiResult(
-            payload=self.payload,
+            payload=payload,
             model=self.model,
             elapsed_ms=12,
             usage={"promptTokenCount": 30, "candidatesTokenCount": 12},
@@ -100,7 +103,7 @@ def test_validate_grouping_response_accepts_complete_groups() -> None:
     groups, classifications = validate_grouping_response(
         {
             "articles": [
-                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
                 {"article_index": 1, "content_type": "news", "category": "world"},
                 {"article_index": 2, "content_type": "opinion", "category": "us"},
             ],
@@ -119,7 +122,7 @@ def test_validate_grouping_response_ignores_unoffered_existing_event_id() -> Non
     groups, _classifications = validate_grouping_response(
         {
             "articles": [
-                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
                 {"article_index": 1, "content_type": "news", "category": "world"},
             ],
             "groups": [
@@ -145,8 +148,8 @@ def test_validate_grouping_response_ignores_unoffered_existing_event_id() -> Non
         (
             {
                 "articles": [
-                    {"article_index": 0, "content_type": "news", "category": "world"},
-                    {"article_index": 0, "content_type": "news", "category": "world"},
+                    {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
+                    {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
                     {"article_index": 2, "content_type": "news", "category": "world"},
                 ],
                 "groups": [{"article_indexes": [0, 1]}, {"article_indexes": [2]}],
@@ -167,7 +170,7 @@ def test_validate_grouping_response_ignores_unoffered_existing_event_id() -> Non
         (
             {
                 "articles": [
-                    {"article_index": 0, "content_type": "news", "category": "world"},
+                    {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
                     {"article_index": 1, "content_type": "news", "category": "world"},
                     {"article_index": 2, "content_type": "news", "category": "world"},
                 ],
@@ -186,7 +189,7 @@ def test_group_articles_with_gemini_validates_and_summarizes_response() -> None:
     client = FakeJsonGenerator(
         {
             "articles": [
-                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
                 {"article_index": 1, "content_type": "news", "category": "world"},
                 {"article_index": 2, "content_type": "news", "category": "world"},
             ],
@@ -209,7 +212,7 @@ def test_titles_mode_omits_summaries_from_prompt() -> None:
     client = FakeJsonGenerator(
         {
             "articles": [
-                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
                 {"article_index": 1, "content_type": "news", "category": "world"},
                 {"article_index": 2, "content_type": "news", "category": "world"},
             ],
@@ -226,7 +229,7 @@ def test_grouping_prompt_prefers_digest_summary_and_key_facts() -> None:
     client = FakeJsonGenerator(
         {
             "articles": [
-                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
             ],
             "groups": [{"article_indexes": [0]}],
         }
@@ -292,7 +295,7 @@ def test_group_articles_with_gemini_splits_weakly_connected_large_groups() -> No
     client = FakeJsonGenerator(
         {
             "articles": [
-                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
                 {"article_index": 1, "content_type": "news", "category": "world"},
                 {"article_index": 2, "content_type": "analysis", "category": "world"},
                 {"article_index": 3, "content_type": "news", "category": "world"},
@@ -330,7 +333,7 @@ def test_group_articles_with_gemini_splits_weakly_connected_pairs() -> None:
     client = FakeJsonGenerator(
         {
             "articles": [
-                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
                 {"article_index": 1, "content_type": "news", "category": "world"},
             ],
             "groups": [{"article_indexes": [0, 1]}],
@@ -520,7 +523,7 @@ def test_group_articles_with_gemini_drops_existing_event_id_from_weak_split() ->
     client = FakeJsonGenerator(
         {
             "articles": [
-                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
                 {"article_index": 1, "content_type": "news", "category": "world"},
             ],
             "groups": [{"article_indexes": [0, 1], "existing_event_id": "pope-slavery-event"}],
@@ -583,7 +586,7 @@ def test_group_articles_with_gemini_drops_existing_event_id_from_mismatched_comp
     client = FakeJsonGenerator(
         {
             "articles": [
-                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
                 {"article_index": 1, "content_type": "news", "category": "world"},
             ],
             "groups": [{"article_indexes": [0, 1], "existing_event_id": "iran-deal-event"}],
@@ -2209,7 +2212,7 @@ def test_group_articles_with_gemini_with_active_events() -> None:
     client = FakeJsonGenerator(
         {
             "articles": [
-                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
                 {"article_index": 1, "content_type": "news", "category": "world"},
             ],
             "groups": [
@@ -2238,7 +2241,7 @@ def test_group_articles_with_gemini_ignores_existing_event_id_not_in_active_even
     client = FakeJsonGenerator(
         {
             "articles": [
-                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
             ],
             "groups": [{"article_indexes": [0], "existing_event_id": "event-not-in-prompt"}],
         }
@@ -2260,7 +2263,7 @@ def test_group_articles_with_gemini_treats_null_existing_event_id_as_absent(valu
     client = FakeJsonGenerator(
         {
             "articles": [
-                {"article_index": 0, "content_type": "news", "category": "world"},
+                {"article_index": 0, "content_type": "news", "category": "world", "grouping_confidence": 0.9},
             ],
             "groups": [{"article_indexes": [0], "existing_event_id": value}],
         }
@@ -2330,7 +2333,8 @@ def test_process_category_batches_llm_runs_batches_concurrently() -> None:
                 return GeminiResult(
                     payload={
                         "articles": [
-                            {"article_index": 0, "content_type": "news", "category": "world"},
+                            {"article_index": 0, "content_type": "news", "category": "world",
+                             "grouping_confidence": 0.9},
                         ],
                         "groups": [{"article_indexes": [0]}],
                     },
@@ -2765,6 +2769,18 @@ def test_deduplicate_active_events_llm_requires_high_confidence(tmp_path, monkey
         # Both the unchanged prescreen chunk and the pair's strict review are cached.
         assert len(second_client.prompts) == 0
 
+        # Timestamp-only updates must not buy the same strict review again.
+        state.conn.execute("UPDATE events SET updated_at='2026-05-31T12:00:00Z'")
+        metrics = {}
+        deduplicate_active_events_llm(state=state, client=second_client, feeds_by_source={}, metrics=metrics)
+        assert not second_client.prompts
+        assert metrics["cache_hits"] >= 1
+        # A real source-input change must reopen review even if timestamps are unchanged.
+        state.conn.execute("UPDATE articles SET summary='New source evidence changes the incident details.'")
+        deduplicate_active_events_llm(state=state, client=second_client, feeds_by_source={}, metrics=metrics)
+        assert any("Compare these two" in prompt for prompt in second_client.prompts)
+        assert sum(v["reject"] for v in metrics["decisions_by_priority"].values()) >= 1
+
 
 def test_deduplicate_active_events_llm_cross_category_same_group(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "pipeline.db"
@@ -3164,22 +3180,26 @@ def test_aggregate_once_splits_articles_into_category_groups(tmp_path, monkeypat
         called_prompts.append(prompt)
         if "Politics headline" in prompt:
             payload = {
-                "articles": [{"article_index": 0, "content_type": "news", "category": "politics"}],
+                "articles": [{"article_index": 0, "grouping_confidence": 0.9,
+                              "content_type": "news", "category": "politics"}],
                 "groups": [{"article_indexes": [0]}]
             }
         elif "Tech headline" in prompt:
             payload = {
-                "articles": [{"article_index": 0, "content_type": "news", "category": "technology"}],
+                "articles": [{"article_index": 0, "grouping_confidence": 0.9,
+                              "content_type": "news", "category": "technology"}],
                 "groups": [{"article_indexes": [0]}]
             }
         elif "Entertainment headline" in prompt:
             payload = {
-                "articles": [{"article_index": 0, "content_type": "news", "category": "entertainment"}],
+                "articles": [{"article_index": 0, "grouping_confidence": 0.9,
+                              "content_type": "news", "category": "entertainment"}],
                 "groups": [{"article_indexes": [0]}]
             }
         else:
             payload = {
-                "articles": [{"article_index": 0, "content_type": "news", "category": "politics"}],
+                "articles": [{"article_index": 0, "grouping_confidence": 0.9,
+                              "content_type": "news", "category": "politics"}],
                 "groups": [{"article_indexes": [0]}]
             }
         from pipeline.llm import GeminiResult
@@ -3307,12 +3327,14 @@ def test_aggregate_once_isolates_per_category_group_failures(tmp_path, monkeypat
         # failure we hit in the live run (model returns the same article in two groups).
         if "Politics headline" in prompt:
             payload = {
-                "articles": [{"article_index": 0, "content_type": "news", "category": "politics"}],
+                "articles": [{"article_index": 0, "grouping_confidence": 0.9,
+                              "content_type": "news", "category": "politics"}],
                 "groups": [{"article_indexes": [0]}],
             }
         elif "Tech headline" in prompt:
             payload = {
-                "articles": [{"article_index": 0, "content_type": "news", "category": "technology"}],
+                "articles": [{"article_index": 0, "grouping_confidence": 0.9,
+                              "content_type": "news", "category": "technology"}],
                 "groups": [{"article_indexes": [0]}, {"article_indexes": [0]}],
             }
         else:
@@ -4502,3 +4524,137 @@ def test_incremental_grouping_only_loads_unassigned_and_preserves_existing_event
         assert load_window_articles(**args, unassigned_only=True) == []
         unrelated = [replace(loaded[0], headline="Team wins playoff game")]
         assert not _component_matches_existing_event([0], unrelated, eid, {eid: context})
+
+
+def test_prescreen_signature_matches_request_headline_order_and_local_keywords() -> None:
+    from pipeline.aggregate import (
+        _prescreen_chunk_signature,
+        _prescreen_chunk_specs_for_events,
+        _run_prescreen_chunk_spec,
+    )
+
+    events = [{"event_id": f"e{i}", "title": "Title", "keywords": ["summit", "talks"]} for i in range(2)]
+    a = _prescreen_chunk_specs_for_events(events, set(), batch_label="b")[0]
+    b = _prescreen_chunk_specs_for_events(events, {"summit"}, batch_label="b")[0]
+    heads = {"e0": ["Z earliest", "Y next", "X third", "A fourth"]}
+    assert _prescreen_chunk_signature(a, heads) == _prescreen_chunk_signature(b, heads)
+    client = FakeJsonGenerator({"candidate_pairs": []})
+    _run_prescreen_chunk_spec(spec=a, article_headlines_by_event=heads, client=client)
+    import hashlib
+    assert _prescreen_chunk_signature(a, heads) == hashlib.sha256(client.prompts[0].encode()).hexdigest()
+    changed = {"e0": ["Changed first", *heads["e0"][1:]]}
+    assert _prescreen_chunk_signature(a, heads) != _prescreen_chunk_signature(a, changed)
+    irrelevant = {"e0": [*heads["e0"][:3], "Changed fourth"]}
+    assert _prescreen_chunk_signature(a, heads) == _prescreen_chunk_signature(a, irrelevant)
+
+
+def test_prescreen_population_boundary_only_splits_one_partition() -> None:
+    from pipeline.aggregate import _prescreen_chunk_specs_for_events
+
+    events = [{"event_id": f"e{i:04}", "article_count": 1, "created_at": "2026-01-01", "title": "Title"}
+              for i in range(108)]
+    def chunks(values):
+        return {tuple(e["event_id"] for e in spec.chunk) for spec in
+                _prescreen_chunk_specs_for_events(values, set(), batch_label="b")}
+    before = chunks(events)
+    after = chunks([*events, {"event_id": "new", "article_count": 1, "created_at": "2026-01-02"}])
+    assert len(before & after) >= len(before) - 1
+    assert all(len(chunk) <= 40 for chunk in after)
+    # Keep existing shared-anchor comparisons, rather than sacrificing their recall.
+    assert all(set(f"e{i:04}" for i in range(6)) <= set(chunk) for chunk in after)
+
+
+def test_member_keywords_are_bounded_ranked_and_ignore_filtered_reports(tmp_path) -> None:
+    from pipeline.aggregate import _member_keywords
+
+    migrate(tmp_path / "pipeline.db")
+    with StateDB(tmp_path / "pipeline.db") as state:
+        for i in range(20):
+            state.conn.execute(
+                "INSERT INTO articles(article_id,source_id,source_name,url,headline,summary,fetched_at,"
+                "article_path,collection_json,is_filtered) VALUES (?, 's','S','u',?,?,'t','p','{}',?)",
+                (str(i), 'common repeated anchor', 'common repeated anchor', int(i == 19)),
+            )
+        # Supply an event through the normal helper to satisfy article foreign keys.
+        state.upsert_event({"event_id": "e", "title": "T", "category": "world", "status": "active",
+                            "created_at": "t", "updated_at": "t", "article_count": 20}, tmp_path / "e.json")
+        state.conn.execute("UPDATE articles SET event_id='e'")
+        state.conn.execute("UPDATE articles SET headline='filteredspam',summary='filteredspam' WHERE is_filtered=1")
+        result = _member_keywords(state, "e", _articles())
+        assert len(result) <= 12 and result[0] == "common"
+        assert "filteredspam" not in result
+
+
+@pytest.mark.parametrize(
+    "incremental,force,expected", [(True, False, True), (False, False, False), (True, True, False)],
+)
+def test_grouping_rollback_switch_restores_full_windows(tmp_path, monkeypatch, incremental, force, expected) -> None:
+    from dataclasses import replace
+
+    from pipeline.config import load_pipeline_config
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    config = load_pipeline_config()
+    monkeypatch.setattr("pipeline.aggregate.load_pipeline_config", lambda: replace(
+        config, aggregation={**config.aggregation, "incremental_grouping": incremental}))
+    monkeypatch.setattr("pipeline.aggregate.StateDB", lambda: StateDB(db_path))
+    monkeypatch.setattr("pipeline.aggregate.plan_sliding_windows", lambda **kwargs: [SimpleNamespace(
+        window_start="2026-09-16T00:00:00Z", window_end="2026-09-16T03:00:00Z")])
+    captured = []
+    def load(**kwargs):
+        captured.append(kwargs["unassigned_only"])
+        return []
+    monkeypatch.setattr("pipeline.aggregate.load_window_articles", load)
+    aggregate_once(range_start="2026-09-16T00:00:00Z", range_end="2026-09-16T03:00:00Z",
+                   force=force, dry_run=True, acquire_lock=False)
+    assert captured == [expected]
+
+
+@pytest.mark.parametrize("confidence", [None, True, False, -0.1, 1.1, "0.9", float("nan"), float("inf")])
+def test_grouping_confidence_rejects_missing_and_invalid_scores(confidence):
+    payload = {"articles": [{"article_index": 0, "content_type": "news", "category": "world",
+                              "grouping_confidence": confidence}], "groups": [{"article_indexes": [0]}]}
+    with pytest.raises(ValueError, match="grouping_confidence"):
+        validate_grouping_response(payload, article_count=1, valid_categories=["world"], require_confidence=True)
+    del payload["articles"][0]["grouping_confidence"]
+    with pytest.raises(ValueError, match="grouping_confidence"):
+        validate_grouping_response(payload, article_count=1, valid_categories=["world"], require_confidence=True)
+
+
+def test_grouping_confidence_tracks_original_proposal_before_guards(tmp_path, monkeypatch):
+    import pipeline.aggregate as aggregate
+
+    articles = _articles()[:2]
+    for article in articles:
+        path = tmp_path / article.article_id
+        path.write_text('{}')
+        object.__setattr__(article, "article_path", str(path))
+    response = {"articles": [
+        {"article_index": 0, "content_type": "news", "category": "technology", "grouping_confidence": 0.97},
+        {"article_index": 1, "content_type": "news", "category": "technology", "grouping_confidence": 0.61}],
+        "groups": [{"article_indexes": [0, 1]}]}
+    # An independent guard may split the proposed group; confidence remains an
+    # assessment of the original model proposal, not a claim about final membership.
+    monkeypatch.setattr(aggregate, "_split_weakly_connected_groups",
+                        lambda *args, **kwargs: [{"article_indexes": [0]}, {"article_indexes": [1]}])
+    result = group_articles_with_gemini(articles, mode="titles_summaries", client=FakeJsonGenerator(response))
+    assert result["article_classifications"][1]["grouping_confidence"] == 0.61
+    assert result["article_classifications"][1]["grouping_assessment"]["proposed_article_ids"] == ["a1", "a2"]
+    db = tmp_path / "pipeline.db"
+    migrate(db)
+    event_dir = tmp_path / "events"
+    event_dir.mkdir()
+    monkeypatch.setattr(aggregate, "EVENT_DIR", event_dir)
+    with StateDB(db) as state:
+        for article in articles:
+            state.insert_article({"article_id": article.article_id, "source_id": article.source_id,
+                                  "source_name": article.source_name, "url": "https://example.test/"+article.article_id,
+                                  "headline": article.headline, "published_at": article.published_at,
+                                  "fetched_at": article.published_at, "collection": {}, "fingerprints": {}},
+                                 tmp_path / article.article_id)
+        apply_grouping_result(articles=articles, groups=result["groups"], state=state,
+                              article_classifications=result["article_classifications"], feeds_by_source={})
+    saved = json.loads((tmp_path / "a2").read_text())["llm_grouping"]
+    assert saved["confidence"] == 0.61 and saved["proposed_article_ids"] == ["a1", "a2"]
+    assert saved["prompt_version"] == aggregate.AGGREGATION_PROMPT_VERSION

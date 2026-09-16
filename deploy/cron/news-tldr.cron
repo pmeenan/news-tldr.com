@@ -1,4 +1,4 @@
-# news-tldr.com hourly refresh. Install with `crontab -e` or the README command.
+# news-tldr.com Eastern-time batch refresh. Install with `crontab -e` or the README command.
 # Cron reports a non-zero exit through its normal local-mail path; detailed logs
 # and the latest machine-readable health result live under data/state/.
-45 * * * * /home/pmeenan/src/news-tldr.com/scripts/run-scheduled.sh
+0 * * * * /home/pmeenan/src/news-tldr.com/scripts/run-scheduled.sh --scheduled
