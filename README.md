@@ -48,7 +48,7 @@ Any scripts or pipeline executions should run using the Python interpreter insid
 ### Hosted LLM Setup
 
 Article digestion, story aggregation, editorial generation, and homepage curation
-use the Gemini Developer API through the project's `httpx`-based client.
+use the Gemini Developer API by default through the project's `httpx`-based client.
 Create a local `.env` file with an AI Studio API key and the two model tiers:
 
 ```bash
@@ -98,6 +98,121 @@ failures retain their five-minute cooldown.
 `llm.prices` holds per-million-token rates so `llm-usage` reports
 dollars; usage rows record thinking tokens, cached tokens and the service tier
 returned by the API.
+
+### OpenRouter Backend and Model Experiments
+
+OpenRouter is an opt-in alternative for every LLM pipeline stage and the private
+editorial evaluation harness. It uses the existing HTTP client dependency. Add
+`OPENROUTER_API_KEY` to the ignored `.env`; a key alone does not change routing.
+Choose `LLM_BACKEND=openrouter` for both tiers, or set `LLM_BULK_BACKEND` and
+`LLM_REVIEW_BACKEND` independently. Select explicit model IDs with
+`OPENROUTER_MODEL`, or the tier-specific `OPENROUTER_BULK_MODEL` and
+`OPENROUTER_REVIEW_MODEL`. The default backend remains direct Gemini, including
+its Flex and model-fallback policies. The explicit `openrouter` backend stays on
+the selected model without automatic fallback to another model or Gemini.
+
+Production enables `LLM_BACKEND=free-first` in the ignored `.env`:
+
+| Work normally assigned to | Preferred routing |
+| --- | --- |
+| Flash | Union Alpha while confirmed $0 → existing Gemini Flash chain |
+| Flash-Lite | Nemotron 3 Super while confirmed $0 and free quota remains → Union Alpha while confirmed $0 → existing Gemini Flash-Lite chain |
+
+This applies to verification and merge/coherence reviews as well as drafting.
+Draft and verification remain separate calls, but can both use Union Alpha.
+Source-evidence checks, content validation, repair limits and rejected-story
+handling remain active. Semantic rejection still uses the existing stage repair
+policy; it is not automatically overturned by asking a paid model to approve it.
+
+The router checks the live model catalog and account free-request counter, caching
+metadata for 60 seconds. Unknown prices or quota fail closed for that candidate;
+an unavailable quota lookup does not prevent Union requests. Every candidate
+request also enforces zero input, output and per-request prices through provider
+price ceilings. Paid OpenRouter variants are never selected.
+
+`llm.free_routing` in `config/pipeline.json` controls the defaults: **two attempts
+per candidate**, 90-second request timeout, 120-second shared failure cooldown,
+40 in-flight calls per model (matching the largest stage worker pool), and
+20 Nemotron attempts per rolling minute.
+429 responses fall through immediately and honor longer `Retry-After` cooldowns.
+Saturated local slots fall through without queuing. Workers share quota
+reservations and cooldowns across stages within the process. Failed attempts
+consume local quota reservations conservatively until the next UTC day; external
+account usage is reconciled by the periodic key check. API limits remain authoritative.
+Returned rejected responses are included in usage accounting when a fallback
+succeeds. Verbose output explains routing, skips and failures.
+
+Set `LLM_BACKEND=gemini` to disable this policy. Tier-specific backend settings
+override the global choice; explicit evaluation backend flags override both.
+The Gemini fallback keeps its existing Flex retry and model chain behavior.
+Monthly savings depend on availability, quota and completed workload; this is
+not a $100 spending cap.
+
+List currently available free models advertising structured output (catalog
+lookup only; no API key or inference charge):
+
+```bash
+./.venv/bin/python scripts/openrouter-models.py --free --structured
+```
+
+Compare draft models on the same five synthetic news fixtures while keeping
+direct Gemini for evidence extraction and independent verification:
+
+```bash
+./.venv/bin/python scripts/evaluate-editorial.py --verbose \
+  --backend openrouter \
+  --model nvidia/nemotron-3-super-120b-a12b:free \
+  --model nex-agi/nex-n2.5-mini:free \
+  --evidence-backend gemini --verification-backend gemini \
+  --output data/evaluations/openrouter-editorial.json
+```
+
+Use `--limit 1` for a smoke evaluation or `--dry-run` to preview without calls.
+`--evidence-model` and `--verification-model` pin those roles; their corresponding
+backend flags allow other combinations. Model selections passed to this script
+do not change production routing. A free draft model does **not** make the Gemini
+extraction and verification calls free. Reports record actual returned models,
+hosting providers, per-response timing, tokens, and costs, including returned
+responses that subsequently fail validation. Reports are checkpointed after each
+case under ignored `data/evaluations/`; they do not publish stories or update
+production article state. The five fixtures are a smoke test, not a quality benchmark.
+
+The default `OPENROUTER_RESPONSE_FORMAT=json_schema` converts the pipeline's
+schemas to strict JSON Schema and requires compatible provider endpoints.
+`json_object` is an explicit alternative for models supporting JSON mode only;
+the schema is included in the instructions and existing stage validators still
+apply. Unsupported parameters, malformed JSON, refusals, and truncated answers
+fail the request. There is no automatic downgrade to unstructured text.
+`OPENROUTER_REASONING_EFFORT` and `OPENROUTER_MAX_OUTPUT_TOKENS` control reasoning
+and output budgets; unset reasoning leaves the model default. Gemini-specific
+per-call thinking hints are not forwarded to OpenRouter. Free-model quotas
+for `:free` variants are account-wide and capacity can be intermittent; use small
+sequential trials. Zero-priced launch models without that suffix may have
+different limits, including upstream provider limits.
+Check the current [limits](https://openrouter.ai/docs/api/reference/limits) and
+[endpoint support](https://openrouter.ai/docs/guides/features/structured-outputs).
+
+Union Alpha advertises JSON mode rather than enforced JSON Schema. To evaluate
+it with Gemini evidence and verification, while leaving production routing alone:
+
+```bash
+OPENROUTER_RESPONSE_FORMAT=json_object OPENROUTER_REASONING_EFFORT= \
+OPENROUTER_MAX_OUTPUT_TOKENS=8192 \
+./.venv/bin/python scripts/evaluate-editorial.py --verbose \
+  --backend openrouter --model stealth/union-alpha \
+  --evidence-backend gemini --verification-backend gemini \
+  --output data/evaluations/union-alpha-editorial.json
+```
+
+For repeatable provider selection, `OPENROUTER_PROVIDER_PREFERENCES` accepts the
+OpenRouter provider JSON object, for example
+`{"only":["provider-slug"],"allow_fallbacks":false}`. The adapter always requires
+support for supplied parameters. Model availability, provider quantization and
+data policies vary; hosted quality and latency do not establish the performance
+of a particular Spark quantization. Usage accounting records OpenRouter's actual
+reported charge, including zero, and separates reasoning from visible output
+without double counting. Missing cost metadata stays unknown unless a matching
+price-table entry is configured.
 
 ### Pipeline Commands
 

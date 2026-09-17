@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from pipeline.paths import PROJECT_ROOT
+
+if TYPE_CHECKING:
+    from pipeline.free_routing import FreeFirstClient
+    from pipeline.openrouter import OpenRouterClient
 
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_GEMINI_REVIEW_MODEL = "gemini-3.8-flash"
@@ -581,6 +586,63 @@ def create_gemini_client(
             flex_retry_seconds=retry_seconds, progress=progress,
         )
     raise ValueError("stage must be 'bulk' or 'review'")
+
+
+def create_llm_client(
+    stage: str, *, backend: str | None = None, model: str | None = None,
+    include_lite: bool = False, purpose: str | None = None, last_resort: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> GeminiClient | FallbackGeminiClient | OpenRouterClient | FreeFirstClient:
+    """Select an opt-in backend; direct Gemini retains its existing default chains.
+
+    An explicit model pins an evaluation to that model without model fallbacks.
+    OpenRouter provider failover stays within the requested model; its provider
+    preferences can further pin the hosting endpoint.
+    """
+    load_dotenv()
+    if stage not in {"bulk", "review"}:
+        raise ValueError("stage must be 'bulk' or 'review'")
+    selected = (backend or os.environ.get(f"LLM_{stage.upper()}_BACKEND")
+                or os.environ.get("LLM_BACKEND") or "gemini").strip().lower()
+    if selected == "free-first":
+        from pipeline.config import load_pipeline_config
+        from pipeline.free_routing import FreeFirstClient
+
+        if model:
+            raise ValueError("free-first selects a model chain; use an explicit backend to pin a model")
+        return FreeFirstClient(
+            stage=stage,
+            fallback=create_gemini_client(
+                stage, include_lite=include_lite, purpose=purpose, last_resort=last_resort, progress=progress,
+            ),
+            settings=load_pipeline_config().llm.get("free_routing") or {}, progress=progress,
+        )
+    if selected == "gemini":
+        if model:
+            return GeminiClient(model=model, thinking_level=_thinking_level_for(model))
+        return create_gemini_client(
+            stage, include_lite=include_lite, purpose=purpose, last_resort=last_resort, progress=progress,
+        )
+    if selected == "openrouter":
+        from pipeline.openrouter import OpenRouterClient
+
+        selected_model = (model or os.environ.get(f"OPENROUTER_{stage.upper()}_MODEL")
+                          or os.environ.get("OPENROUTER_MODEL"))
+        if not selected_model:
+            raise RuntimeError(f"Set OPENROUTER_{stage.upper()}_MODEL or OPENROUTER_MODEL to an explicit model ID")
+        return OpenRouterClient(
+            model=selected_model, progress=progress,
+            max_output_tokens=int(os.environ.get("OPENROUTER_MAX_OUTPUT_TOKENS") or DEFAULT_MAX_OUTPUT_TOKENS),
+        )
+    raise ValueError("LLM backend must be 'gemini', 'openrouter' or 'free-first'")
+
+
+def reported_cost_usd(usage: dict[str, Any] | None) -> float | None:
+    """Actual backend charge, including explicit zero; absent is not free."""
+    value = (usage or {}).get("costUsd")
+    if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+        return float(value)
+    return None
 
 
 def llm_price_table() -> dict[str, dict[str, float]]:

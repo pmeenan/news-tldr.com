@@ -932,16 +932,57 @@ This keeps decisions auditable and makes reruns straightforward when prompts cha
 ### Model Flexibility
 
 Pipeline stages depend on a small `JsonGenerator`-style boundary instead of a
-vendor SDK. Production currently implements that boundary with the Gemini
-Developer API: 3.5 Flash-Lite for bulk work and the ordered full-Flash chain for
-selective review, destructive merge decisions, editorial, and curation. Local
-models were evaluated during development but are not a configured runtime
-fallback. Adding another hosted or local backend remains a backlog item and can
-use the same structured-output boundary without changing stage logic.
+vendor SDK. `create_llm_client` selects direct Gemini (the code default), an explicit
+OpenRouter model, or `free-first` per bulk/review tier. Production opts into
+`free-first` through the ignored `.env`. Gemini retains 3.5 Flash-Lite for bulk
+work and the ordered full-Flash chain for selective review, destructive merge
+decisions, editorial, and curation. OpenRouter uses explicit model IDs, strict
+JSON Schema by default, optional explicit JSON-object mode, and the same stage
+validators. Its adapter normalizes usage into the existing result contract;
+accounting records the returned model and actual charge, including zero, and
+does not count reasoning tokens twice. Provider preferences can pin a hosting
+endpoint. The explicit `openrouter` backend does not fall back to other models or
+direct Gemini.
+Local models remain evaluation-only and are not a configured runtime fallback.
+
+With `free-first`, review-tier work tries `stealth/union-alpha` before the existing
+Gemini Flash chain. Bulk work tries `nvidia/nemotron-3-super-120b-a12b:free`, then
+Union Alpha, then Gemini Flash-Lite. The references to full-Flash review elsewhere
+describe the Gemini baseline; Union now has review-tier authority, including
+verification and membership/coherence/merge decisions. Draft and verifier remain
+separate calls but can use the same model. Domain validation, bounded repairs,
+filtered-article exclusion, and the Gemini Lite merge restriction remain intact.
+
+The process-wide `FreeModelPolicy` coalesces catalog and account-quota lookups,
+reserves free daily and minute budgets under a lock, limits concurrent requests,
+and shares capacity cooldowns across clients. Missing metadata skips the relevant
+candidate. Catalog zero pricing is supplemented by provider-enforced zero-price
+ceilings on every request, including retries. The selected model never changes
+to a paid OpenRouter variant. Union uses JSON-object mode and a local shape check;
+Nemotron requests strict schema output with low reasoning. Each candidate gets
+at most two 90-second attempts; rate-limit errors fall through immediately and
+cool for at least 120 seconds or the longer retry hint. These settings are under
+`llm.free_routing`. Busy local slots fall through rather than queuing pipeline
+workers. Gemini retains its original Flex and model fallback policies.
+
+Metadata refreshes every 60 seconds. Local quota reservations are conservative
+and never replenished from a potentially delayed same-day API counter. Separate
+evaluation processes and other account users are reconciled through the live
+counter; provider limits remain authoritative. Rejected returned responses travel
+with successful fallback usage and are persisted separately, with actual models
+and charges. API-only failures without a returned usage record cannot be priced.
+
+The private editorial evaluation command can compare several pinned draft
+models on identical synthetic source fixtures, with separately selected evidence
+and verification clients. It records response timing, request signatures,
+provider/model provenance, returned-response costs and validation failures,
+checkpointing each case without publishing or changing article state. Model
+capability discovery uses the public OpenRouter catalog. No new dependency or
+database migration is required for this backend.
 
 ### Cost Awareness
 
-Model chains are built per purpose by `create_gemini_client`. Review work runs
+Direct Gemini chains are built per purpose by `create_gemini_client`. Review work runs
 3.8 Flash with 3.7 Flash as the capacity fallback; 3.5 Flash costs twice as
 much and is appended only for editorial verification. Bulk work (digests,
 grouping, prescreen, evidence extraction, the regeneration gate, category

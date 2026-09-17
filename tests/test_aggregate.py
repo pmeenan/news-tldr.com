@@ -1746,7 +1746,7 @@ def test_aggregate_once_dry_run_does_not_mutate_window_or_run_state(tmp_path, mo
     monkeypatch.setattr("pipeline.aggregate.StateDB", lambda: StateDB(db_path))
     monkeypatch.setattr("pipeline.aggregate.LOCK_PATH", tmp_path / "pipeline.lock")
     monkeypatch.setattr(
-        "pipeline.aggregate.create_gemini_client",
+        "pipeline.aggregate.create_llm_client",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("dry-run created an LLM client")),
     )
 

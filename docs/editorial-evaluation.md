@@ -13,7 +13,7 @@ they have not received independent human sign-off.
 ```
 
 The first command lists cases with no network calls. The second uses the configured
-full-Flash fallback chain and writes a private report to ignored
+bulk/review routing policy and writes a private report to ignored
 `data/evaluations/editorial.json`; `--output PATH` overrides that location.
 Incremental status goes to stderr and the final result is JSON on stdout. This
 command does not mutate pipeline events, checkpoints, stories or production.
@@ -43,6 +43,35 @@ false splits separately: reducing one by indiscriminately increasing the other
 is not an improvement. Production spot checks should additionally include
 long-lived clusters, multiple publishers carrying one wire report, single-outlet
 original reporting, and late corrections.
+
+## Alternate backends
+
+`scripts/evaluate-editorial.py --backend openrouter --model <catalog-id>` changes
+the draft candidate for that evaluation. Repeat `--model` to compare several
+candidates. Evidence and verification use their configured tiers unless their
+`--evidence-backend` / `--verification-backend` and optional model flags override
+them. Pin those model IDs when comparing candidates; regenerated evidence may
+still vary between runs. Keep the verifier independent of the candidate when
+assessing quality. `--limit` bounds fixture count, not calls: extraction, repairs,
+and verification can each make additional requests. `--dry-run` makes none.
+
+Use `scripts/openrouter-models.py --free --structured` to discover the current
+free candidates advertising JSON Schema support. Capacity and quotas still
+apply. Avoid `openrouter/free` for comparisons because it selects models at
+random. A free candidate with a Gemini verifier incurs Gemini charges.
+
+Reports include response timing, actual returned model, provider and generation
+IDs, normalized tokens, reported charges (or Gemini estimates), request hashes,
+and validation failures. Unknown costs remain distinguishable from zero. Failed
+OpenRouter answer parsing retains returned usage. Transport failures with no
+usage metadata cannot be priced locally. Each case checkpoints the private
+report; `complete: false` identifies an interrupted comparison. The report does
+not write the production usage database automatically. Production now opts into
+`free-first`; use explicit `--backend gemini --evidence-backend gemini
+--verification-backend gemini` to evaluate the direct Gemini baseline.
+Use all three flags with `free-first` to exercise the deployed routing policy.
+Pinned `--model` choices require an explicit `gemini` or `openrouter` backend.
+Free routing falls back to Gemini when needed, so it is not a zero-cost evaluation.
 
 ## Current rollout
 

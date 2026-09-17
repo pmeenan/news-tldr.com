@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pipeline.config import load_categories, load_feeds, load_pipeline_config
-from pipeline.llm import GeminiResult, create_gemini_client
+from pipeline.llm import GeminiResult, create_llm_client
 from pipeline.lock import PipelineLock
 from pipeline.paths import EVENT_DIR, LOCK_PATH, PROJECT_ROOT, STORY_DIR
 from pipeline.state import StateDB
@@ -669,7 +669,7 @@ def run_grouping_experiment(
     )
     if not articles:
         return {"article_count": 0, "modes": {}, "comparison": None}
-    generator = client or create_gemini_client("bulk")
+    generator = client or create_llm_client("bulk")
 
     results_by_mode: dict[str, dict[str, Any]] = {}
     for mode in selected_modes:
@@ -1000,22 +1000,22 @@ def aggregate_once(
     run_id = f"aggregation-{uuid.uuid4().hex}"
     state = StateDB()
     owns_generator = client is None and not dry_run
-    generator = client or (None if dry_run else create_gemini_client("bulk", purpose="aggregation", progress=progress))
+    generator = client or (None if dry_run else create_llm_client("bulk", purpose="aggregation", progress=progress))
     owns_review_generator = review_client is None and client is None and not dry_run
     review_generator = review_client or (
         generator
         if client is not None or dry_run
-        else create_gemini_client("review", include_lite=True, purpose="aggregation", progress=progress)
+        else create_llm_client("review", include_lite=True, purpose="aggregation", progress=progress)
     )
     # Deduplication and coherence tolerate minutes of latency, so they get their
     # own clients with longer flex budgets when this run owns its clients.
     post_review_clients: list[Any] = []
     if owns_generator and post_review:
-        dedup_generator = create_gemini_client("bulk", purpose="deduplication", progress=progress)
-        dedup_review_generator = create_gemini_client(
+        dedup_generator = create_llm_client("bulk", purpose="deduplication", progress=progress)
+        dedup_review_generator = create_llm_client(
             "review", include_lite=True, purpose="deduplication", progress=progress
         )
-        coherence_generator = create_gemini_client("review", purpose="coherence", progress=progress)
+        coherence_generator = create_llm_client("review", purpose="coherence", progress=progress)
         post_review_clients = [dedup_generator, dedup_review_generator, coherence_generator]
     else:
         dedup_generator, dedup_review_generator, coherence_generator = (
@@ -3758,7 +3758,7 @@ def _execute_prescreen_chunk_specs(
                 state.put_cached_prescreen_pairs(
                     chunk_signature=signatures[result.chunk_label],
                     prompt_version=DEDUPLICATION_PRESCREEN_PROMPT_VERSION,
-                    model=client.model,
+                    model=result.usage.get("model") or client.model,
                     pairs=result.pairs,
                 )
             except Exception:

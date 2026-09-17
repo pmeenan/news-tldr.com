@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from pipeline.aggregate import category_impact_floor_for_source, category_impact_floors
 from pipeline.config import load_feeds, load_pipeline_config
-from pipeline.llm import GeminiResult, create_gemini_client
+from pipeline.llm import GeminiResult, create_llm_client
 from pipeline.lock import PipelineLock
 from pipeline.paths import LOCK_PATH, PROJECT_ROOT
 from pipeline.state import StateDB
@@ -319,11 +319,11 @@ def digest_once(
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"article-digest-{uuid.uuid4().hex}"
     owns_generator = client is None
-    generator = client or create_gemini_client("bulk", purpose="digest", progress=progress)
+    generator = client or create_llm_client("bulk", purpose="digest", progress=progress)
     owns_review_generator = review_client is None and client is None and review_enabled
     reviewer = review_client
     if reviewer is None and client is None and review_enabled:
-        reviewer = create_gemini_client("review", purpose="digest", progress=progress)
+        reviewer = create_llm_client("review", purpose="digest", progress=progress)
     state = StateDB()
     stats: dict[str, Any] = {"run_id": run_id}
     try:
@@ -393,7 +393,7 @@ def digest_articles_for_aggregation(
         raise ValueError("limit must be at least 1")
     if concurrency < 1:
         raise ValueError("concurrency must be at least 1")
-    generator = client or create_gemini_client("bulk")
+    generator = client or create_llm_client("bulk")
     max_retries = int(load_pipeline_config().pipeline.get("max_item_retries", 3))
     feeds_by_source = (
         {feed.source_id: feed for feed in load_feeds(enabled_only=False)}
@@ -646,11 +646,11 @@ def generate_article_digest(
         "digest": digest,
         "elapsed_ms": result.elapsed_ms,
         "usage": result.usage,
-        "model": client.model,
+        "model": result.model,
         "usage_records": [
             {
                 "stage": "article_digest",
-                "model": client.model,
+                "model": result.model,
                 "prompt_version": ARTICLE_DIGEST_PROMPT_VERSION,
                 "usage": result.usage,
             }
@@ -723,7 +723,7 @@ def generate_article_digest_with_review(
         ],
         "review": {
             "reason": review_reason,
-            "first_pass_model": client.model,
+            "first_pass_model": first_pass["model"],
             "review_model": result.model,
             "prompt_version": ARTICLE_FILTER_REVIEW_PROMPT_VERSION,
             "first_pass_content_quality": first_pass["digest"]["content_quality"],

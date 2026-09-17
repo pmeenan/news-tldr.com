@@ -24,7 +24,7 @@ from pipeline.evidence import (
     validate_evidence,
     verify_story,
 )
-from pipeline.llm import GeminiEmptyResponseError, GeminiResult, create_gemini_client
+from pipeline.llm import GeminiEmptyResponseError, GeminiResult, create_llm_client
 from pipeline.lock import PipelineLock
 from pipeline.paths import ACTIVE_STORIES_PATH, LOCK_PATH, PROJECT_ROOT, STORY_DIR
 from pipeline.sources import publisher_id, reporting_origin
@@ -155,16 +155,16 @@ def editorial_once(
     lock_timeout = timedelta(minutes=int(config.pipeline.get("watchdog_timeout_minutes", 30)))
     run_id = f"editorial-{uuid.uuid4().hex}"
     owns_client = client is None
-    generator = client or create_gemini_client("review", purpose="editorial", progress=progress)
+    generator = client or create_llm_client("review", purpose="editorial", progress=progress)
     # Evidence extraction and the regeneration gate are mechanical, code-validated
     # steps that run on the bulk tier; verification alone may reach the expensive
     # last-resort models. Injected test clients serve every role.
     owned_clients: list[Any] = []
     if client is None:
-        evidence_client = create_gemini_client("bulk", purpose="evidence", progress=progress)
-        verification_client = create_gemini_client("review", purpose="editorial", last_resort=True, progress=progress)
-        curation_client = create_gemini_client("review", purpose="curation", progress=progress)
-        sections_client = create_gemini_client("bulk", purpose="curation", progress=progress)
+        evidence_client = create_llm_client("bulk", purpose="evidence", progress=progress)
+        verification_client = create_llm_client("review", purpose="editorial", last_resort=True, progress=progress)
+        curation_client = create_llm_client("review", purpose="curation", progress=progress)
+        sections_client = create_llm_client("bulk", purpose="curation", progress=progress)
         owned_clients = [generator, evidence_client, verification_client, curation_client, sections_client]
     else:
         evidence_client = verification_client = curation_client = sections_client = client

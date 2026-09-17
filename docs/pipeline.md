@@ -287,6 +287,23 @@ production.
 
 ## LLM Allocation and Guardrails
 
+Production sets `LLM_BACKEND=free-first`. Flash roles try Union Alpha at a
+confirmed zero price before their Gemini chain. Flash-Lite roles try free
+Nemotron 3 Super while quota remains, then zero-priced Union, then Gemini Lite.
+This includes final verification and merge/coherence reviews: references to
+full-Flash below describe the original Gemini allocation, now preceded by Union.
+Drafting and verification are separate calls that can use the same model.
+
+The shared router checks price/quota metadata every 60 seconds, enforces a $0
+provider price ceiling on every request, allows at most two attempts per candidate
+with a 90-second timeout, and shares 120-second failure cooldowns across workers.
+429 responses fall through immediately and honor longer retry hints. Forty
+concurrent slots per model and 20 Nemotron attempts per rolling minute bound
+free-provider load; exhausted slots fall through without waiting. Unknown quota
+skips Nemotron; unknown pricing skips the affected model. Existing stage validators,
+repairs and rejection behavior remain active. Set `LLM_BACKEND=gemini` to restore
+the allocation below directly; explicit tier overrides take precedence.
+
 | Work | Default model | Fallback policy |
 | --- | --- | --- |
 | Article digest | Gemini 3.5 Flash-Lite | Full-Flash review only for borderline/conflicting filters |
@@ -324,11 +341,14 @@ Concurrency remains digest 40, deduplication 16 and editorial 6; the watchdog
 allows 50 minutes. Independent stage clients can each encounter their own
 outage window. The scheduler skips an hour if the previous run holds the lock.
 
-All LLM responses use structured JSON schemas. Deterministic code owns ID
+Gemini and Nemotron request enforced JSON schemas; Union receives the schema in
+JSON-object mode and passes local shape validation. Deterministic code owns ID
 generation, allowed enums, citations, file writes, SQLite mutations, filtering,
 and deployment. Calls record run ID, stage, actual model, prompt version, input,
 output, thinking and cached token counts, the service tier the API reported,
-an estimated cost from `llm.prices`, and time in `llm_usage`.
+an estimated Gemini cost from `llm.prices` or actual OpenRouter charge (including
+zero), and time in `llm_usage`. Successful fallbacks also record discarded free
+responses that returned usage metadata.
 
 Spend controls beyond the model chain: homepage curation runs once per hourly
 run on compact headline cards (80 Top News candidates, 50 per category) and is

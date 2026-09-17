@@ -309,7 +309,10 @@ gantt
 ## Backlog
 
 - Headless browser fallback for sources that block readability extraction.
-- Additional hosted/local model backend support for aggregation and editorial stages.
+- [x] Add opt-in OpenRouter support across LLM stages and private editorial evaluations,
+  including explicit model selection, free-model discovery, JSON-schema conversion,
+  returned-response cost accounting, and separate evidence/verifier choices.
+- Additional local model runtime backend support for aggregation and editorial stages.
 - Manual review mode for high-impact stories before publishing.
 - Bias/source policy import from a curated external source if licensing allows.
 - Per-thread archive pages with event timelines.
@@ -382,3 +385,14 @@ gantt
   leave impact floors unchanged.
 - [ ] Calibrate confidence against grouping/guard outcomes before changing routing.
 - [ ] Keep local-model evaluation on hold per user; larger hardware is being considered.
+
+### September 17 free hosted routing
+
+- [x] Add opt-in `free-first`: zero-priced Union Alpha before Flash; quota-eligible
+  free Nemotron 3 Super then zero-priced Union before Flash-Lite.
+- [x] Enforce provider zero-price ceilings, fail-closed metadata checks, shared
+  quota reservations/cooldowns, bounded attempts and concurrency, and Gemini fallback.
+- [x] Preserve validation and repair gates; include verification in Union routing
+  as requested, retaining separate draft/check calls and actual-model accounting.
+- [ ] Measure a complete day of Gemini cost, free-model share, failures, pipeline
+  completion time and rejection rates before projecting the $100 monthly target.

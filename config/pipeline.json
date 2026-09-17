@@ -65,6 +65,14 @@
     "max_item_retries": 3
   },
   "llm": {
+    "free_routing": {
+      "max_attempts": 2,
+      "timeout_seconds": 90,
+      "cooldown_seconds": 120,
+      "metadata_ttl_seconds": 60,
+      "max_in_flight_per_model": 40,
+      "free_requests_per_minute": 20
+    },
     "flex_cooldown_seconds": 45,
     "flex_retry_seconds": 600,
     "flex_budget_seconds": {

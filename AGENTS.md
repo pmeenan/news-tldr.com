@@ -34,6 +34,34 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on September 17, 2026 (Free Hosted Routing)
+
+- Production `.env` now opts into `LLM_BACKEND=free-first`: review/Flash roles
+  try zero-priced Union Alpha before the existing Gemini chain; bulk/Lite roles
+  try quota-eligible free Nemotron 3 Super, then zero-priced Union, then Gemini Lite.
+  This includes final verification and membership/coherence/merge review as the
+  user requested. Draft/check remain separate calls but may use the same model.
+- Every free request enforces provider zero-price ceilings. Catalog and quota
+  checks fail closed and refresh every 60 seconds. Process-wide reservations,
+  minute limits and failure cooldowns are shared across stage workers. Defaults
+  in `llm.free_routing`: two attempts, 90-second request timeout, 120-second
+  cooldown (longer retry hints honored), 40 in-flight/model, 20 Nemotron attempts/minute.
+  Rate limits fall through immediately. Domain validation and rejection gates stay.
+- Successful fallbacks account separately for discarded responses with returned
+  usage; actual model provenance is retained. Explicit `openrouter` tests remain
+  pinned with no model fallback. Set `LLM_BACKEND=gemini` to disable this policy.
+  A restricted copy of the prior environment is in ignored upgrade-backups.
+- Verification: 450 tests, Ruff, compileall, whitespace checks, command dry runs
+  and complete artifact preflight passed (zero errors). Live free routing passed
+  3/3 editorial fixtures on first drafts plus one digest; Nemotron recovered from
+  one real 503 on its second attempt. Ten returned calls cost $0, recorded under
+  `routing_evaluation` / `free-routing-smoke-20260917`. No articles were changed by
+  these checks. Private results: `data/evaluations/free-routing-20260917/`.
+- Next: measure a complete day of Gemini spend, routing share, completion times
+  and quality/rejection rates against the $100 monthly-credit goal. This is not
+  a monthly spending cap. The prior local-model study remains stopped. No new
+  dependency, schema migration or frontend change. Source remains uncommitted.
+
 
 ### State on September 16, 2026 (Grouping Confidence and Coherence Cache)
 

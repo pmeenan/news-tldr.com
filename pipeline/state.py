@@ -830,17 +830,25 @@ class StateDB:
         cached_tokens: int | None = None,
         service_tier: str | None = None,
     ) -> None:
-        """Persist one call's usage. A raw ``usageMetadata`` dict fills every token
-        field and the service tier; the cost is estimated from the price table."""
-        from pipeline.llm import estimate_cost_usd, usage_fields
+        """Persist normalized usage and a reported charge (including zero).
+        When no charge is reported, estimate the cost from the price table."""
+        from pipeline.llm import estimate_cost_usd, reported_cost_usd, usage_fields
 
         if usage is not None:
+            for attempt in usage.get("routingAttempts") or []:
+                self.record_llm_usage(
+                    run_id, stage, attempt["model"], prompt_version, usage=attempt["usage"],
+                )
+            if isinstance(usage.get("model"), str):
+                model = usage["model"]
             fields = usage_fields(usage)
             input_tokens = fields["input_tokens"] if input_tokens is None else input_tokens
             output_tokens = fields["output_tokens"] if output_tokens is None else output_tokens
             thinking_tokens = fields["thinking_tokens"] if thinking_tokens is None else thinking_tokens
             cached_tokens = fields["cached_tokens"] if cached_tokens is None else cached_tokens
             service_tier = fields["service_tier"] if service_tier is None else service_tier
+        if cost_usd is None:
+            cost_usd = reported_cost_usd(usage)
         if cost_usd is None:
             cost_usd = estimate_cost_usd(
                 model=model,
