@@ -85,6 +85,43 @@ def test_rolling_expiry_does_not_use_processing_updates(state: StateDB) -> None:
     assert {"old1", "old2", "new"} <= eligible_event_ids(state, now=NOW + timedelta(hours=24))
 
 
+def test_gap_opening_after_editorial_selection_does_not_block_pipeline(state: StateDB, monkeypatch) -> None:
+    from pipeline.cli import _blocking_editorial_count, _pending_editorial_count
+    from pipeline.editorial import pending_editorial_sql
+
+    add_event(state, "old1", publishers=("A", "B"), when=NOW - timedelta(hours=23, minutes=55))
+    add_event(state, "old2", publishers=("A", "B"), when=NOW - timedelta(hours=23, minutes=55))
+    add_event(state, "single", when=NOW - timedelta(hours=2))
+    selected = [r["event_id"] for r in editorial_candidate_rows(state=state, now=NOW)]
+    assert set(selected) == {"old1", "old2"}
+    for event_id in selected:
+        state.mark_event_editorial_completed(event_id, isoformat_z(NOW))
+    later = NOW + timedelta(minutes=10)
+    monkeypatch.setattr("pipeline.cli.StateDB", lambda: StateDB(state.path))
+    monkeypatch.setattr("pipeline.cli.pending_editorial_sql",
+                        lambda **kwargs: pending_editorial_sql(now=later, **kwargs))
+    assert _pending_editorial_count() == 1
+    assert _blocking_editorial_count({"candidate_event_ids": selected}) == 0
+    assert [r["event_id"] for r in editorial_candidate_rows(state=state, now=later)] == ["single"]
+
+
+@pytest.mark.parametrize("outcome", ["completed", "validation", "transport", "loading"])
+def test_bounded_editorial_gate_preserves_actual_failures(state: StateDB, monkeypatch, outcome: str) -> None:
+    from pipeline.cli import _blocking_editorial_count
+    from pipeline.editorial import pending_editorial_sql
+
+    add_event(state, "selected", publishers=("A", "B"))
+    add_event(state, "unselected", publishers=("A", "B"))
+    if outcome == "completed":
+        state.mark_event_editorial_completed("selected", isoformat_z(NOW))
+    monkeypatch.setattr("pipeline.cli.StateDB", lambda: StateDB(state.path))
+    monkeypatch.setattr("pipeline.cli.pending_editorial_sql",
+                        lambda **kwargs: pending_editorial_sql(now=NOW, **kwargs))
+    stats = {"candidate_event_ids": ["selected"],
+             "rejected_event_ids": ["selected"] if outcome == "validation" else []}
+    assert _blocking_editorial_count(stats) == (1 if outcome in {"transport", "loading"} else 0)
+
+
 def test_category_gaps_are_independent_and_rejected_attempts_keep_reservations(state: StateDB) -> None:
     for i in range(3):
         add_event(state, f"world-{i}", publishers=("A", "B"))

@@ -72,10 +72,15 @@ The top-level runner is backlog-first and has a bounded finish line:
    - Drain pending Editorial work first and publish the resulting safe progress.
    - If upstream backlog exists, run snapshot-bounded Digest, Aggregation,
      Editorial, and Presentation, then publish that progress.
-   - If blocking bounded backlog remains, wait for Collection to finish, checkpoint its
+   - Remaining Digest/Grouping items stay pending with their recorded errors, but
+     do not block the normal pass, final duplicate review or healthy new stories.
+   - If blocking Editorial backlog remains, wait for Collection to finish, checkpoint its
      results, exit nonzero, and defer newly collected downstream work.
      Editorial validation rejections stay queued but do not block unrelated work;
      capacity/transport failures retain the backlog gate.
+     Each editorial gate checks only that pass's recorded candidate event IDs.
+     Stories becoming eligible during the pass (expired holds/retry cooldowns or
+     newly opened category gaps) wait for a later pass without blocking ingestion.
 6. Wait for Collection. Its newly inserted rows can now enter the normal pass.
 7. Run Digest → Aggregation → Editorial → Presentation and production publish.
 8. Release the lock in `finally`-style cleanup.
@@ -192,6 +197,16 @@ matches, keyword overlap and prescreen pairs, then titles sharing three or more
 non-generic words, with weak two-word anchor matches last. Within one tier the
 freshest pair is reviewed first.
 
+With `aggregation.jev_shadow.enabled`, every pair actually sent to strict review
+is first snapshotted into `data/evaluations/jev-live-shadow/`; the reference
+response is recorded before applying a merge. A separate minute cron runs
+`python -m pipeline.jev_shadow --verbose --limit 120`. Its own lock prevents
+overlap and its API work never holds the pipeline lock. Production decisions,
+cache signatures and inputs remain authoritative and unchanged. Oversized Jev
+requests retain every article but shorten text from the ends of both clusters;
+reports flag these comparisons. Shadow errors do not create production item
+errors. Read results with `python -m pipeline.jev_shadow --report`.
+
 Low-impact filtering resolves each article's threshold from its feed's default
 category: `aggregation.min_category_impact` unless
 `aggregation.min_category_impact_overrides` names that category.
@@ -287,20 +302,28 @@ production.
 
 ## LLM Allocation and Guardrails
 
-Production sets `LLM_BACKEND=free-first`. Flash roles try Union Alpha at a
-confirmed zero price before their Gemini chain. Flash-Lite roles try free
-Nemotron 3 Super while quota remains, then zero-priced Union, then Gemini Lite.
-This includes final verification and merge/coherence reviews: references to
-full-Flash below describe the original Gemini allocation, now preceded by Union.
+Production sets `LLM_BACKEND=free-first`. Flash roles use their Gemini chain
+directly. Flash-Lite roles try free Nemotron 3 Super while quota remains, then
+Gemini Lite. Union Alpha was removed on September 18, 2026 after its free
+preview ended. Final verification and merge/coherence reviews use Gemini.
 Drafting and verification are separate calls that can use the same model.
+
+Free response shape errors immediately fall back to Lite. Digest, grouping,
+newsworthiness and evidence domain validators likewise retry invalid Nemotron
+answers with the existing Lite client. The route stays on Lite for that task's
+remaining repairs, without consuming a paid repair for the free failure or
+changing concurrent tasks. Rejected returned responses retain usage accounting.
+Existing full-Flash safety reviews remain; domain validation itself is local code.
 
 The shared router checks price/quota metadata every 60 seconds, enforces a $0
 provider price ceiling on every request, allows at most two attempts per candidate
 with a 90-second timeout, and shares 120-second failure cooldowns across workers.
-429 responses fall through immediately and honor longer retry hints. Forty
-concurrent slots per model and 20 Nemotron attempts per rolling minute bound
-free-provider load; exhausted slots fall through without waiting. Unknown quota
-skips Nemotron; unknown pricing skips the affected model. Existing stage validators,
+429 responses share a 60-second cooldown, extended by longer retry hints, and
+retry within a shared 180-second admission deadline. Forty concurrent slots
+and at most 20 Nemotron attempts per rolling minute bound free-provider load;
+workers queue for slots with about three seconds between attempts. Waiting
+consumes no quota. Cooldowns beyond the deadline skip immediately. Unknown quota
+or pricing skips Nemotron. Existing stage validators,
 repairs and rejection behavior remain active. Set `LLM_BACKEND=gemini` to restore
 the allocation below directly; explicit tier overrides take precedence.
 
@@ -341,8 +364,8 @@ Concurrency remains digest 40, deduplication 16 and editorial 6; the watchdog
 allows 50 minutes. Independent stage clients can each encounter their own
 outage window. The scheduler skips an hour if the previous run holds the lock.
 
-Gemini and Nemotron request enforced JSON schemas; Union receives the schema in
-JSON-object mode and passes local shape validation. Deterministic code owns ID
+Gemini and Nemotron request enforced JSON schemas; Nemotron also passes local
+shape validation. Deterministic code owns ID
 generation, allowed enums, citations, file writes, SQLite mutations, filtering,
 and deployment. Calls record run ID, stage, actual model, prompt version, input,
 output, thinking and cached token counts, the service tier the API reported,
@@ -502,3 +525,34 @@ membership and digest timestamps establish unchanged inputs. Missing provenance
 requires review under the existing per-run cap. Coherence stats include cache hits.
 The September 16 weak-pair screening pilot failed a held-out merge check, so no
 new automatic rejection screen was enabled.
+
+
+### Jev production duplicate review (September 19, 2026)
+
+`aggregation.jev_review.enabled=true` routes new uncached duplicate pairs to
+TypeSafe Jev 1.13 through OpenRouter's native decisions endpoint. Both valid
+merge and reject choices are authoritative; the native probability and
+confidence are recorded rather than applying Flash's 0.8 confidence threshold
+to a different model. Flash fallback retains its existing confidence threshold
+and any last-resort Lite response remains unable to approve a merge.
+
+Each pair gets one Jev attempt (20-second HTTP timeouts), with four concurrent
+requests and 60 requests/minute. Transport, capacity, context, authentication,
+and response-validation failures immediately fall back to the existing Flash
+chain. A shared 60-second cooldown avoids repeated requests during an outage;
+longer Retry-After values are honored and authentication/payment failures cool
+for at least an hour. Missing OpenRouter credentials also fall back to Flash.
+Oversized pairs use the trial's symmetric prefix trimming while retaining every
+article; the original complete review payload goes to Flash on failure.
+
+Normal duplicate-stage accounting records returned Jev costs and paid rejected
+responses separately from fallback usage. Model, confidence, choice probability
+and truncation metadata remain inspectable in the saved review rationale.
+Existing exact-input decisions remain cached. Explicitly supplied evaluation
+clients remain pinned. Other pipeline roles retain their current routing.
+
+The previous independent Jev shadow is disabled to avoid duplicate charges.
+Its saved comparison artifacts remain available; its installed worker exits
+with disabled status. Set `jev_review.enabled=false` to restore Flash-only
+duplicate review for new requests. This routing change was explicitly approved
+after the live disagreement audit; it accepts the observed quality tradeoff.

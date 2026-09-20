@@ -381,6 +381,18 @@ complete homepage window:
 
 Over-merging protection comes from the strict per-pair call; recall comes from the diversity of candidate gates. Adding a new gate cannot weaken the merge decision — at worst it adds extra per-pair LLM calls that return `should_merge=false`.
 
+Optional Jev shadow review snapshots each uncached live pair before the strict
+review and any merge, then saves the reference response separately. The
+independent `pipeline.jev_shadow` worker reads that durable private queue under
+its own lock; production never reads its decisions. This preserves positive
+examples whose losing cluster would disappear after a merge. It uses the same
+headline/digest inputs, truncating prefixes proportionally across both clusters
+only for Jev when needed, with all article entries retained. Request sizes,
+truncation and actual model provenance remain inspectable. The queue is private
+evaluation data, not published event state; API usage stays under
+`routing_evaluation`. No application schema migration is needed. See the README
+for limits, scheduling, reporting and the disable switch.
+
 The chunk-plus-overlap approach balances context window limits, cost, latency, and retry blast radius. The hosted Gemini path supports much larger contexts than the local Ollama evaluation, but smaller chunks keep batches under the LLM attention-breakdown threshold and isolate failure blast radius to a single chunk plus overlap.
 Matching uses only the headline and a digest/brief paragraph summary, plus compact key facts when available, to keep grouping payloads small and avoid processing full article text inside the grouping call. Full article text stays on disk for digest generation and later editorial passes.
 
@@ -554,7 +566,8 @@ model is no longer told that editorial will separate broad topics later.
 `event-membership-v1` reviews proposed new attachments to existing events before
 assignment. A rejected attachment becomes a separate event for later deduplication.
 Existing events cannot merge implicitly because their assigned articles appeared
-in one sliding-window group; destructive merges require the full-Flash reviewer.
+in one sliding-window group; destructive merges require the dedicated duplicate
+reviewer (Jev first, with Flash fallback as of September 19).
 
 `pipeline/coherence.py` reviews a bounded set of existing active/stale clusters
 within the 72-hour window. The budget is `coherence_reviews_per_run` (default 10).
@@ -810,8 +823,15 @@ Pending editorial work is processed and published while feed/article HTTP
 requests run. Retained digest and aggregation work is restricted to the
 snapshotted row boundary, then flows through editorial and another publish;
 articles inserted by the concurrent collection cannot move that backlog's
-finish line. If the snapshot backlog remains, collection still completes and
-checkpoints, but new downstream work is deferred and the command exits nonzero.
+finish line. Pending upstream articles no longer prevent the normal pass and
+final duplicate review: failures remain recorded and existing selection and
+validation checks admit only usable inputs. If blocking editorial backlog
+remains, collection completes and checkpoints, but new downstream work is
+deferred and the command exits nonzero.
+Editorial gates are restricted to each pass's recorded candidate event IDs;
+newly eligible category-gap stories and expired holds/retry cooldowns cannot
+move its finish line. Loading/transport failures among selected events still
+block; validation-rejected drafts retain the existing deferral policy.
 SQLite connections use a 30-second connection/busy timeout so the collection
 writer and short editorial/usage writes serialize safely under WAL mode.
 
@@ -935,8 +955,8 @@ Pipeline stages depend on a small `JsonGenerator`-style boundary instead of a
 vendor SDK. `create_llm_client` selects direct Gemini (the code default), an explicit
 OpenRouter model, or `free-first` per bulk/review tier. Production opts into
 `free-first` through the ignored `.env`. Gemini retains 3.5 Flash-Lite for bulk
-work and the ordered full-Flash chain for selective review, destructive merge
-decisions, editorial, and curation. OpenRouter uses explicit model IDs, strict
+work and the ordered full-Flash chain for selective review, editorial, and
+curation. Duplicate decisions use Jev first with that Flash chain as fallback. OpenRouter uses explicit model IDs, strict
 JSON Schema by default, optional explicit JSON-object mode, and the same stage
 validators. Its adapter normalizes usage into the existing result contract;
 accounting records the returned model and actual charge, including zero, and
@@ -945,30 +965,39 @@ endpoint. The explicit `openrouter` backend does not fall back to other models o
 direct Gemini.
 Local models remain evaluation-only and are not a configured runtime fallback.
 
-With `free-first`, review-tier work tries `stealth/union-alpha` before the existing
-Gemini Flash chain. Bulk work tries `nvidia/nemotron-3-super-120b-a12b:free`, then
-Union Alpha, then Gemini Flash-Lite. The references to full-Flash review elsewhere
-describe the Gemini baseline; Union now has review-tier authority, including
-verification and membership/coherence/merge decisions. Draft and verifier remain
+With `free-first`, review-tier work uses the existing Gemini Flash chain directly.
+Bulk work tries `nvidia/nemotron-3-super-120b-a12b:free`, then Gemini Flash-Lite.
+Union Alpha was removed on September 18, 2026 after its free preview ended;
+it is excluded from both routing and catalog eligibility. Verification and
+membership/coherence/merge decisions use Gemini. Draft and verifier remain
 separate calls but can use the same model. Domain validation, bounded repairs,
 filtered-article exclusion, and the Gemini Lite merge restriction remain intact.
 
 The process-wide `FreeModelPolicy` coalesces catalog and account-quota lookups,
-reserves free daily and minute budgets under a lock, limits concurrent requests,
-and shares capacity cooldowns across clients. Missing metadata skips the relevant
-candidate. Catalog zero pricing is supplemented by provider-enforced zero-price
+admits attempts through a FIFO queue per model, atomically reserves daily quota
+and in-flight slots at dispatch, and shares capacity cooldowns across clients.
+Nemotron paces at 20 attempts/minute with a small spacing margin;
+its configured rate cannot exceed that ceiling. Retries use the same queue.
+Waiting workers do not consume daily reservations or active-request slots.
+Missing metadata skips the relevant candidate. Catalog zero pricing is supplemented by provider-enforced zero-price
 ceilings on every request, including retries. The selected model never changes
-to a paid OpenRouter variant. Union uses JSON-object mode and a local shape check;
-Nemotron requests strict schema output with low reasoning. Each candidate gets
-at most two 90-second attempts; rate-limit errors fall through immediately and
-cool for at least 120 seconds or the longer retry hint. These settings are under
-`llm.free_routing`. Busy local slots fall through rather than queuing pipeline
-workers. Gemini retains its original Flex and model fallback policies.
+to a paid OpenRouter variant. Nemotron requests strict schema output with low
+reasoning and passes local shape validation. Each candidate gets
+at most two 90-second attempts. Rate-limit errors share a separate cooldown of
+60 seconds or a longer retry hint, then rejoin the queue. One admission deadline
+180 seconds from routing start bounds waiting across queue admission and retries;
+cooldowns beyond that deadline skip immediately. After the deadline, immediately
+available attempts can still run without waiting. Admitted requests retain their
+normal request timeout. Expired/cancelled queue entries are removed without
+consuming quota. Other exhausted transport/format failures retain their 120-second
+capacity cooldown and fall through. These settings are under `llm.free_routing`.
+Gemini retains its original Flex and model fallback policies.
 
 Metadata refreshes every 60 seconds. Local quota reservations are conservative
 and never replenished from a potentially delayed same-day API counter. Separate
 evaluation processes and other account users are reconciled through the live
-counter; provider limits remain authoritative. Rejected returned responses travel
+daily counter, but do not share the process-local pacing. Provider request/token
+limits remain authoritative. Rejected returned responses travel
 with successful fallback usage and are persisted separately, with actual models
 and charges. API-only failures without a returned usage record cannot be priced.
 
@@ -1154,3 +1183,34 @@ membership and digest timestamps establish unchanged inputs. Missing provenance
 requires review under the existing per-run cap. Coherence stats include cache hits.
 The September 16 weak-pair screening pilot failed a held-out merge check, so no
 new automatic rejection screen was enabled.
+
+
+### Jev production duplicate review (September 19, 2026)
+
+`aggregation.jev_review.enabled=true` routes new uncached duplicate pairs to
+TypeSafe Jev 1.13 through OpenRouter's native decisions endpoint. Both valid
+merge and reject choices are authoritative; the native probability and
+confidence are recorded rather than applying Flash's 0.8 confidence threshold
+to a different model. Flash fallback retains its existing confidence threshold
+and any last-resort Lite response remains unable to approve a merge.
+
+Each pair gets one Jev attempt (20-second HTTP timeouts), with four concurrent
+requests and 60 requests/minute. Transport, capacity, context, authentication,
+and response-validation failures immediately fall back to the existing Flash
+chain. A shared 60-second cooldown avoids repeated requests during an outage;
+longer Retry-After values are honored and authentication/payment failures cool
+for at least an hour. Missing OpenRouter credentials also fall back to Flash.
+Oversized pairs use the trial's symmetric prefix trimming while retaining every
+article; the original complete review payload goes to Flash on failure.
+
+Normal duplicate-stage accounting records returned Jev costs and paid rejected
+responses separately from fallback usage. Model, confidence, choice probability
+and truncation metadata remain inspectable in the saved review rationale.
+Existing exact-input decisions remain cached. Explicitly supplied evaluation
+clients remain pinned. Other pipeline roles retain their current routing.
+
+The previous independent Jev shadow is disabled to avoid duplicate charges.
+Its saved comparison artifacts remain available; its installed worker exits
+with disabled status. Set `jev_review.enabled=false` to restore Flash-only
+duplicate review for new requests. This routing change was explicitly approved
+after the live disagreement audit; it accepts the observed quality tradeoff.

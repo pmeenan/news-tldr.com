@@ -105,15 +105,21 @@ def _stderr_progress(message: str) -> None:
     print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
 
 
-def _pending_editorial_count(*, excluded_event_ids: list[str] | None = None) -> int:
+def _pending_editorial_count(
+    *, excluded_event_ids: list[str] | None = None, event_ids: list[str] | None = None,
+) -> int:
+    selected = sorted(set(event_ids)) if event_ids is not None else None
+    if selected == []:
+        return 0
+    selection = f" AND event_id IN ({','.join('?' for _ in selected)})" if selected is not None else ""
     excluded = sorted(set(excluded_event_ids or []))
     exclusion = f" AND event_id NOT IN ({','.join('?' for _ in excluded)})" if excluded else ""
     hold_minutes = int(load_pipeline_config().editorial.get("single_source_hold_minutes", 0) or 0)
     with StateDB() as state:
         clause, params = pending_editorial_sql(hold_minutes=hold_minutes, state=state)
         row = state.conn.execute(
-            f"SELECT COUNT(*) FROM events WHERE {clause}{exclusion}",
-            [*params, *excluded],
+            f"SELECT COUNT(*) FROM events WHERE {clause}{selection}{exclusion}",
+            [*params, *(selected or []), *excluded],
         ).fetchone()
         return int(row[0]) if row else 0
 
@@ -121,6 +127,10 @@ def _pending_editorial_count(*, excluded_event_ids: list[str] | None = None) -> 
 def _blocking_editorial_count(stats: dict) -> int:
     # Validation failures remain pending and unhealthy, but do not starve unrelated news.
     rejected = stats.get("rejected_event_ids")
+    if "candidate_event_ids" in stats:
+        # Holds, retry cooldowns and category gaps can open while this pass runs.
+        # Newly eligible events belong to a later pass, not this pass's finish line.
+        return _pending_editorial_count(event_ids=stats["candidate_event_ids"], excluded_event_ids=rejected)
     return _pending_editorial_count(excluded_event_ids=rejected) if rejected else _pending_editorial_count()
 
 
@@ -305,7 +315,13 @@ def run_completed_pipeline(
                     max_article_rowid=backlog_article_rowid
                 )
                 remaining_editorial = _blocking_editorial_count(prior_work_stages["prior_editorial"])
-                if any(remaining_upstream.values()) or remaining_editorial:
+                if any(remaining_upstream.values()) and progress:
+                    progress(
+                        "run: upstream items remain pending after their backlog attempt; "
+                        "continuing healthy work and final duplicate review "
+                        f"(digest={remaining_upstream['digest']}, aggregation={remaining_upstream['aggregation']})"
+                    )
+                if remaining_editorial:
                     collect_stats = collection_future.result()
                     if progress:
                         progress(

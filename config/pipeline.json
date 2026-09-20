@@ -20,6 +20,23 @@
     "deduplication_max_pairs_per_run": 120,
     "deduplication_max_passes_per_run": 1,
     "deduplication_lookback_hours": 72,
+    "jev_review": {
+      "enabled": true,
+      "concurrency": 4,
+      "requests_per_minute": 60,
+      "timeout_seconds": 20,
+      "cooldown_seconds": 60,
+      "max_request_bytes": 118000
+    },
+    "jev_shadow": {
+      "enabled": false,
+      "concurrency": 4,
+      "requests_per_minute": 60,
+      "timeout_seconds": 30,
+      "max_attempts": 3,
+      "max_request_bytes": 118000,
+      "daily_budget_usd": 0.5
+    },
     "min_category_impact": 0.3,
     "min_category_impact_overrides": {
       "entertainment": 0.4
@@ -71,7 +88,9 @@
       "cooldown_seconds": 120,
       "metadata_ttl_seconds": 60,
       "max_in_flight_per_model": 40,
-      "free_requests_per_minute": 20
+      "free_requests_per_minute": 20,
+      "max_wait_seconds": 180,
+      "rate_limit_retry_seconds": 60
     },
     "flex_cooldown_seconds": 45,
     "flex_retry_seconds": 600,

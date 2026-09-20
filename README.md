@@ -66,7 +66,7 @@ is ignored by git and must not be committed. Bulk digestion, grouping, scoring,
 candidate discovery, editorial evidence extraction, the regeneration gate, and
 homepage category sections use 3.5 Flash-Lite with minimal thinking. Borderline
 article-filter decisions, drafting, verification, Top News curation, and final
-event-merge decisions use 3.8 Flash with low thinking, falling back to 3.7
+event-merge fallback decisions use 3.8 Flash with low thinking, falling back to 3.7
 Flash when capacity is constrained. 3.5 Flash costs twice as much, so only
 editorial verification may reach it as a last resort. Deduplication may fall
 back once more to 3.5 Flash-Lite, but a Lite result can only reject or defer a
@@ -115,32 +115,53 @@ Production enables `LLM_BACKEND=free-first` in the ignored `.env`:
 
 | Work normally assigned to | Preferred routing |
 | --- | --- |
-| Flash | Union Alpha while confirmed $0 → existing Gemini Flash chain |
-| Flash-Lite | Nemotron 3 Super while confirmed $0 and free quota remains → Union Alpha while confirmed $0 → existing Gemini Flash-Lite chain |
+| Flash | Existing Gemini Flash chain directly |
+| Flash-Lite | Nemotron 3 Super while confirmed $0 and free quota remains → existing Gemini Flash-Lite chain |
 
-This applies to verification and merge/coherence reviews as well as drafting.
-Draft and verification remain separate calls, but can both use Union Alpha.
+Union Alpha was removed from the rotation on September 18, 2026 after its free
+preview ended. Verification, merge/coherence reviews and drafting use Gemini.
+Draft and verification remain separate calls.
 Source-evidence checks, content validation, repair limits and rejected-story
 handling remain active. Semantic rejection still uses the existing stage repair
 policy; it is not automatically overturned by asking a paid model to approve it.
 
+Invalid Nemotron shapes fall through immediately to Flash-Lite. Local domain
+validation also triggers Lite fallback for digestion, grouping, scoring and
+evidence extraction. Subsequent repairs for that task stay on Lite, retain its
+normal retry allowance, and account for rejected responses. Other workers may
+continue using Nemotron. This adds no full-Flash validation call; existing
+filter, membership and editorial verification guards remain in place.
+
 The router checks the live model catalog and account free-request counter, caching
-metadata for 60 seconds. Unknown prices or quota fail closed for that candidate;
-an unavailable quota lookup does not prevent Union requests. Every candidate
+metadata for 60 seconds. Unknown prices or quota skip Nemotron. Every candidate
 request also enforces zero input, output and per-request prices through provider
 price ceilings. Paid OpenRouter variants are never selected.
 
 `llm.free_routing` in `config/pipeline.json` controls the defaults: **two attempts
 per candidate**, 90-second request timeout, 120-second shared failure cooldown,
 40 in-flight calls per model (matching the largest stage worker pool), and
-20 Nemotron attempts per rolling minute.
-429 responses fall through immediately and honor longer `Retry-After` cooldowns.
-Saturated local slots fall through without queuing. Workers share quota
-reservations and cooldowns across stages within the process. Failed attempts
-consume local quota reservations conservatively until the next UTC day; external
-account usage is reconciled by the periodic key check. API limits remain authoritative.
+20 attempts per minute per model, spaced about three seconds apart. Nemotron's
+`free_requests_per_minute` can lower its 20-RPM ceiling.
+Workers queue in arrival order for each model, including retries and saturated
+local slots. All stages share this pacing within the process. Waiting workers
+consume neither daily quota nor active-request slots.
+
+429 responses set a shared `rate_limit_retry_seconds` cooldown (60 seconds by
+default, extended by longer `Retry-After` hints), then retry within the two-attempt
+limit. `max_wait_seconds` sets a shared admission deadline 180 seconds from the
+start of each routed request, covering queue admission and all retries. No further
+waiting is allowed after it expires; an immediately available candidate can still
+run, and an admitted request retains its 90-second timeout. A cooldown extending
+beyond the deadline skips immediately. Other exhausted transport failures
+keep the existing 120-second cooldown and fallback behavior.
+
+Workers share quota reservations and cooldowns across stages within the process.
+Failed attempts consume local quota reservations conservatively until the next UTC day; external
+account usage is reconciled by the periodic key check. Separate processes do not
+share the minute pacing; avoid simultaneous external evaluations using this key.
+API limits remain authoritative, including upstream capacity and token limits.
 Returned rejected responses are included in usage accounting when a fallback
-succeeds. Verbose output explains routing, skips and failures.
+succeeds. Verbose output explains routing, waits, skips and failures.
 
 Set `LLM_BACKEND=gemini` to disable this policy. Tier-specific backend settings
 override the global choice; explicit evaluation backend flags override both.
@@ -192,18 +213,6 @@ different limits, including upstream provider limits.
 Check the current [limits](https://openrouter.ai/docs/api/reference/limits) and
 [endpoint support](https://openrouter.ai/docs/guides/features/structured-outputs).
 
-Union Alpha advertises JSON mode rather than enforced JSON Schema. To evaluate
-it with Gemini evidence and verification, while leaving production routing alone:
-
-```bash
-OPENROUTER_RESPONSE_FORMAT=json_object OPENROUTER_REASONING_EFFORT= \
-OPENROUTER_MAX_OUTPUT_TOKENS=8192 \
-./.venv/bin/python scripts/evaluate-editorial.py --verbose \
-  --backend openrouter --model stealth/union-alpha \
-  --evidence-backend gemini --verification-backend gemini \
-  --output data/evaluations/union-alpha-editorial.json
-```
-
 For repeatable provider selection, `OPENROUTER_PROVIDER_PREFERENCES` accepts the
 OpenRouter provider JSON object, for example
 `{"only":["provider-slug"],"allow_fallbacks":false}`. The adapter always requires
@@ -213,6 +222,111 @@ of a particular Spark quantization. Usage accounting records OpenRouter's actual
 reported charge, including zero, and separates reasoning from visible output
 without double counting. Missing cost metadata stays unknown unless a matching
 price-table entry is configured.
+
+### Jev duplicate-review shadow
+
+`aggregation.jev_shadow.enabled` captures each live, uncached duplicate-review
+pair before the normal reviewer runs. An independent cron worker consumes the
+private queue every minute. Jev never approves/rejects production work and its
+latency or failures do not delay the pipeline. Cached pairs do not buy a shadow
+call. Capture is limited to the project database; temporary evaluation databases
+are excluded.
+
+The worker uses `OPENROUTER_API_KEY`, the native decisions endpoint, and pinned
+TypeSafe hosting for `typesafe/jev-1.13`. It shares neither the pipeline lock nor
+the Gemini/free-model worker pool. Defaults are four concurrent calls, 60 RPM,
+30-second HTTP timeouts, at most three attempts and a $0.50 UTC-day reservation
+budget. Provider limits and the account guardrail also apply. Unknown charges
+retain reservations; interrupted requests are not blindly reissued. Rate limits
+stop new admissions and persist the provider cooldown.
+
+Requests over 118,000 UTF-8 bytes shorten headlines/summaries in **both** event
+clusters by a common fraction, preserving their beginnings and every article.
+A provider context rejection retries with a smaller budget. Structural inputs
+that cannot fit with minimum prefixes are recorded as shadow errors. The normal
+reviewer's input is unchanged. Reports identify truncated comparisons separately.
+
+Read the latest 24-hour comparison without making API calls:
+
+```bash
+./.venv/bin/python -m pipeline.jev_shadow --report --hours 24
+```
+
+Manually drain up to 120 queued pairs (the cron worker uses the same command):
+
+```bash
+./.venv/bin/python -m pipeline.jev_shadow --verbose --limit 120
+```
+
+A separate file lock prevents overlapping workers. Inputs, reference decisions,
+Jev requests/results, restart-safe accounting and `report.json` live under ignored
+`data/evaluations/jev-live-shadow/`. Logs are in `worker.log`. Usage is recorded
+under `routing_evaluation`, with unique `jev-shadow-live-` attempt IDs, so shadow
+charges remain separate from production spend. Reports compare production merge
+approval (including its confidence threshold); Lite fallbacks are explicitly
+marked and must not be treated as independent quality labels. Disable the config
+flag to stop new capture and future worker invocations; an active worker may finish.
+
+### Optional Bonsai 2 GPU smoke test
+
+The `llm` host has an isolated, manually invoked Bonsai 2 installation at
+`/home/pmeenan/llm-tests/bonsai2-27b/`. It is not a pipeline backend and has no
+startup service. It uses Prism's CUDA 12.8 runtime
+[`prism-b10683-d8f26ee`](https://github.com/PrismML-Eng/llama.cpp/releases/tag/prism-b10683-d8f26ee)
+and both the 5.95 GB `PTQ1_0` and 7.21 GB `PQ2_0` weights from
+[`prism-ml/Ternary-Bonsai-2-27B-gguf`](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf),
+pinned to model revision `6ed5e12bf84b7a63069882c91dd9e9218647d17b`.
+The downloads were checked against their published SHA-256 digests. The runtime
+uses the host's existing libraries in `/usr/local/lib/ollama/cuda_v12`.
+No Python dependency or system CUDA toolkit was added. Trivy 0.74.0 scanned the
+runtime before execution, but identified no supported package manifests; this
+does not establish that the native binaries are vulnerability-free.
+
+Repeat the small synthetic test with Ollama's models unloaded:
+
+```bash
+ssh llm 'python3 /home/pmeenan/llm-tests/bonsai2-27b/run-test.py --context 8192'
+```
+
+For a 16K-token retrieval test with a 32K context allocation:
+
+```bash
+ssh llm 'python3 /home/pmeenan/llm-tests/bonsai2-27b/run-test.py --context 32768 --long-only'
+```
+
+Add `--packing PQ2_0` to either command to test the larger packing with the same
+settings. The default remains `PTQ1_0`; PQ2 results and logs have separate names
+so they do not overwrite the PTQ results.
+
+The runner starts one temporary, authenticated loopback server on port 18080,
+records responses, timings and GPU memory in that directory, then stops the
+server. Generation uses a 512-token thinking budget. The September 18 PTQ1 smoke test
+offloaded all 65 layers and peaked at 6,600 MiB for an 8K context and 8,160 MiB for
+32K. Short-input generation was about 61 tokens/second; the long request took
+23.79 seconds. All requests completed and all seven structured responses parsed,
+but one rumor headline lost attribution and one of two grouping fixtures missed
+a related pair. These simplified synthetic prompts are not a production quality
+evaluation. Private results are in `data/evaluations/bonsai2-20260918/`; no hosted
+inference calls, routing changes, publication or automatic startup were involved.
+
+The matching PQ2 test also offloaded all 65 layers, peaking at 7,744 MiB for 8K
+and 9,304 MiB for 32K. Short-input generation averaged 73.43 tokens/second, and
+the same long request took 13.78 seconds. All seven structured responses parsed,
+but the rumor headline still lost attribution and one grouping answer omitted an
+input headline. These single runs do not establish a quality advantage. See
+`data/evaluations/bonsai2-20260918/report-pq2.md` for the comparison. Both models
+remain installed for manual tests only.
+
+The separate full-stage quality study is under
+`data/evaluations/bonsai2-capability-matrix-20260918/`. It reuses the OpenRouter
+capability benchmark's 265 frozen fixtures across 16 jobs and its 530 Gemini
+references, testing both packings with native reasoning off and full/xhigh.
+The larger test uses a 64K context and removes the smoke test's thinking cap.
+`plan.md` documents the protocol and resume command; `status.json`, `findings.md`
+and `matrix.csv` track progress. Screening, repeats, independent source audits
+and bounded drafting workflows are automated; source adjudication and held-out
+qualification remain explicit follow-up phases. The temporary runtime has no
+startup service, and no production routing changes are implied by its results.
 
 ### Pipeline Commands
 
@@ -764,3 +878,34 @@ membership and digest timestamps establish unchanged inputs. Missing provenance
 requires review under the existing per-run cap. Coherence stats include cache hits.
 The September 16 weak-pair screening pilot failed a held-out merge check, so no
 new automatic rejection screen was enabled.
+
+
+### Jev production duplicate review (September 19, 2026)
+
+`aggregation.jev_review.enabled=true` routes new uncached duplicate pairs to
+TypeSafe Jev 1.13 through OpenRouter's native decisions endpoint. Both valid
+merge and reject choices are authoritative; the native probability and
+confidence are recorded rather than applying Flash's 0.8 confidence threshold
+to a different model. Flash fallback retains its existing confidence threshold
+and any last-resort Lite response remains unable to approve a merge.
+
+Each pair gets one Jev attempt (20-second HTTP timeouts), with four concurrent
+requests and 60 requests/minute. Transport, capacity, context, authentication,
+and response-validation failures immediately fall back to the existing Flash
+chain. A shared 60-second cooldown avoids repeated requests during an outage;
+longer Retry-After values are honored and authentication/payment failures cool
+for at least an hour. Missing OpenRouter credentials also fall back to Flash.
+Oversized pairs use the trial's symmetric prefix trimming while retaining every
+article; the original complete review payload goes to Flash on failure.
+
+Normal duplicate-stage accounting records returned Jev costs and paid rejected
+responses separately from fallback usage. Model, confidence, choice probability
+and truncation metadata remain inspectable in the saved review rationale.
+Existing exact-input decisions remain cached. Explicitly supplied evaluation
+clients remain pinned. Other pipeline roles retain their current routing.
+
+The previous independent Jev shadow is disabled to avoid duplicate charges.
+Its saved comparison artifacts remain available; its installed worker exits
+with disabled status. Set `jev_review.enabled=false` to restore Flash-only
+duplicate review for new requests. This routing change was explicitly approved
+after the live disagreement audit; it accepts the observed quality tradeoff.

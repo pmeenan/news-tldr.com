@@ -13,3 +13,8 @@ pip-audit>=2.7,<3
 pytest>=9.0.3,<10
 pytest-asyncio>=0.23,<1
 ruff>=0.3.0,<1
+
+# Optional external evaluation tools on llm (not pip dependencies; see README):
+# Prism llama.cpp prism-b10683-d8f26ee, CUDA 12.8; Trivy 0.74.0.
+# Bonsai 2 PTQ1_0/PQ2_0 model revision 6ed5e12bf84b7a63069882c91dd9e9218647d17b.
+# Installed only in /home/pmeenan/llm-tests/bonsai2-27b; no startup service.

@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pipeline.config import load_categories, load_feeds, load_pipeline_config
-from pipeline.llm import GeminiResult, create_llm_client
+from pipeline.jev import JevDuplicateClient
+from pipeline.jev_shadow import ShadowRecorder
+from pipeline.llm import GeminiResult, create_llm_client, generate_validated_json, validation_session
 from pipeline.lock import PipelineLock
 from pipeline.paths import EVENT_DIR, LOCK_PATH, PROJECT_ROOT, STORY_DIR
 from pipeline.state import StateDB
@@ -1015,6 +1017,10 @@ def aggregate_once(
         dedup_review_generator = create_llm_client(
             "review", include_lite=True, purpose="deduplication", progress=progress
         )
+        if (config.aggregation.get("jev_review") or {}).get("enabled", False):
+            dedup_review_generator = JevDuplicateClient(
+                dedup_review_generator, config.aggregation["jev_review"], progress=progress,
+            )
         coherence_generator = create_llm_client("review", purpose="coherence", progress=progress)
         post_review_clients = [dedup_generator, dedup_review_generator, coherence_generator]
     else:
@@ -1267,6 +1273,13 @@ def aggregate_once(
                             group_articles = batch["articles"]
                             if batch_error is not None:
                                 group_exc = batch_error
+                                if run_id and not dry_run:
+                                    failed = getattr(group_exc, "llm_result", None)
+                                    attempts = ([{"model": failed.model, "usage": failed.usage}] if failed else
+                                                getattr(group_exc, "routing_attempts", []))
+                                    for request in attempts:
+                                        state.record_llm_usage(run_id, "aggregation", request["model"],
+                                                               AGGREGATION_PROMPT_VERSION, usage=request["usage"])
                                 group_errors.append({
                                     "category_group": batch["name"],
                                     "article_count": len(group_articles),
@@ -1726,7 +1739,10 @@ def score_groups_newsworthiness(
         }
 
     try:
-        result = client.generate_json(
+        result = generate_validated_json(
+            client, lambda payload: validate_newsworthiness_response(
+                payload, valid_group_indexes={int(group["group_index"]) for group in groups_for_model},
+            ),
             system_instruction=(
                 "You score story clusters for editorial ranking. Return only valid JSON matching the schema."
             ),
@@ -1737,12 +1753,13 @@ def score_groups_newsworthiness(
             result.payload,
             valid_group_indexes={int(group["group_index"]) for group in groups_for_model},
         )
-    except Exception:
+    except Exception as exc:
+        failed = getattr(exc, "llm_result", None)
         return {
             "scores_by_group_index": baseline,
             "fallback_count": len(groups_for_model),
             "elapsed_ms": None,
-            "usage": {},
+            "usage": failed.usage if failed else {},
         }
 
     merged = dict(baseline)
@@ -1785,6 +1802,8 @@ def group_articles_with_gemini(
         articles, mode=mode, valid_categories=valid_categories, active_events=active_events
     )
     last_error: ValueError | None = None
+    client = validation_session(client)
+    discarded: list[dict[str, Any]] = []
     for attempt in range(2):
         prompt = base_prompt
         if attempt:
@@ -1793,16 +1812,20 @@ def group_articles_with_gemini(
                 f"{last_error}. Retry from scratch. Audit the final JSON so every integer from 0 through "
                 f"{len(articles) - 1} appears exactly once in both 'articles' list and the 'groups' lists."
             )
-        result = client.generate_json(
-            system_instruction=(
-                "You group news articles by the same underlying real-world event "
-                "and classify their content type and category. "
-                "Return only valid JSON matching the schema. Use article indexes only."
-            ),
-            prompt=prompt,
-            response_schema=_grouping_response_schema(valid_categories),
-        )
         try:
+            result = generate_validated_json(
+                client, lambda payload: validate_grouping_response(
+                    payload, article_count=len(articles), valid_categories=valid_categories,
+                    valid_existing_event_ids=valid_existing_event_ids, require_confidence=True,
+                ),
+                system_instruction=(
+                    "You group news articles by the same underlying real-world event "
+                    "and classify their content type and category. "
+                    "Return only valid JSON matching the schema. Use article indexes only."
+                ),
+                prompt=prompt,
+                response_schema=_grouping_response_schema(valid_categories),
+            )
             groups, classifications = validate_grouping_response(
                 result.payload,
                 article_count=len(articles),
@@ -1829,8 +1852,22 @@ def group_articles_with_gemini(
             break
         except ValueError as exc:
             last_error = exc
+            if invalid := getattr(exc, "llm_result", None):
+                discarded.append({"model": invalid.model, "usage": invalid.usage})
             if attempt == 1:
+                if invalid is not None:
+                    exc.llm_result = GeminiResult({}, invalid.model, invalid.elapsed_ms, {
+                        **invalid.usage,
+                        "routingAttempts": [*discarded[:-1], *(invalid.usage.get("routingAttempts") or [])],
+                    })
                 raise
+        except Exception as exc:
+            exc.routing_attempts = [*discarded, *getattr(exc, "routing_attempts", [])]
+            raise
+    if discarded:
+        result = GeminiResult(result.payload, result.model, result.elapsed_ms, {
+            **result.usage, "routingAttempts": [*discarded, *(result.usage.get("routingAttempts") or [])],
+        })
     return {
         "mode": mode,
         "validation_attempts": attempt + 1,
@@ -3208,7 +3245,10 @@ def _evaluate_deduplication_pair(
     payload1: dict[str, Any],
     payload2: dict[str, Any],
 ) -> DeduplicationPairDecision:
-    result = client.generate_json(
+    generate = (
+        lambda **kwargs: client.generate_pair(payload1, payload2, **kwargs)
+    ) if isinstance(client, JevDuplicateClient) else client.generate_json
+    result = generate(
         system_instruction=(
             "You are an expert news editor. Determine if two event clusters belong in "
             "one evolving homepage story and should be merged."
@@ -3250,6 +3290,10 @@ def _evaluate_and_apply_deduplication_candidates(
     pending = list(candidates)
     merges_count = 0
     worker_count = max(1, concurrency)
+    try:
+        shadow = None if isinstance(client, JevDuplicateClient) else ShadowRecorder.for_state(state, progress)
+    except Exception:
+        shadow = None
     event_articles_by_id = _load_events_articles_summary(
         {
             event["event_id"]
@@ -3290,6 +3334,14 @@ def _evaluate_and_apply_deduplication_candidates(
         decisions: list[DeduplicationPairDecision | None] = [None] * len(round_candidates)
         errors: list[BaseException | None] = [None] * len(round_candidates)
         submittable = [(index, payload) for index, payload in enumerate(payloads) if payload is not None]
+        shadow_paths = {}
+        if shadow:
+            for index, payload in submittable:
+                shadow_paths[index] = shadow.capture(
+                    *payload, run_id=run_id, prompt_version=prompt_version,
+                    priority=(candidate_priorities or {}).get(frozenset(p["event_id"] for p in payload)),
+                    input_signature=_review_signature(*payload),
+                )
         current_workers = min(worker_count, len(submittable))
         if current_workers <= 1:
             for index, (payload1, payload2) in submittable:
@@ -3321,7 +3373,18 @@ def _evaluate_and_apply_deduplication_candidates(
 
         for index, (e1, e2) in enumerate(round_candidates):
             error = errors[index]
+            if shadow and index in shadow_paths:
+                decision = decisions[index]
+                reference = ({"status": "completed", "should_merge": decision.should_merge,
+                              "confidence": decision.confidence, "rationale": decision.rationale,
+                              "model": decision.model, "usage": decision.usage} if decision else
+                             {"status": "error", "error": type(error).__name__})
+                shadow.reference(shadow_paths[index], reference)
             if error is not None:
+                for attempt in getattr(error, "jev_usage", []):
+                    if run_id:
+                        state.record_llm_usage(run_id, usage_stage, attempt["model"], prompt_version,
+                                               usage=attempt["usage"])
                 if progress:
                     progress(
                         f"deduplicate: failed to evaluate pair {e1['event_id']} and {e2['event_id']}: {error}"
@@ -3377,7 +3440,8 @@ def _evaluate_and_apply_deduplication_candidates(
                 bucket["merge" if decision.should_merge else "reject"] += 1
             if (
                 decision.should_merge
-                and decision.confidence >= DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD
+                and (decision.model.startswith("openrouter/typesafe/jev-1.13")
+                     or decision.confidence >= DEDUPLICATION_MERGE_CONFIDENCE_THRESHOLD)
                 and not lite_decision
             ):
                 if not state.event_exists(e1["event_id"]) or not state.event_exists(e2["event_id"]):

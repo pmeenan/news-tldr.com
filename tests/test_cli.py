@@ -368,8 +368,10 @@ def test_run_completed_pipeline_defers_new_work_while_editorial_backlog_remains(
     assert result["stages"]["collect"] == {"feeds_seen": 1}
 
 
-def test_run_completed_pipeline_drains_prior_upstream_work_before_collection(monkeypatch):
+@pytest.mark.parametrize("pending", [{"digest": 1, "aggregation": 0}, {"digest": 0, "aggregation": 34}])
+def test_run_completed_pipeline_continues_after_incomplete_upstream_backlog(monkeypatch, pending):
     calls = []
+    review_passes = []
 
     class FakePipelineLock:
         def __init__(self, *args, **kwargs):
@@ -384,7 +386,7 @@ def test_run_completed_pipeline_drains_prior_upstream_work_before_collection(mon
     upstream_counts = iter(
         (
             {"digest": 4, "aggregation": 2},
-            {"digest": 1, "aggregation": 0},
+            pending,
         )
     )
     collection_started = threading.Event()
@@ -396,9 +398,14 @@ def test_run_completed_pipeline_drains_prior_upstream_work_before_collection(mon
 
     def fake_digest_once(**kwargs):
         assert collection_started.wait(1)
-        assert kwargs["max_article_rowid"] == 42
+        assert kwargs.get("max_article_rowid") in (42, None)
         calls.append(("digest", kwargs["force"]))
         return {"completed": 3}
+
+    def fake_aggregate_once(**kwargs):
+        review_passes.append(kwargs.get("post_review", True))
+        calls.append(("aggregate", kwargs["force"]))
+        return {"processed": 2}
 
     monkeypatch.setattr("pipeline.cli.PipelineLock", FakePipelineLock)
     monkeypatch.setattr("pipeline.cli.migrate", lambda: None)
@@ -419,7 +426,7 @@ def test_run_completed_pipeline_drains_prior_upstream_work_before_collection(mon
     )
     monkeypatch.setattr(
         "pipeline.cli.aggregate_once",
-        lambda **kwargs: calls.append(("aggregate", kwargs["force"])) or {"processed": 2},
+        fake_aggregate_once,
     )
     monkeypatch.setattr(
         "pipeline.cli.editorial_once",
@@ -443,10 +450,14 @@ def test_run_completed_pipeline_drains_prior_upstream_work_before_collection(mon
         ("aggregate", False),
         ("editorial", False),
         "presentation",
+        ("digest", False),
+        ("aggregate", False),
+        ("editorial", False),
+        "presentation",
     ]
-    assert result["backlog_blocked"] is True
-    assert result["pending_digest"] == 1
-    assert result["pending_aggregation"] == 0
+    assert not result.get("backlog_blocked")
+    assert result["stages"]["presentation"]["published"]
+    assert review_passes == [False, True]
 
 
 def test_run_command_writes_progress_and_combined_stats(monkeypatch, capsys):

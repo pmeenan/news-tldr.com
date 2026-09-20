@@ -1039,3 +1039,30 @@ def test_rejection_retry_is_bounded_and_reopens_for_content_and_prompt_changes(t
         assert state.conn.execute("SELECT attempts FROM editorial_rejections").fetchone()[0] == 1
         monkeypatch.setattr("pipeline.editorial.EDITORIAL_PROMPT_VERSION", "changed-prompt")
         assert deferred_editorial_ids(state) == set()
+
+
+def test_retry_becoming_due_after_candidate_selection_does_not_block_pipeline(tmp_path: Path, monkeypatch) -> None:
+    from datetime import timedelta
+
+    from pipeline.cli import _blocking_editorial_count, _pending_editorial_count
+    from pipeline.editorial import _load_editorial_event, _record_rejection, pending_editorial_sql
+
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    monkeypatch.setattr("pipeline.editorial.load_source_policy", lambda: {})
+    monkeypatch.setattr("pipeline.cli.StateDB", lambda: StateDB(db_path))
+    with StateDB(db_path) as state:
+        _insert_event_and_articles(state, tmp_path)
+        row = state.conn.execute("SELECT * FROM events WHERE event_id='event-1'").fetchone()
+        event = _load_editorial_event(state, row, source_policy={}, article_char_limit=12000, event_char_limit=40000)
+        _record_rejection(state, event)
+        client = FakeEditorialClient(_response())
+        stats = generate_editorial_stories(state=state, run_id="test", client=client, story_dir=tmp_path / "stories")
+        assert stats["candidates"] == 0 and not client.calls
+        later = datetime.now(UTC) + timedelta(hours=7)
+        monkeypatch.setattr("pipeline.cli.pending_editorial_sql",
+                            lambda **kwargs: pending_editorial_sql(now=later, **kwargs))
+        # The retry remains real pending work for the next pass, but was not in this pass.
+        assert _pending_editorial_count() == 1
+        assert _blocking_editorial_count(stats) == 0
+        assert [r["event_id"] for r in editorial_candidate_rows(state=state, now=later)] == ["event-1"]

@@ -24,7 +24,7 @@ from pipeline.evidence import (
     validate_evidence,
     verify_story,
 )
-from pipeline.llm import GeminiEmptyResponseError, GeminiResult, create_llm_client
+from pipeline.llm import GeminiEmptyResponseError, GeminiResult, create_llm_client, validation_session
 from pipeline.lock import PipelineLock
 from pipeline.paths import ACTIVE_STORIES_PATH, LOCK_PATH, PROJECT_ROOT, STORY_DIR
 from pipeline.sources import publisher_id, reporting_origin
@@ -284,6 +284,7 @@ def generate_editorial_stories(
     stats: dict[str, Any] = {
         **admission_stats,
         "candidates": len(rows),
+        "candidate_event_ids": [row["event_id"] for row in rows],
         "deferred_rejections": deferred_count,
         "completed": 0,
         "failed": 0,
@@ -929,7 +930,7 @@ def generate_story(
     records: list[dict[str, Any]] = []
     def record(result: GeminiResult, version: str) -> None:
         records.append({"model": result.model, "prompt_version": version, "usage": result.usage})
-    extractor = evidence_client or client
+    extractor = validation_session(evidence_client or client)
     verifier = verification_client or client
     try:
         if gate_client is not None and previous and isinstance(previous.get("evidence_verification"), dict):
@@ -952,7 +953,7 @@ def generate_story(
                 try:
                     ledger, evidence_result = collect_evidence(event, extractor, feedback=str(exc))
                 except ValueError as retry_exc:
-                    if extractor is client:
+                    if (evidence_client or client) is client:
                         raise
                     # The bulk extractor could not select valid evidence; give the
                     # full-Flash client one attempt before failing the story.

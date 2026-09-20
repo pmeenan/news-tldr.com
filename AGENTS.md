@@ -34,6 +34,113 @@ This file serves as the coordinator and handoff state for AI agents working on t
 
 ## Current State & Handoff
 
+### State on September 19, 2026 (Jev Production Duplicate Review)
+
+- User accepted the live shadow quality/cost tradeoff after review of all 31
+  disagreements (12 Jev decisions favored, 19 Flash; correlated snapshots).
+- New uncached duplicate pairs use Jev native choices, with one attempt, four
+  in flight, 60 RPM, 20-second HTTP timeouts and immediate existing Flash-chain
+  fallback on provider/transport/schema failure. Shared cooldown honors retry
+  hints. Native choices are authoritative; actual confidence is retained.
+  Flash's confidence threshold and Lite's inability to approve remain intact.
+- Disabled redundant shadow capture/worker requests; retained historical data.
+  Existing exact-input review cache remains valid. Other stages are unchanged.
+- Verification: 515 tests passed with production config enabled; Ruff, compilation
+  and whitespace checks passed. One isolated real Jev review succeeded for
+  $0.000031248, charged to routing_evaluation, with no event mutations.
+  Artifact: data/evaluations/jev-production-switch-20260919/smoke.json.
+- The active 16:00 UTC pipeline keeps loaded routing; subsequent newly created
+  duplicate clients use the switch. Monitor availability and actual fallback
+  share. No dependencies/schema changes; source remains uncommitted.
+
+
+### State on September 18, 2026 (Nemotron Validation Fallback and Upstream Progress)
+
+- Invalid free response shapes immediately fall through to Flash-Lite. Local
+  digest, grouping, scoring and evidence validation now also retries invalid
+  Nemotron answers on Lite, preserving the normal paid repair allowance. A
+  request-local session keeps subsequent repairs on Lite without changing other
+  workers. Existing full-Flash quality guards remain; no new Flash validator.
+- Rejected free/paid responses retain usage through successful grouping repairs
+  and terminal digest/grouping errors. Explicit pinned evaluations stay pinned.
+- Pending digest/grouping items after the bounded backlog attempt no longer
+  abort the normal pass or final duplicate review. Failed items remain pending
+  with errors; input eligibility and editorial quality gates are unchanged.
+- Verification: 492 tests passed, including the 32-of-34 regression, preserved
+  paid repairs/accounting, evidence passage fallback and final-pass continuation.
+  Ruff, compilation and whitespace checks passed. Runtime preflight/recovery
+  artifacts are under `data/evaluations/nemotron-live-reliability-20260918/`.
+  No dependency, schema, routing-config or price changes. Source uncommitted.
+- Recovery launched through the normal wrapper at 22:50 UTC after a complete
+  preflight (zero artifact errors). It generated one story and published at
+  22:53 UTC, collected 45 articles, and continued digesting the backlog. The
+  full recovery run is still active; `recovery.json` records its IDs and initial
+  verified stages. Monitor the normal scheduled log and the Jev shadow report.
+
+### State on September 18, 2026 (Live Jev Duplicate Shadow)
+
+- Enabled `aggregation.jev_shadow`: snapshot every uncached live duplicate pair
+  before normal review/merges, then retain its normal reference response. Jev
+  remains observational; no shadow response can approve or suppress a merge.
+- Independent minute cron runs `pipeline.jev_shadow --verbose --limit 120`, with
+  its own lock, four workers, 60 RPM, three attempts, 30-second HTTP timeouts and
+  a $0.50 UTC-day reservation budget. Persistent provider cooldowns and unknown
+  charges survive restarts. Unique attempt IDs make usage reconciliation
+  idempotent; charges remain `routing_evaluation`, not production spend.
+- Oversized Jev inputs shorten text prefixes in both clusters by a common
+  fraction, retaining every article. The normal review input is unchanged.
+  Further provider context failures reduce the request budget. Truncation is
+  explicit in requests/results and comparison reports.
+- Runtime: ignored `data/evaluations/jev-live-shadow/`; report with
+  `python -m pipeline.jev_shadow --report --hours 24`. Disable the config flag to
+  stop new capture and future worker invocations. No agents/watchers are needed.
+  Previous cron/config are saved in
+  `data/state/upgrade-backups/jev-shadow-20260918T181100Z/`.
+- Verification: 484 tests, Ruff, compileall and whitespace checks passed. Three
+  real API smoke cases completed for $0.001383312, including the earlier oversized
+  339-report pair after about 15% prefix trimming; all matched saved references.
+  Smoke inputs/results are isolated in `jev-live-shadow-smoke-20260918`.
+  Full command dry-run was refused by the active 18:00 UTC pipeline lock; no
+  attempt was made to bypass it. No dependency or schema migration was added.
+- The 18:00 UTC pipeline already loaded the previous code. Automatic capture
+  starts on the next invocation (normally 20:00 UTC / 4pm Eastern). Review a full
+  live sample, separating truncated pairs and Lite fallbacks, before enabling
+  any reject-only routing. Source changes remain uncommitted.
+
+### State on September 18, 2026 (Editorial Backlog Gate Repair)
+
+- Production cost audit through 17:07 UTC found $0.39422917 / 951 calls,
+  excluding $19.23279309 of evaluations. Flash was working (151 calls,
+  $0.38003322); low spending masked nine consecutive backlog-blocked runs.
+  Collection wrote 1,539 articles but digestion completed 151; 1,357 unfiltered
+  articles awaited digestion. This is not a representative monthly baseline.
+- Editorial now records candidate_event_ids; both backlog gates count only
+  those selected events. Category gaps and holds/retry cooldowns expiring during
+  a pass cannot move its finish line. Loading/transport failures still block;
+  validation rejections remain deferred with their existing quality gates.
+- Verification: six regression cases failed before the fix and pass after it;
+  all 469 tests, Ruff, compileall, whitespace checks and complete dry-run artifact
+  validation passed (zero errors, calls or mutations). Read-only replay of the
+  noon Eastern pass changes the blocking count from one to zero. The lock is free.
+- Applies to the next scheduled run (2pm Eastern / 18:00 UTC). The backlog has
+  not yet been reprocessed. Confirm digestion/grouping advance, then measure a
+  healthy day without Union Alpha. Private audit/replay reports are under
+  data/evaluations/production-costs-20260918/. No routing, dependency, schema or
+  published-content change; source remains uncommitted.
+
+### State on September 18, 2026 (Union Alpha Retired)
+
+- OpenRouter's live catalog no longer lists `stealth/union-alpha`, its endpoint
+  list is empty, and its model page confirms the free preview ended.
+- Removed Union from routing/catalog eligibility and its rate setting. Production
+  keeps `LLM_BACKEND=free-first`: review/Flash roles now use Gemini directly;
+  bulk/Lite roles try free Nemotron 3 Super, then Gemini Lite. Existing Nemotron
+  queue pacing, quota checks, retries, validation and Gemini Flex chains remain.
+- Updated routing tests and operational documentation. Verification: 463 tests,
+  Ruff, compileall, whitespace checks, production client construction and complete
+  dry-run preflight/artifact validation passed (zero errors, calls or mutations).
+  Changes apply to the next pipeline run; no inference calls or dependencies added.
+
 ### State on September 17, 2026 (Free Hosted Routing)
 
 - Production `.env` now opts into `LLM_BACKEND=free-first`: review/Flash roles

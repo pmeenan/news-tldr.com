@@ -18,11 +18,11 @@ from pipeline.llm import (
     GeminiResult,
     GeminiRetryableError,
     GeminiTruncatedError,
+    generate_validated_json,
     reported_cost_usd,
 )
 from pipeline.openrouter import OPENROUTER_API_BASE, OpenRouterClient
 
-UNION = "stealth/union-alpha"
 NEMOTRON = "nvidia/nemotron-3-super-120b-a12b:free"
 ZERO_PRICE = {"prompt": 0, "completion": 0, "request": 0, "image": 0}
 
@@ -65,7 +65,9 @@ class FreeModelPolicy:
         self._quota_valid = False
         self._active: dict[str, int] = {}
         self._cooldown: dict[str, float] = {}
-        self._requests: deque[float] = deque()
+        self._rate_limit_until: dict[str, float] = {}
+        self._next_attempt: dict[str, float] = {}
+        self._queues: dict[str, deque[object]] = {}
 
     def _get(self, resource: str) -> dict[str, Any]:
         # Short-lived metadata clients avoid a process-global connection pool
@@ -84,7 +86,7 @@ class FreeModelPolicy:
         self._catalog = {}
         try:
             data = self._get("models")["data"]
-            self._catalog = {m["id"]: m for m in data if isinstance(m, dict) and m.get("id") in {UNION, NEMOTRON}}
+            self._catalog = {m["id"]: m for m in data if isinstance(m, dict) and m.get("id") == NEMOTRON}
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             pass
         self._catalog_until = self._clock() + self.settings.get("metadata_ttl_seconds", 60)
@@ -120,7 +122,7 @@ class FreeModelPolicy:
         metadata = self._catalog.get(model)
         if not metadata or not zero_priced(metadata):
             return "not available at a confirmed zero price"
-        required = {"response_format"} | ({"structured_outputs", "reasoning"} if model == NEMOTRON else set())
+        required = {"response_format", "structured_outputs", "reasoning"}
         if not required <= set(metadata.get("supported_parameters") or []):
             return "required JSON/reasoning support unavailable"
         if model == NEMOTRON:
@@ -129,41 +131,82 @@ class FreeModelPolicy:
                 return "free daily quota exhausted or unknown"
         return None
 
-    def acquire(self, model: str) -> str | None:
-        with self._lock:
-            reason = self._unavailable(model, self._clock())
-            if reason:
-                return reason
-            active = self._active.get(model, 0)
-            if active >= self.settings.get("max_in_flight_per_model", 40):
-                return "local concurrency limit"
-            self._active[model] = active + 1
-            return None
+    def reserve_attempt(
+        self, model: str, *, deadline: float | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        progress: Callable[[str], None] | None = None,
+    ) -> str | None:
+        """Wait fairly, then atomically reserve capacity and quota for one send.
 
-    def reserve_attempt(self, model: str) -> str | None:
+        Waiting workers consume neither daily quota nor in-flight slots. Every
+        attempt, including retries, rejoins the shared queue and is spaced out.
+        A missing deadline requests immediate admission only.
+        """
+        deadline = self._clock() if deadline is None else deadline
+        ticket = object()
         with self._lock:
-            now = self._clock()
-            reason = self._unavailable(model, now)
-            if reason:
-                return reason
-            if model == NEMOTRON:
-                while self._requests and now - self._requests[0] >= 60:
-                    self._requests.popleft()
-                if len(self._requests) >= self.settings.get("free_requests_per_minute", 20):
-                    return "free per-minute request budget"
-                self._remaining -= 1
-                self._requests.append(now)
-            return None
+            queue = self._queues.setdefault(model, deque())
+            queue.append(ticket)
+        next_log = 0.0
+        waited = False
+        try:
+            while True:
+                with self._lock:
+                    reason = self._unavailable(model, self._clock())
+                    if reason:
+                        return reason
+                    # Metadata refreshes can take time; base reservations and
+                    # deadlines on the clock after those lookups complete.
+                    now = self._clock()
+                    if waited and now > deadline:
+                        return "request queue exceeds free wait budget"
+                    ready_at = max(self._next_attempt.get(model, 0), self._rate_limit_until.get(model, 0))
+                    active = self._active.get(model, 0)
+                    if queue[0] is ticket and ready_at <= now and active < self.settings.get(
+                        "max_in_flight_per_model", 40,
+                    ):
+                        rpm = min(20, max(1, self.settings.get("free_requests_per_minute", 20)))
+                        self._remaining -= 1
+                        # Small boundary margin keeps every rolling minute below
+                        # the cap even when a provider rounds arrival timestamps.
+                        self._next_attempt[model] = now + 60 / rpm + 0.05
+                        self._active[model] = active + 1
+                        return None
+                    if self._rate_limit_until.get(model, 0) > now:
+                        reason = "rate-limit cooldown"
+                    elif ready_at > now:
+                        reason = "request pacing"
+                    elif active >= self.settings.get("max_in_flight_per_model", 40):
+                        reason = "local concurrency limit"
+                    else:
+                        reason = "queued for request slot"
+                    if now >= deadline or ready_at > deadline:
+                        return f"{reason} exceeds free wait budget"
+                    wait = min(1.0, deadline - now)
+                    if queue[0] is ticket and ready_at > now:
+                        wait = min(wait, ready_at - now)
+                # Never sleep or emit progress while holding the shared lock.
+                if progress and now >= next_log:
+                    progress(f"wait for {model}: {reason} ({deadline - now:.0f}s budget remaining)")
+                    next_log = now + 30
+                waited = True
+                sleep(wait)
+        finally:
+            with self._lock:
+                queue.remove(ticket)
 
     def release(self, model: str) -> None:
         with self._lock:
             self._active[model] -= 1
 
-    def failed(self, model: str, *, delay: float = 0) -> None:
+    def failed(self, model: str, *, delay: float = 0, rate_limited: bool = False) -> None:
         with self._lock:
-            self._cooldown[model] = max(
-                self._cooldown.get(model, 0),
-                self._clock() + max(delay, self.settings.get("cooldown_seconds", 120)),
+            circuit = self._rate_limit_until if rate_limited else self._cooldown
+            default = self.settings.get("rate_limit_retry_seconds", 60) if rate_limited else self.settings.get(
+                "cooldown_seconds", 120,
+            )
+            circuit[model] = max(
+                circuit.get(model, 0), self._clock() + max(delay, default),
             )
             if model == NEMOTRON:
                 self._quota_until = 0  # Reconcile daily/rate-limit failures before trying again.
@@ -226,18 +269,17 @@ class FreeFirstClient:
         self.settings = settings
         self._progress = progress
         self._sleep = sleep
-        self.order = (NEMOTRON, UNION) if stage == "bulk" else (UNION,)
+        self.order = (NEMOTRON,) if stage == "bulk" else ()
         self.models = (*[f"openrouter/{m}" for m in self.order], *getattr(fallback, "models", (fallback.model,)))
         key = os.environ.get("OPENROUTER_API_KEY", "")
-        self.policy = policy or (shared_policy(key, settings) if key else None)
+        self.policy = policy or (shared_policy(key, settings) if key and self.order else None)
         if candidates is not None:
             self.candidates = candidates
             return
         self.candidates = {
             model: OpenRouterClient(
                 model=model, api_key=key, max_attempts=1,
-                response_format="json_schema" if model == NEMOTRON else "json_object",
-                reasoning_effort="low" if model == NEMOTRON else "",
+                response_format="json_schema", reasoning_effort="low",
                 provider_preferences={"max_price": ZERO_PRICE},
                 max_output_tokens=32768, timeout_seconds=settings.get("timeout_seconds", 90),
             ) for model in self.order
@@ -258,51 +300,57 @@ class FreeFirstClient:
         if self._progress:
             self._progress(f"free routing: {message}")
 
+    def validation_session(self) -> ValidationSession:
+        return ValidationSession(self)
+
+    def generate_validated_json(self, validator: Callable[[dict[str, Any]], Any], **kwargs: Any) -> GeminiResult:
+        return self.validation_session().generate_validated_json(validator, **kwargs)
+
     def generate_json(self, **kwargs: Any) -> GeminiResult:
         started = time.monotonic()
         attempts: list[dict[str, Any]] = []
         decisions: list[dict[str, str]] = []
+        deadline = self.policy._clock() + self.settings.get("max_wait_seconds", 180) if self.policy else 0
         for model in self.order if self.policy else ():
-            reason = self.policy.acquire(model)
-            if reason:
-                decisions.append({"model": model, "reason": reason})
-                self._log(f"skip {model}: {reason}")
-                continue
-            try:
-                for attempt in range(self.settings.get("max_attempts", 2)):
-                    reason = self.policy.reserve_attempt(model)
-                    if reason:
-                        decisions.append({"model": model, "reason": reason})
-                        self._log(f"skip {model}: {reason}")
-                        break
-                    result = None
-                    try:
-                        result = self.candidates[model].generate_json(**kwargs)
-                        if reported_cost_usd(result.usage) != 0:
-                            raise RuntimeError("zero request cost was not confirmed")
-                        validate_shape(result.payload, kwargs["response_schema"])
-                        self._log(f"{model} succeeded on attempt {attempt + 1}")
-                        return self._with_routing(result, attempts, decisions, started)
-                    except (RuntimeError, ValueError, httpx.HTTPError) as exc:
-                        result = result or getattr(exc, "llm_result", None)
-                        if result is not None:
-                            attempts.append({"model": result.model, "usage": result.usage})
-                        status = getattr(exc, "status_code", None)
-                        reason = f"{type(exc).__name__}" + (f" HTTP {status}" if status else "")
-                        decisions.append({"model": model, "reason": reason})
-                        self._log(f"{model} attempt {attempt + 1} failed ({reason})")
-                        # Rate limits cool immediately. Other transport/format
-                        # failures get one bounded retry; configuration failures do not.
-                        retry = isinstance(exc, (GeminiRetryableError, GeminiEmptyResponseError,
-                                                 GeminiTruncatedError, ValueError, httpx.TransportError))
-                        delay = getattr(exc, "retry_after_seconds", 0)
-                        exhausted = attempt + 1 >= self.settings.get("max_attempts", 2)
-                        if status == 429 or delay > 0 or not retry or exhausted:
-                            self.policy.failed(model, delay=delay)
+            for attempt in range(self.settings.get("max_attempts", 2)):
+                reason = self.policy.reserve_attempt(model, deadline=deadline, sleep=self._sleep, progress=self._log)
+                if reason:
+                    decisions.append({"model": model, "reason": reason})
+                    self._log(f"skip {model}: {reason}")
+                    break
+                result = None
+                try:
+                    result = self.candidates[model].generate_json(**kwargs)
+                    if reported_cost_usd(result.usage) != 0:
+                        raise RuntimeError("zero request cost was not confirmed")
+                    validate_shape(result.payload, kwargs["response_schema"])
+                    self._log(f"{model} succeeded on attempt {attempt + 1}")
+                    return self._with_routing(result, attempts, decisions, started)
+                except (RuntimeError, ValueError, httpx.HTTPError) as exc:
+                    result = result or getattr(exc, "llm_result", None)
+                    if result is not None:
+                        attempts.append({"model": result.model, "usage": result.usage})
+                    status = getattr(exc, "status_code", None)
+                    reason = f"{type(exc).__name__}" + (f" HTTP {status}" if status else "")
+                    decisions.append({"model": model, "reason": reason})
+                    self._log(f"{model} attempt {attempt + 1} failed ({reason})")
+                    retry = isinstance(exc, (GeminiRetryableError, GeminiEmptyResponseError,
+                                             GeminiTruncatedError, httpx.TransportError))
+                    delay = getattr(exc, "retry_after_seconds", 0)
+                    exhausted = attempt + 1 >= self.settings.get("max_attempts", 2)
+                    if status == 429:
+                        self.policy.failed(model, delay=delay, rate_limited=True)
+                        if exhausted:
                             break
-                        self._sleep(1)
-            finally:
-                self.policy.release(model)
+                        # Rejoin the queue; all workers honor this cooldown and
+                        # retry with spacing, within the original wait deadline.
+                        continue
+                    if delay > 0 or not retry or exhausted:
+                        self.policy.failed(model, delay=delay)
+                        break
+                finally:
+                    self.policy.release(model)
+                self._sleep(1)
         self._log(f"fall back to {self.fallback.model}")
         try:
             result = self.fallback.generate_json(**kwargs)
@@ -317,4 +365,49 @@ class FreeFirstClient:
     ) -> GeminiResult:
         return GeminiResult(result.payload, result.model, round((time.monotonic() - started) * 1000), {
             **result.usage, "model": result.model, "routingAttempts": attempts, "routingDecisions": decisions,
+        })
+
+
+class ValidationSession:
+    """A failed free answer never consumes a paid repair or resets another worker's route."""
+
+    def __init__(self, route: FreeFirstClient) -> None:
+        self.route = route
+        self.client: Any = route
+        self.model = route.model
+
+    def generate_json(self, **kwargs: Any) -> GeminiResult:
+        return self.client.generate_json(**kwargs)
+
+    def generate_validated_json(self, validator: Callable[[dict[str, Any]], Any], **kwargs: Any) -> GeminiResult:
+        result = self.client.generate_json(**kwargs)
+        try:
+            validator(result.payload)
+        except ValueError as exc:
+            if result.model not in {f"openrouter/{m}" for m in self.route.order}:
+                self.client = self.route.fallback
+                exc.llm_result = result
+                raise
+            # Do not mutate the shared route, weaken the validator, or promote bulk work to Flash.
+            self.client = self.route.fallback
+            self.route._log(f"{result.model} failed domain validation; retry with {self.client.model}: {exc}")
+            rejected = {"model": result.model, "usage": result.usage}
+            try:
+                replacement = generate_validated_json(self.client, validator, **kwargs)
+            except Exception as paid_error:
+                if paid_result := getattr(paid_error, "llm_result", None):
+                    paid_error.llm_result = self._account(paid_result, rejected)
+                else:
+                    paid_error.routing_attempts = [rejected, *getattr(paid_error, "routing_attempts", [])]
+                raise
+            return self._account(replacement, rejected)
+        return result
+
+    @staticmethod
+    def _account(result: GeminiResult, rejected: dict[str, Any]) -> GeminiResult:
+        return GeminiResult(result.payload, result.model, result.elapsed_ms, {
+            **result.usage, "model": result.model,
+            "routingAttempts": [rejected, *(result.usage.get("routingAttempts") or [])],
+            "routingDecisions": [*(result.usage.get("routingDecisions") or []),
+                                 {"model": rejected["model"], "reason": "domain validation failed"}],
         })

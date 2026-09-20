@@ -4,6 +4,10 @@ This document tracks the phased buildout of the filesystem-backed RSS aggregator
 
 ## Current Direction
 
+- Free bulk validation failures retry on Flash-Lite while preserving paid repair
+  limits and full-Flash safety guards. Pending upstream failures no longer stop
+  unrelated normal-pass processing or final duplicate review.
+
 - **Pipeline**: Python with `feedparser`, pooled `httpx` HTTP/1.1 clients for collection and direct Gemini API calls, `trafilatura`, `beautifulsoup4`, and standard-library `sqlite3`.
 - **Presentation**: Dependency-free Python static renderer in `pipeline/present.py`.
 - **State**: SQLite for pipeline state and incremental processing. JSON files for human-readable stage artifacts.
@@ -338,6 +342,12 @@ gantt
 - [ ] Measure Flex success and standard fallback rates after a complete day with the new routing and gap-fill eligibility.
 - [x] Pilot Lite duplicate rejection on 48 pairs: 24.4% estimated duplicate-stage savings but one incorrect rejection; retain full review and leave screening disabled.
 - [ ] Evaluate a stronger reject-only screen on independent natural candidates, including sports individual/team results and reactions/consequences; shadow-test before allowing it to suppress reviews.
+- [x] Complete Jev retrospective shadow replay: 453 cases, 102 blinded audits;
+  high-confidence duplicate rejection is promising, with survivor bias noted.
+- [x] Add durable live Jev duplicate shadow capture before merges, independent
+  paced worker, symmetric prefix truncation, separate accounting and reporting.
+- [ ] Review a complete live sample, including positive merges and truncated
+  inputs, before allowing any Jev decision to suppress a production review.
 
 - [x] Introduce Gemini passage-ID evidence extraction v3, preserve the quoted ledger and full-Flash verifier, and benchmark costs and rejection behavior against v2.
 - [ ] Observe a full day of v3 extraction costs, repair calls and editorial rejections before extrapolating monthly savings or enabling local Qwen extraction.
@@ -384,7 +394,12 @@ gantt
 - [x] Check category volume: no retained category consistently exceeds 50/day;
   leave impact floors unchanged.
 - [ ] Calibrate confidence against grouping/guard outcomes before changing routing.
-- [ ] Keep local-model evaluation on hold per user; larger hardware is being considered.
+- [ ] Broad local-model evaluation remains on hold. On September 18 the user
+  authorized the separate Bonsai 2 PTQ1_0/PQ2_0 study on `llm`: run the same
+  265-fixture, 16-job capability benchmark with off/full reasoning, repeats and
+  independent checks. Screening is running; source adjudication, held-out stage
+  qualification and offloading recommendations remain outstanding. See ignored
+  `data/evaluations/bonsai2-capability-matrix-20260918/plan.md`.
 
 ### September 17 free hosted routing
 
@@ -394,5 +409,35 @@ gantt
   quota reservations/cooldowns, bounded attempts and concurrency, and Gemini fallback.
 - [x] Preserve validation and repair gates; include verification in Union routing
   as requested, retaining separate draft/check calls and actual-model accounting.
+- [x] Audit three overnight runs: 1,109 Gemini Flex calls ($1.31273), 346 accepted
+  free responses; minute-budget skips and Union 429 cooldowns dominated fallback.
+- [x] Queue and pace both free models across workers, including retries; wait for
+  rate-limit recovery within a shared 180-second deadline before paid fallback.
+  Start each at 20 RPM; Union's setting is conservative, not a published limit.
+- [x] September 18: confirm Union Alpha is absent from the live catalog with no
+  endpoints after its free preview ended; remove it from rotation and settings.
+  Flash roles now use Gemini directly; bulk retains Nemotron then Gemini Lite,
+  including the existing pacing, quota, retry and validation safeguards.
 - [ ] Measure a complete day of Gemini cost, free-model share, failures, pipeline
   completion time and rejection rates before projecting the $100 monthly target.
+
+### September 18 editorial backlog gate repair
+
+- [x] Reproduce the moving editorial finish line: category gaps and retry cooldowns
+  expiring during a pass were counted as unfinished work despite not being selected.
+- [x] Record each pass's candidate event IDs and restrict both backlog gates to
+  those IDs, preserving loading/transport failure blocking and validation deferrals.
+- [x] Add regression coverage and replay the latest blocked run without calls or
+  mutations: the corrected gate reports zero blockers instead of one.
+- [ ] Confirm the next scheduled run advances digestion/grouping and drains the
+  1,357-article unfiltered digest backlog. Measure costs after healthy processing
+  resumes; the $0.394 recorded day is not a representative cost baseline.
+
+
+### September 19 Jev duplicate routing
+
+- [x] Review all 31 disagreements in the frozen 622-pair live shadow sample.
+- [x] User accepted the quality/cost tradeoff: use Jev for duplicate review, with
+  immediate Flash fallback on failure and shared provider cooldown.
+- [x] Disable redundant shadow requests; retain trial artifacts and cached reviews.
+- [ ] Measure production Jev availability, fallback share, latency and actual savings.

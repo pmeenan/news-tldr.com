@@ -71,6 +71,27 @@ class GeminiResult:
     usage: dict[str, Any]
 
 
+def validation_session(client: Any) -> Any:
+    """Keep a free-to-paid validation fallback local to one logical task."""
+    factory = getattr(client, "validation_session", None)
+    return factory() if callable(factory) else client
+
+
+def generate_validated_json(
+    client: Any, validator: Callable[[dict[str, Any]], Any], **kwargs: Any,
+) -> GeminiResult:
+    method = getattr(client, "generate_validated_json", None)
+    if callable(method):
+        return method(validator, **kwargs)
+    result = client.generate_json(**kwargs)
+    try:
+        validator(result.payload)
+    except ValueError as exc:
+        exc.llm_result = result
+        raise
+    return result
+
+
 def parse_dotenv(text: str) -> dict[str, str]:
     parsed: dict[str, str] = {}
     for raw_line in text.splitlines():

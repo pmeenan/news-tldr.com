@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from pipeline.aggregate import category_impact_floor_for_source, category_impact_floors
 from pipeline.config import load_feeds, load_pipeline_config
-from pipeline.llm import GeminiResult, create_llm_client
+from pipeline.llm import GeminiResult, create_llm_client, generate_validated_json
 from pipeline.lock import PipelineLock
 from pipeline.paths import LOCK_PATH, PROJECT_ROOT
 from pipeline.state import StateDB
@@ -582,6 +582,12 @@ def digest_articles_for_aggregation(
                     )
             except Exception as exc:
                 stats["failed"] += 1
+                failed = getattr(exc, "llm_result", None)
+                attempts = ([{"model": failed.model, "usage": failed.usage}] if failed else
+                            getattr(exc, "routing_attempts", []))
+                for request in attempts:
+                    state.record_llm_usage(run_id, "article_digest", request["model"],
+                                           ARTICLE_DIGEST_PROMPT_VERSION, usage=request["usage"])
                 state.update_article_digest_status(
                     article.article_id,
                     status="failed",
@@ -622,7 +628,8 @@ def generate_article_digest(
     content_char_limit: int = DEFAULT_CONTENT_CHAR_LIMIT,
 ) -> dict[str, Any]:
     prompt = _build_digest_prompt(article, content_char_limit=content_char_limit)
-    result = client.generate_json(
+    result = generate_validated_json(
+        client, validate_digest_response,
         system_instruction=(
             "You write accurate, neutral article digests for a news aggregation pipeline. "
             "Use only the supplied article text. Do not infer, guess, or add facts that "
