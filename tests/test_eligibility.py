@@ -22,7 +22,8 @@ NOW = datetime(2026, 9, 13, 12, tzinfo=UTC)
 def state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config = load_pipeline_config()
     config = replace(config, editorial={**config.editorial, "gap_fill_enabled": True,
-                                       "gap_fill_target": 2, "single_source_hold_minutes": 0})
+                                       "gap_fill_target": 2, "gap_fill_category_targets": {},
+                                       "single_source_hold_minutes": 0})
     monkeypatch.setattr("pipeline.eligibility.load_pipeline_config", lambda: config)
     migrate(tmp_path / "state.db")
     with StateDB(tmp_path / "state.db") as db:

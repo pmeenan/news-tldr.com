@@ -479,7 +479,10 @@ arrive first; held events are not counted as pending by the run gate or the
 health check.
 
 The category admission policy is controlled by `editorial.gap_fill_enabled`,
-`gap_fill_target` (12), and optional `gap_fill_category_targets` overrides.
+`gap_fill_target` (production fallback 5), and `gap_fill_category_targets` overrides.
+Production rolling 24-hour targets are World 16, US 12, Politics 6, Business 5,
+Technology 5, Environment 4, Science 3, and Health/Automotive/Entertainment 2 each.
+These control single-publisher gap admissions, not caps on multi-publisher news.
 It applies to normal, forced, event-specific, and backfill generation. Deferred
 single-publisher events remain available to clustering but do not block the run
 or count as an editorial backlog. Failed admitted stories keep their reserved
@@ -629,11 +632,17 @@ to override or `--dry-run` to list fixtures without network calls. Automatic
 validation is not a human quality score; the report leaves human judgments blank.
 See [docs/editorial-evaluation.md](docs/editorial-evaluation.md) for the rubric.
 
-Low-impact filtering uses `aggregation.min_category_impact` (0.25) with optional
+Low-impact filtering uses `aggregation.min_category_impact` (production 0.70) with optional
 per-category overrides in `aggregation.min_category_impact_overrides`, resolved
-from each feed's default category; production raises entertainment to 0.40.
+from each feed's default category. Production floors are World 0.60, US 0.50,
+Politics/Business/Environment 0.75, Technology/Entertainment 0.70,
+Science/Automotive 0.65, and Health 0.80.
 The digest stage applies the same threshold when deciding which borderline
 articles get a full-Flash filter review.
+Together with smaller gap-admission targets, these aim for roughly 50–70 new
+stories daily, weighted toward World and US. They are not a daily quota. Changes
+apply to future processing; existing grouped articles, admissions and published
+stories are not retroactively removed.
 
 Duplicate-event candidates are reviewed in signal order: slug/title matches,
 then keyword-overlap and Flash-Lite prescreen candidates, then three-word title
@@ -909,3 +918,22 @@ Its saved comparison artifacts remain available; its installed worker exits
 with disabled status. Set `jev_review.enabled=false` to restore Flash-only
 duplicate review for new requests. This routing change was explicitly approved
 after the live disagreement audit; it accepts the observed quality tradeoff.
+
+### Local Top News ranking
+
+`llm.local_top_news` in `config/pipeline.json` is disabled by default. When enabled,
+it routes fresh Top News rankings to
+LocalAI's `gemma4-26b-a4b-iq3s` at `http://127.0.0.1:11434/v1`. It makes one
+90-second-bounded request and requires the exact requested number of unique IDs
+from the supplied candidates. Unavailable, truncated or invalid local answers fall
+back to the existing Flash route; deterministic ranking remains the last fallback.
+Set `enabled` to `true` to opt in, or `false` to retain the hosted route. Category sections and all
+other model roles retain their existing routing. Existing unchanged curation is
+still reused. Local usage is recorded as `localai/...` with zero API charge (not
+zero electricity cost). The local server needs the updated llama.cpp backend that
+supports Gemma batched prompt evaluation; the old one-token workaround is not used.
+
+The September 27 qualification kept the hosted default: local ranking was slower,
+with occasional ID-copy errors and order-sensitive omissions, while recent Top News
+API usage was only about $1/month before Gemini credits. Larger LAN-hosted models
+can reuse the saved fixtures without repeating hosted reference calls.

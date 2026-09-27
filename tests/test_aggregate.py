@@ -3046,6 +3046,15 @@ def test_deduplicate_active_events_llm_cross_group_title_cohesion(tmp_path, monk
 
 
 def test_aggregate_once_splits_articles_into_category_groups(tmp_path, monkeypatch) -> None:
+    from dataclasses import replace
+
+    from pipeline.config import load_pipeline_config
+
+    config = load_pipeline_config()
+    monkeypatch.setattr("pipeline.aggregate.load_pipeline_config", lambda: replace(
+        config, aggregation={**config.aggregation, "min_category_impact": 0.3,
+                             "min_category_impact_overrides": {}},
+    ))
     db_path = tmp_path / "pipeline.db"
     migrate(db_path)
     state = StateDB(db_path)

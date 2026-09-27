@@ -25,6 +25,7 @@ from pipeline.evidence import (
     verify_story,
 )
 from pipeline.llm import GeminiEmptyResponseError, GeminiResult, create_llm_client, validation_session
+from pipeline.local_curation import create_top_news_client
 from pipeline.lock import PipelineLock
 from pipeline.paths import ACTIVE_STORIES_PATH, LOCK_PATH, PROJECT_ROOT, STORY_DIR
 from pipeline.sources import publisher_id, reporting_origin
@@ -163,7 +164,7 @@ def editorial_once(
     if client is None:
         evidence_client = create_llm_client("bulk", purpose="evidence", progress=progress)
         verification_client = create_llm_client("review", purpose="editorial", last_resort=True, progress=progress)
-        curation_client = create_llm_client("review", purpose="curation", progress=progress)
+        curation_client = create_top_news_client(progress=progress)
         sections_client = create_llm_client("bulk", purpose="curation", progress=progress)
         owned_clients = [generator, evidence_client, verification_client, curation_client, sections_client]
     else:
@@ -1864,7 +1865,7 @@ def generate_homepage_curation(
     models: set[str] = set()
     raw_top_news: list[str] = []
     try:
-        top_result = client.generate_json(
+        top_request = dict(
             system_instruction=(
                 "You are a senior news homepage editor organizing a concise rolling briefing."
             ),
@@ -1876,11 +1877,20 @@ def generate_homepage_curation(
             max_output_tokens=2_000,
             thinking_level="low",
         )
+        local_ranker = getattr(client, "generate_top_news", None)
+        if callable(local_ranker):
+            top_result = local_ranker(
+                valid_story_ids={card["id"] for card in context[:DEFAULT_CURATION_TOP_CANDIDATES]},
+                target_top_count=target_top_count, **top_request,
+            )
+        else:
+            top_result = client.generate_json(**top_request)
         models.add(top_result.model)
         usage_records.append({"model": top_result.model, "usage": top_result.usage})
         if isinstance(top_result.payload.get("top_news"), list):
             raw_top_news = top_result.payload["top_news"]
     except Exception as exc:
+        usage_records.extend(getattr(exc, "routing_attempts", []))
         errors.append(f"top-news: {exc}")
 
     contexts_by_category: dict[str, list[dict[str, Any]]] = {}

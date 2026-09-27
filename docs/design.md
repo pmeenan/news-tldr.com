@@ -293,7 +293,7 @@ Responsibilities:
 
 - Query the state database for articles not yet assigned to an event.
 - Use completed article digests instead of site-provided teaser summaries where available.
-- Filter out non-news, promotional/affiliate/product/deals, puzzle/game help, gambling picks, archive/index, video-carousel, and no-substantive-content artifacts before grouping. Remaining low-impact articles are filtered using the article digest's category/vertical impact score and `aggregation.min_category_impact` from `config/pipeline.json`; `aggregation.min_category_impact_overrides` raises the floor for specific categories, resolved from the feed's default category (production: entertainment 0.40). Filtered articles are marked with `aggregation_status = filtered_*` so completed windows do not rerun forever on intentionally skipped rows.
+- Filter out non-news, promotional/affiliate/product/deals, puzzle/game help, gambling picks, archive/index, video-carousel, and no-substantive-content artifacts before grouping. Remaining low-impact articles are filtered using the article digest's category/vertical impact score and `aggregation.min_category_impact` from `config/pipeline.json`; `aggregation.min_category_impact_overrides` sets category-specific floors, resolved from the feed's default category (production settings below). Filtered articles are marked with `aggregation_status = filtered_*` so completed windows do not rerun forever on intentionally skipped rows.
 - Video/carousel exclusion does not rely only on the digest model. Aggregation also applies deterministic URL/path and collection-signal checks for obvious media pages (for example `/videos/`, `/video/`, gallery/carousel paths, and untitled pages whose extracted text is dominated by video listings) before grouping.
 - Deduplicate near-identical exact article reprints (e.g., wire service stories) using content and canonical URL hashes during digest and aggregation stages. Headline and summary hashes remain available in `article_fingerprints` for collection-time near-duplicate suppression, but are not used to short-circuit digest generation.
 - Classify each article's content type: news, opinion, analysis, review, or unknown.
@@ -1069,13 +1069,42 @@ and installation. No fixed timezone release or audio automation is implemented.
 
 ### Category gap admissions (September 13, 2026)
 
+September 24 volume tuning aims for roughly 50–70 new stories/day, weighted
+toward World and US. Production uses these article category-impact floors and
+rolling 24-hour single-publisher gap targets:
+
+| Category | Impact floor | Gap target |
+| --- | --- | --- |
+| World | 0.60 | 16 |
+| US | 0.50 | 12 |
+| Politics | 0.75 | 6 |
+| Business | 0.75 | 5 |
+| Technology | 0.70 | 5 |
+| Science | 0.65 | 3 |
+| Environment | 0.75 | 4 |
+| Health | 0.80 | 2 |
+| Automotive | 0.65 | 2 |
+| Entertainment | 0.70 | 2 |
+
+The fallback impact floor is 0.70 and gap target is 5. Sports has no configured
+category. Impact floors use the source feed category; gap targets use the event
+category. Multi-publisher events are not capped. Existing grouped articles,
+admissions and published stories are preserved; future processing adopts the
+new thresholds. A frozen September 20–23 published-story replay estimated
+131.25/day before and 60/day after article filtering and daily gap selection
+(45–70/day), with 28.25/day in World/US. This is directional: it uses retained
+current memberships/scores and calendar-day selection, not historical arrival
+snapshots or the actual rolling admission schedule; new filter reviews,
+regrouping and replacement candidates can change the result. Measure complete
+days after existing backlog clears before adjusting further.
+
 Schema v11 adds `editorial_admissions` (event ID, category, immutable admission
 time), `editorial_policy_state` (one-time retrospective initialization), and
 `events.editorial_material_at` (first publication or latest material revision).
 `pipeline/eligibility.py` resolves canonical publishers from unfiltered article
 assignments. Two-publisher events qualify automatically; eligible recent singles
 are ranked by category impact, global impact, creation time and ID to fill a
-rolling 24-hour category target (12, with optional category overrides). The
+rolling 24-hour category target (production fallback 5, with category overrides). The
 existing minimum-impact filtering and single-source hold still apply. Mere
 processing timestamps do not refresh coverage; first events and published
 material revisions do. Already-admitted singles and their material revisions
@@ -1214,3 +1243,17 @@ Its saved comparison artifacts remain available; its installed worker exits
 with disabled status. Set `jev_review.enabled=false` to restore Flash-only
 duplicate review for new requests. This routing change was explicitly approved
 after the live disagreement audit; it accepts the observed quality tradeoff.
+
+### Local Top News route (September 27, 2026)
+
+Top News has a dedicated `LocalTopNewsClient`, selected by
+`llm.local_top_news.enabled` (currently false). The API fallback is constructed lazily, so successful
+local ranking does not require a hosted inference request. Only the explicit
+ranking method uses LocalAI; section curation retains its separate bulk client.
+Local output must have exact count, unique candidate IDs, a completed response and
+the requested model identity. One bounded local attempt precedes the existing
+Flash route, with existing deterministic normalization as the final fallback.
+Discarded local token usage survives successful API fallback and terminal fallback
+failure. Provenance uses the `localai/` model prefix and explicit zero API charge.
+Cache signatures and published story content are unchanged. No database schema or
+new dependency is required. Existing curation is reused until its inputs change.

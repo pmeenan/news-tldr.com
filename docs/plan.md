@@ -312,6 +312,11 @@ gantt
 
 ## Backlog
 
+- [x] September 24: raise category impact floors and reduce single-publisher gap
+  targets toward 50–70 stories/day, weighted toward World and US; retained
+  September 20–23 replay estimates 60/day (directional, not a hard cap).
+- [ ] Measure daily publication counts and category mix after existing admissions
+  and grouped backlog clear; tune thresholds if volume remains outside 50–70/day.
 - Headless browser fallback for sources that block readability extraction.
 - [x] Add opt-in OpenRouter support across LLM stages and private editorial evaluations,
   including explicit model selection, free-model discovery, JSON-schema conversion,
@@ -441,3 +446,21 @@ gantt
   immediate Flash fallback on failure and shared provider cooldown.
 - [x] Disable redundant shadow requests; retain trial artifacts and cached reviews.
 - [ ] Measure production Jev availability, fallback share, latency and actual savings.
+
+### Local ranking rollout and Gemma qualification — September 27, 2026
+
+- [x] Implement an opt-in local Gemma 26B IQ3 Top News route with exact-ID/count checks, a bounded
+  request, existing Flash fallback, deterministic last fallback and usage tracking.
+- [x] Keep category sections, grouping and editorial safeguards on existing routes.
+- [x] Audit recent Nemotron-to-Lite usage and distinguish quota/capacity failures.
+- [x] Complete extended Gemma IQ3 qualification: 242 local calls, production-size
+  stress tests, current filtering thresholds and concurrency 1/2/4; reuse saved
+  Gemini references without new hosted inference. Two local workers are the useful
+  mixed-workload limit; broader production routing offers no compelling benefit now.
+
+- [x] Retain hosted Top News by default after expanded tests and the user's clarified
+  requirement for material benefit while Gemini credits cover most usage. Keep the
+  tested local route disabled and reuse frozen references for upcoming DGX Spark tests.
+
+- [ ] Reuse the frozen benchmark for larger LAN-hosted models on the DGX Sparks
+  when available, requiring a material quality, latency or net-cost improvement.

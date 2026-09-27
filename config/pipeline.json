@@ -37,9 +37,18 @@
       "max_request_bytes": 118000,
       "daily_budget_usd": 0.5
     },
-    "min_category_impact": 0.3,
+    "min_category_impact": 0.7,
     "min_category_impact_overrides": {
-      "entertainment": 0.4
+      "world": 0.6,
+      "us": 0.5,
+      "politics": 0.75,
+      "business": 0.75,
+      "technology": 0.7,
+      "science": 0.65,
+      "environment": 0.75,
+      "health": 0.8,
+      "automotive": 0.65,
+      "entertainment": 0.7
     },
     "coherence_reviews_per_run": 10
   },
@@ -51,8 +60,19 @@
   },
   "editorial": {
     "gap_fill_enabled": true,
-    "gap_fill_target": 12,
-    "gap_fill_category_targets": {},
+    "gap_fill_target": 5,
+    "gap_fill_category_targets": {
+      "world": 16,
+      "us": 12,
+      "politics": 6,
+      "business": 5,
+      "technology": 5,
+      "science": 3,
+      "environment": 4,
+      "health": 2,
+      "automotive": 2,
+      "entertainment": 2
+    },
     "concurrency": 6,
     "article_char_limit": 12000,
     "event_char_limit": 40000,
@@ -148,6 +168,12 @@
         "batch_input": 0.15,
         "batch_output": 1.25
       }
+    },
+    "local_top_news": {
+      "enabled": false,
+      "api_base": "http://127.0.0.1:11434/v1",
+      "model": "gemma4-26b-a4b-iq3s",
+      "timeout_seconds": 90
     }
   }
 }
