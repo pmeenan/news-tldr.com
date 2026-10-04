@@ -344,8 +344,9 @@ def test_flex_chain_falls_back_to_standard_and_keys_cooldown_by_tier() -> None:
 def test_create_gemini_client_builds_flex_then_standard_chains(monkeypatch: pytest.MonkeyPatch) -> None:
     from pipeline.llm import GeminiClient, create_gemini_client
 
+    monkeypatch.setattr("pipeline.llm.load_dotenv", lambda: {})
     monkeypatch.setenv("GEMINI_API_KEY", "k")
-    monkeypatch.setenv("GEMINI_REVIEW_MODEL", "gemini-3.8-flash")
+    monkeypatch.delenv("GEMINI_REVIEW_MODEL", raising=False)
     monkeypatch.setenv("GEMINI_BULK_MODEL", "gemini-3.5-flash-lite")
     for name in ("GEMINI_REVIEW_FALLBACK_MODELS", "GEMINI_REVIEW_LAST_RESORT_MODELS",
                  "GEMINI_REVIEW_FLEX_MODEL", "GEMINI_REVIEW_FLEX_MODELS", "GEMINI_FLEX_DISABLED"):
@@ -357,14 +358,14 @@ def test_create_gemini_client_builds_flex_then_standard_chains(monkeypatch: pyte
 
     editorial = create_gemini_client("review", purpose="editorial")
     assert editorial.labels == (
-        "gemini-3.6-flash:flex", "gemini-3.8-flash:flex", "gemini-3.7-flash:flex",
-        "gemini-3.8-flash:standard", "gemini-3.7-flash:standard",
+        "gemini-3.8-flash:flex", "gemini-3.8-flash:standard",
     )
     assert editorial._clients[0].timeout_seconds == 240 and editorial._clients[0].max_attempts == 1
     verification = create_gemini_client("review", purpose="editorial", last_resort=True)
-    assert verification.models == ("gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash")
+    assert verification.labels == editorial.labels
+    assert verification.models == ("gemini-3.8-flash",)
     standard_only = create_gemini_client("review", purpose="digest")
-    assert standard_only.labels == ("gemini-3.8-flash:standard", "gemini-3.7-flash:standard")
+    assert standard_only.labels == ("gemini-3.8-flash:standard",)
     dedup = create_gemini_client("review", include_lite=True, purpose="deduplication")
     assert dedup.labels[-1] == "gemini-3.5-flash-lite:standard" and dedup._clients[0].timeout_seconds == 900
     assert isinstance(create_gemini_client("bulk", purpose="digest"), GeminiClient)

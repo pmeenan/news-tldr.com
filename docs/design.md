@@ -270,7 +270,7 @@ Responsibilities:
   - `content_quality in {thin, extraction_noise, paywalled}` (without a HIGH rationale code) → both axes capped at `0.65`.
 - Schema-emit an optional `study_stage` enum on medical/biological/materials research articles (`preclinical`, `animal`, `early_human`, `trial_phase`, `approved`, `observational`, `lab_bench`, `unknown`); `not_applicable`, unrecognized values, and stages attached to uncovered domains such as climate, astronomy, aeronautics, software, or general engineering research are dropped before persistence so the field stays present only when meaningful.
 - Reset aggregation status to `pending` when a digest is generated or refreshed, so a changed impact score can make a previously filtered article eligible again.
-- Use `gemini-3.5-flash-lite` for the first digest. When category impact is within `digest.filter_review_margin` of the aggregation threshold, or a non-`ok` quality label conflicts with a high-impact rationale, run `article-filter-review-v1` on `gemini-3.7-flash`. Persist the first-pass score/quality/model, final reviewer model, rationale, and both usage records. The reviewer may rescue or drop an article; it is not a one-way promotion pass.
+- Use `gemini-3.5-flash-lite` for the first digest. When category impact is within `digest.filter_review_margin` of the aggregation threshold, or a non-`ok` quality label conflicts with a high-impact rationale, run `article-filter-review-v1` on `gemini-3.8-flash`. Persist the first-pass score/quality/model, final reviewer model, rationale, and both usage records. The reviewer may rescue or drop an article; it is not a one-way promotion pass.
 
 The CLI entrypoint is:
 
@@ -312,14 +312,18 @@ Studio API key in local `.env` configuration:
 ```bash
 GEMINI_API_KEY=your-ai-studio-api-key
 GEMINI_BULK_MODEL=gemini-3.5-flash-lite
-GEMINI_REVIEW_MODEL=gemini-3.7-flash
-GEMINI_REVIEW_FALLBACK_MODELS=gemini-3.6-flash,gemini-3.5-flash
+GEMINI_REVIEW_MODEL=gemini-3.8-flash
+GEMINI_REVIEW_FALLBACK_MODELS=
+GEMINI_REVIEW_LAST_RESORT_MODELS=
+GEMINI_REVIEW_FLEX_MODELS=gemini-3.8-flash
 GEMINI_REVIEW_LITE_FALLBACK_MODEL=gemini-3.5-flash-lite
 ```
 
 Bulk calls use `gemini-3.5-flash-lite` with minimal thinking. Selective review
-and editorial calls use the ordered full-Flash chain 3.7 → 3.6 → 3.5 with low
-thinking. A retryable transport, 429, or 5xx failure opens a five-minute
+and editorial calls, including verification, use 3.8 Flash with low thinking,
+trying Flex before standard pricing. Capacity failures retain the shared ten-minute
+Flex retry window and 45-second cooldown. No older full-Flash model is selected.
+A retryable transport, 429, or 5xx failure on standard pricing opens a five-minute
 per-process circuit for that tier so concurrent and subsequent calls bypass it.
 Deduplication alone may use 3.5 Flash-Lite as a final capacity fallback; Lite
 can reject a candidate but cannot authorize a destructive event merge.
@@ -424,7 +428,7 @@ Prompt version `article-digest-v6` includes URL, canonical URL, and estimated-pu
 To handle stories that develop over longer periods and span across different 3-hour windows, the system implements a two-layered event merging strategy:
 
 1. **Proactive Active-Events Matching**: During the window aggregation pass, the aggregator queries the SQLite database for events updated within the last 48 hours matching the categories of the window articles. These active events are filtered to only include those whose title shares at least 2 non-stopword words with at least one article's headline in the current window (or shares the single non-stopword if the event title only has one). This prevents context bloat and false-positive groupings in the LLM. The matched active events are passed to the grouping LLM call (containing their IDs, categories, and titles/headlines). The LLM is instructed to assign window articles directly to these existing events where appropriate, returning their `existing_event_id` in the JSON groups response. The validator only preserves event IDs that were actually included in that prompt.
-2. **Reactive Post-Aggregation Deduplication**: At the end of every aggregation invocation, a reactive deduplication process runs over active and stale events updated in the configured 72-hour lookback, even when no aggregation window changed. It checks for candidate event pairs using suffix conflicts (e.g. `event-name` vs `event-name-2` date-slug collisions), title word overlaps, highly similar article headlines, distinctive keyword overlap, and an inclusive 3.5 Flash-Lite prescreen. Each unique candidate pair then goes to the strict `deduplication-review-v2` call on `gemini-3.7-flash`, which evaluates full article lists, headlines, and digests. A merge requires both `should_merge=true` and confidence of at least `0.80`.
+2. **Reactive Post-Aggregation Deduplication**: At the end of every aggregation invocation, a reactive deduplication process runs over active and stale events updated in the configured 72-hour lookback, even when no aggregation window changed. It checks for candidate event pairs using suffix conflicts (e.g. `event-name` vs `event-name-2` date-slug collisions), title word overlaps, highly similar article headlines, distinctive keyword overlap, and an inclusive 3.5 Flash-Lite prescreen. Each unique candidate pair then goes to the strict `deduplication-review-v2` call on `gemini-3.8-flash`, which evaluates full article lists, headlines, and digests. A merge requires both `should_merge=true` and confidence of at least `0.80`.
 
 When a merge is triggered (either proactively via the window LLM or reactively via post-aggregation deduplication), the aggregator selects a winning event ID, loads historical article IDs from both events, merges their article lists, updates the winning event's JSON and database assignments, deletes the merged-away events' JSON files, and removes their SQLite database entries to prevent historical data loss.
 

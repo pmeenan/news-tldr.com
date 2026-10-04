@@ -111,8 +111,8 @@ gantt
 > AI Studio key loaded from local `.env` as `GEMINI_API_KEY`. Bulk work uses
 > `gemini-3.5-flash-lite` (`GEMINI_BULK_MODEL`, with `GEMINI_MODEL` as a
 > fallback); selective article-filter, editorial, and final deduplication adjudication use
-> an ordered `gemini-3.7-flash` → `gemini-3.6-flash` → `gemini-3.5-flash`
-> capacity fallback chain. Deduplication may use 3.5 Flash-Lite as a final
+> `gemini-3.8-flash` on Flex, falling back to 3.8 standard pricing.
+> Deduplication may use 3.5 Flash-Lite as a final
 > non-authoritative fallback, but Lite cannot approve a merge. May 24 local Ollama evaluation showed that local models
 > could produce valid small-batch structured output, but larger clustering
 > experiments were too slow for the pipeline's needs. Direct Gemini API smoke
@@ -464,3 +464,8 @@ gantt
 
 - [ ] Reuse the frozen benchmark for larger LAN-hosted models on the DGX Sparks
   when available, requiring a material quality, latency or net-cost improvement.
+
+### October 4 Flash migration
+
+- [x] Move all default full-Flash routes, including verification, to 3.8 Flex →
+  3.8 standard; remove older Flash fallbacks and retain bulk Flash-Lite routing.

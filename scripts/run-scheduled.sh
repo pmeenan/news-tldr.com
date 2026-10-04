@@ -5,9 +5,13 @@ set -uo pipefail
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # Cron wakes hourly in the host timezone; decide the cadence in Eastern time.
 if [[ "${1:-}" == "--scheduled" ]]; then
-  if ! "$project_dir/.venv/bin/python" "$project_dir/pipeline/schedule.py"; then
-    exit 0
-  fi
+  "$project_dir/.venv/bin/python" "$project_dir/pipeline/schedule.py"
+  schedule_status=$?
+  case "$schedule_status" in
+    0) ;;
+    3) exit 0 ;;
+    *) echo "Pipeline schedule check failed (exit $schedule_status)" >&2; exit "$schedule_status" ;;
+  esac
 fi
 
 state_dir="$project_dir/data/state"
@@ -23,15 +27,24 @@ fi
 run_status=0
 health_status=0
 brief_status=0
-{
-  echo "[$(date --iso-8601=seconds)] scheduled pipeline starting"
-  cd "$project_dir" || exit 1
-  # A slow hour (flex latency, large backfill) may still be running. Skip
-  # quietly instead of failing the lock and mailing an error.
-  if ! PYTHONPATH=. ./.venv/bin/python -m pipeline.cli lock-status >/dev/null 2>&1; then
-    echo "[$(date --iso-8601=seconds)] previous run still holds the pipeline lock; skipping this hour"
+echo "[$(date --iso-8601=seconds)] scheduled pipeline starting" >>"$log_file"
+cd "$project_dir" || exit 1
+# Only exit 3 means a verified live holder. Preserve import/runtime failures
+# in the log and emit a cron-visible error instead of reporting a held lock.
+PYTHONPATH=. ./.venv/bin/python -m pipeline.cli lock-status >/dev/null 2>>"$log_file"
+lock_status=$?
+case "$lock_status" in
+  0) ;;
+  3)
+    echo "[$(date --iso-8601=seconds)] previous run still holds the pipeline lock; skipping this hour" >>"$log_file"
     exit 0
-  fi
+    ;;
+  *)
+    echo "Pipeline lock check failed (exit $lock_status); see $log_file" | tee -a "$log_file" >&2
+    exit "$lock_status"
+    ;;
+esac
+{
   PYTHONPATH=. ./.venv/bin/python -m pipeline.cli run --verbose || run_status=$?
   PYTHONPATH=. ./.venv/bin/python -m pipeline.cli brief --verbose || brief_status=$?
   PYTHONPATH=. ./.venv/bin/python -m pipeline.cli health --verbose || health_status=$?

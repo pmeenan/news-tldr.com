@@ -9,4 +9,5 @@ def scheduled_hour(now: datetime) -> bool:
 
 
 if __name__ == "__main__":
-    raise SystemExit(0 if scheduled_hour(datetime.now(UTC)) else 1)
+    # Reserve 3 for an intentional skip; runtime/import failures must alert cron.
+    raise SystemExit(0 if scheduled_hour(datetime.now(UTC)) else 3)

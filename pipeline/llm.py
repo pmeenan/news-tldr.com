@@ -32,13 +32,12 @@ DEFAULT_HTTP2 = False
 VALID_THINKING_LEVELS = frozenset({"minimal", "low", "medium", "high"})
 VALID_SERVICE_TIERS = frozenset({"flex", "priority"})
 FLEX_SERVICE_TIER = "flex"
-# 3.5 Flash costs twice 3.8/3.7 Flash, so it is a last resort reserved for
-# verification rather than a general fallback.
-DEFAULT_REVIEW_FALLBACK_MODELS = ("gemini-3.7-flash",)
-DEFAULT_REVIEW_LAST_RESORT_MODELS = ("gemini-3.5-flash",)
-# Prefer the capacity pool that performed best in real editorial probes.
-DEFAULT_REVIEW_FLEX_MODEL = "gemini-3.6-flash"
-DEFAULT_REVIEW_FLEX_MODELS = (DEFAULT_REVIEW_FLEX_MODEL, "gemini-3.8-flash", "gemini-3.7-flash")
+# Full-Flash work stays on 3.8, preferring Flex before standard pricing.
+# Explicit environment overrides remain available for future model migrations.
+DEFAULT_REVIEW_FALLBACK_MODELS: tuple[str, ...] = ()
+DEFAULT_REVIEW_LAST_RESORT_MODELS: tuple[str, ...] = ()
+DEFAULT_REVIEW_FLEX_MODEL = DEFAULT_GEMINI_REVIEW_MODEL
+DEFAULT_REVIEW_FLEX_MODELS = (DEFAULT_REVIEW_FLEX_MODEL,)
 DEFAULT_REVIEW_LITE_FALLBACK_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_CAPACITY_COOLDOWN_SECONDS = 300.0
 # Flex shedding is per request, not a model outage: retry the half-price tier
@@ -567,7 +566,7 @@ def create_gemini_client(
     """Build the client chain for a stage.
 
     ``purpose`` selects the configured flex budget (``llm.flex_budget_seconds``);
-    ``last_resort`` appends the expensive last-resort review models, which only
+    ``last_resort`` appends explicitly configured last-resort review models, which only
     verification should use."""
     cooldown = float(
         os.environ.get(

@@ -45,6 +45,18 @@ This installs the feed parser, HTTP client, article extraction, and scraper depe
 
 Any scripts or pipeline executions should run using the Python interpreter inside `.venv` (e.g., `./.venv/bin/python`).
 
+After an OS upgrade changes the Python minor version, rebuild the virtual
+environment and reinstall `requirements.txt`; old version-specific site-packages
+cannot be reused. Production `.venv` currently links to an environment under
+ignored `data/state/`, created with the explicit `python3.14` interpreter so a
+change to the system `python3` alias cannot silently switch it. Keep the prior
+environment as a rollback backup until the rebuilt environment passes tests,
+`pip check`, and `pipeline.cli run --dry-run --verbose`.
+
+The scheduled wrapper treats exit code 3 from its schedule/lock checks as an
+intentional skip. Import failures and other check errors exit nonzero and emit
+an error to stderr for cron; lock-check diagnostics also remain in the pipeline log.
+
 ### Hosted LLM Setup
 
 Article digestion, story aggregation, editorial generation, and homepage curation
@@ -55,9 +67,9 @@ Create a local `.env` file with an AI Studio API key and the two model tiers:
 GEMINI_API_KEY=your-ai-studio-api-key
 GEMINI_BULK_MODEL=gemini-3.5-flash-lite
 GEMINI_REVIEW_MODEL=gemini-3.8-flash
-GEMINI_REVIEW_FALLBACK_MODELS=gemini-3.7-flash
-GEMINI_REVIEW_LAST_RESORT_MODELS=gemini-3.5-flash
-GEMINI_REVIEW_FLEX_MODELS=gemini-3.6-flash,gemini-3.8-flash,gemini-3.7-flash
+GEMINI_REVIEW_FALLBACK_MODELS=
+GEMINI_REVIEW_LAST_RESORT_MODELS=
+GEMINI_REVIEW_FLEX_MODELS=gemini-3.8-flash
 GEMINI_REVIEW_LITE_FALLBACK_MODEL=gemini-3.5-flash-lite
 ```
 
@@ -66,17 +78,17 @@ is ignored by git and must not be committed. Bulk digestion, grouping, scoring,
 candidate discovery, editorial evidence extraction, the regeneration gate, and
 homepage category sections use 3.5 Flash-Lite with minimal thinking. Borderline
 article-filter decisions, drafting, verification, Top News curation, and final
-event-merge fallback decisions use 3.8 Flash with low thinking, falling back to 3.7
-Flash when capacity is constrained. 3.5 Flash costs twice as much, so only
-editorial verification may reach it as a last resort. Deduplication may fall
+event-merge fallback decisions use 3.8 Flash with low thinking, including
+editorial verification. No older full-Flash model is in the default chain.
+Deduplication may fall
 back once more to 3.5 Flash-Lite, but a Lite result can only reject or defer a
 pair and can never authorize a merge. All calls use Gemini structured output and
 validated responses. Safety-sensitive editorial inputs that produce empty
 responses across all full-Flash tiers get one compact digest/key-fact retry on
 the same full-Flash chain; drafting and verification never use Lite.
 
-Review calls try half-price Flex on **3.6 → 3.8 → 3.7 Flash** before the
-standard chain. Bulk calls retry their Flash-Lite model on Flex. Retryable
+Review calls try half-price **3.8 Flash Flex** before **3.8 Flash standard**.
+Bulk calls retry their Flash-Lite model on Flex. Retryable
 capacity/transport failures cool each model and tier for 45 seconds. Workers
 sharing a client share a ten-minute outage window (`llm.flex_retry_seconds`);
 standard pricing is allowed only after that window expires. A successful Flex
@@ -86,8 +98,8 @@ outage persists, instead of each waiting another ten minutes. Each Flex request
 is limited to the smaller of 60 seconds, its remaining window, and
 `llm.flex_budget_seconds[purpose]`. After expiry, a queued call may make one
 recovery probe of up to 60 seconds on a model whose cooldown has elapsed.
-Empty responses try other Flex models but are not repeatedly retried during
-the wait; wholly empty results retain the editorial compact-input repair path.
+Empty responses are not repeatedly retried during the Flex wait; wholly empty
+results retain the editorial compact-input repair path.
 Non-retryable errors propagate. Verbose output reports cooldowns, waits and
 standard fallback. `GEMINI_REVIEW_FLEX_MODELS` overrides the ordered Flex list;
 the legacy `GEMINI_REVIEW_FLEX_MODEL` moves one model to its front.

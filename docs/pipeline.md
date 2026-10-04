@@ -332,16 +332,16 @@ the allocation below directly; explicit tier overrides take precedence.
 | Article digest | Gemini 3.5 Flash-Lite | Full-Flash review only for borderline/conflicting filters |
 | Active-event filtering, grouping, scoring | Gemini 3.5 Flash-Lite | Deterministic scoring fallback where supported |
 | Deduplication prescreen | Gemini 3.5 Flash-Lite | Candidate discovery only; unchanged chunks are cached |
-| Deduplication decision | Gemini 3.8 → 3.7 Flash | Lite may reject/defer but can never approve a merge |
+| Deduplication decision | Gemini 3.8 Flash | Lite may reject/defer but can never approve a merge |
 | Membership/coherence review | Full-Flash review chain | Lite cannot authorize attachment or partition |
 | Evidence extraction, regeneration gate | Gemini 3.5 Flash-Lite | Exact-passage validation; one full-Flash retry after two Lite failures |
-| Editorial drafting | Gemini 3.8 → 3.7 Flash | Compact full-Flash retry for eligible empty responses; never Lite |
-| Editorial verification | Gemini 3.8 → 3.7 → 3.5 Flash | The only work allowed to reach the last-resort model |
-| Top News curation | Gemini 3.8 → 3.7 Flash | Deterministic ranked fallback |
+| Editorial drafting | Gemini 3.8 Flash | Compact full-Flash retry for eligible empty responses; never Lite |
+| Editorial verification | Gemini 3.8 Flash | Same 3.8 Flex/standard route; never Lite |
+| Top News curation | Gemini 3.8 Flash | Deterministic ranked fallback |
 | Category sections | Gemini 3.5 Flash-Lite | Deterministic ranked fallback |
 
-Review calls try half-price Flex on **3.6 → 3.8 → 3.7 Flash** before the
-standard chain. Bulk calls retry their Flash-Lite model on Flex. Retryable
+Review calls try half-price **3.8 Flash Flex** before **3.8 Flash standard**.
+Bulk calls retry their Flash-Lite model on Flex. Retryable
 capacity/transport failures cool each model and tier for 45 seconds. Workers
 sharing a client share a ten-minute outage window (`llm.flex_retry_seconds`);
 standard pricing is allowed only after that window expires. A successful Flex
@@ -351,8 +351,8 @@ outage persists, instead of each waiting another ten minutes. Each Flex request
 is limited to the smaller of 60 seconds, its remaining window, and
 `llm.flex_budget_seconds[purpose]`. After expiry, a queued call may make one
 recovery probe of up to 60 seconds on a model whose cooldown has elapsed.
-Empty responses try other Flex models but are not repeatedly retried during
-the wait; wholly empty results retain the editorial compact-input repair path.
+Empty responses are not repeatedly retried during the Flex wait; wholly empty
+results retain the editorial compact-input repair path.
 Non-retryable errors propagate. Verbose output reports cooldowns, waits and
 standard fallback. `GEMINI_REVIEW_FLEX_MODELS` overrides the ordered Flex list;
 the legacy `GEMINI_REVIEW_FLEX_MODEL` moves one model to its front.
