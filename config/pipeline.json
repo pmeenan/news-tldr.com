@@ -174,6 +174,29 @@
       "api_base": "http://127.0.0.1:11434/v1",
       "model": "gemma4-26b-a4b-iq3s",
       "timeout_seconds": 90
+    },
+    "claude": {
+      "enabled": true,
+      "model": "claude-haiku-5-5",
+      "roles": {
+        "filter": "medium",
+        "membership": "medium",
+        "newsworthiness": "medium",
+        "top_news": "medium",
+        "sections": "medium",
+        "digest": "high",
+        "draft": "high",
+        "update_gate": "high"
+      },
+      "timeout_seconds": 120,
+      "max_output_tokens": 16384,
+      "cooldown_seconds": 60,
+      "account_cooldown_seconds": 3600,
+      "prices": {
+        "input": 0.1,
+        "output": 0.5,
+        "long_context_multiplier": 5
+      }
     }
   }
 }

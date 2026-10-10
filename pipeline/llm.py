@@ -15,6 +15,7 @@ import httpx
 from pipeline.paths import PROJECT_ROOT
 
 if TYPE_CHECKING:
+    from pipeline.claude import ClaudeRoutingClient
     from pipeline.free_routing import FreeFirstClient
     from pipeline.openrouter import OpenRouterClient
 
@@ -608,11 +609,28 @@ def create_gemini_client(
     raise ValueError("stage must be 'bulk' or 'review'")
 
 
+def llm_client_for_role(client: Any, role: str) -> Any:
+    """Select a paid role without changing explicitly supplied evaluation clients."""
+    select = getattr(client, "for_role", None)
+    return select(role) if callable(select) else client
+
+
+def _claude_route(client: Any, *, enabled: bool, progress: Callable | None) -> Any:
+    from pipeline.config import load_pipeline_config
+
+    settings = load_pipeline_config().llm.get("claude") or {}
+    if not enabled or not settings.get("enabled") or os.environ.get("CLAUDE_DISABLED") == "1":
+        return client
+    from pipeline.claude import ClaudeRoutingClient
+
+    return ClaudeRoutingClient(client, settings, progress=progress)
+
+
 def create_llm_client(
     stage: str, *, backend: str | None = None, model: str | None = None,
     include_lite: bool = False, purpose: str | None = None, last_resort: bool = False,
     progress: Callable[[str], None] | None = None,
-) -> GeminiClient | FallbackGeminiClient | OpenRouterClient | FreeFirstClient:
+) -> GeminiClient | FallbackGeminiClient | OpenRouterClient | FreeFirstClient | ClaudeRoutingClient:
     """Select an opt-in backend; direct Gemini retains its existing default chains.
 
     An explicit model pins an evaluation to that model without model fallbacks.
@@ -632,17 +650,17 @@ def create_llm_client(
             raise ValueError("free-first selects a model chain; use an explicit backend to pin a model")
         return FreeFirstClient(
             stage=stage,
-            fallback=create_gemini_client(
+            fallback=_claude_route(create_gemini_client(
                 stage, include_lite=include_lite, purpose=purpose, last_resort=last_resort, progress=progress,
-            ),
+            ), enabled=backend is None, progress=progress),
             settings=load_pipeline_config().llm.get("free_routing") or {}, progress=progress,
         )
     if selected == "gemini":
         if model:
             return GeminiClient(model=model, thinking_level=_thinking_level_for(model))
-        return create_gemini_client(
+        return _claude_route(create_gemini_client(
             stage, include_lite=include_lite, purpose=purpose, last_resort=last_resort, progress=progress,
-        )
+        ), enabled=backend is None, progress=progress)
     if selected == "openrouter":
         from pipeline.openrouter import OpenRouterClient
 

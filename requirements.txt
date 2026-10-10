@@ -18,3 +18,8 @@ ruff>=0.3.0,<1
 # Prism llama.cpp prism-b10683-d8f26ee, CUDA 12.8; Trivy 0.74.0.
 # Bonsai 2 PTQ1_0/PQ2_0 model revision 6ed5e12bf84b7a63069882c91dd9e9218647d17b.
 # Installed only in /home/pmeenan/llm-tests/bonsai2-27b; no startup service.
+# Optional Clef evaluation (not pip dependencies): llama.cpp v0.6.0
+# (d81235049384534c167caea52b85a694f6103d14), built with the existing LocalAI
+# v4.10.0 Intel oneAPI container; Trivy 0.75.0 scans the source before building.
+# Clef-Flash GGUF revision 4a192915ef971886004b5b13294f2b4c7a7fc39d.
+# Isolated under ignored data/evaluations/clef-jev-20261009; no pipeline routing.

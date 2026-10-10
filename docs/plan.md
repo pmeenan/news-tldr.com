@@ -463,9 +463,65 @@ gantt
   tested local route disabled and reuse frozen references for upcoming DGX Spark tests.
 
 - [ ] Reuse the frozen benchmark for larger LAN-hosted models on the DGX Sparks
-  when available, requiring a material quality, latency or net-cost improvement.
+  when available. October 9 preference: equivalent quality is sufficient to prefer
+  local inference, even for small API savings. For duplicate review, prefer Jev as
+  the hosted fallback; retaining Jev until larger local models qualify is acceptable.
 
 ### October 4 Flash migration
 
 - [x] Move all default full-Flash routes, including verification, to 3.8 Flex →
   3.8 standard; remove older Flash fallbacks and retain bulk Flash-Lite routing.
+
+### October 9 Claude API capability evaluation
+
+- [x] Replay the full 265-case, 16-role matrix through direct Claude Haiku 5.5
+  (medium effort) and Sonnet 5.5 (high), plus 171 cases per model across ten
+  roles at Haiku high / Sonnet maximum. Retain frozen Gemini references,
+  independent source audits, and draft/check/repair workflows.
+- [x] Prefer a selective Haiku-first candidate route: medium for article
+  filtering, membership, newsworthiness and ranking; high for digestion,
+  ordinary drafting and update gates. Default Sonnet is a candidate for
+  evidence extraction and active-event filtering. Keep Gemini for grouping,
+  coherence, prescreen, political framing and final verification; retain Jev.
+- [x] Haiku high passes 15/15 ordinary draft workflows after at most one repair,
+  matching Flash. Its 12/12 framing verifier passes do not establish equivalence:
+  direct source review finds false disagreements in approved final outputs.
+  Sonnet maximum fixes verification controls but times out on 36/171 initial
+  cases with the study's 180-second request timeout.
+- [x] Compare actual October 2–8 Eastern Gemini traffic using measured token
+  ratios. Current Gemini projects to $82.36/month; the candidate mix projects
+  to $94.59 Claude plus $13.06 remaining Gemini, before credits and changes in
+  repair/fallback volume. A blanket replacement projects to $56.43 for Haiku
+  or $833.12 for Sonnet, without establishing equivalent quality.
+- [x] Account for 1,281 returned calls at $12.85142470 under `routing_evaluation`.
+  Another 52 attempts returned no usage (51 Sonnet timeouts and one Gemini 503);
+  possible charges are unknown. Seven targeted checks, Ruff, compilation,
+  frozen-request integrity, accounting reconciliation and whitespace checks
+  validate the isolated tools. No dependencies or production routing changed.
+- [x] Implement the user-selected Haiku-only route with existing free/local
+  attempts, independent verification and original Gemini fallback intact.
+- [ ] Measure a fresh production sample, repair volume, availability and actual
+  credit consumption before expanding.
+- Private report and supporting artifacts:
+  `data/evaluations/claude-matrix-20261009/report.html`.
+
+### Haiku-only production routing — October 9, 2026 (Eastern)
+
+- [x] Route medium thinking to article filtering, membership, newsworthiness,
+  Top News and sections; high to digestion, ordinary drafts and update gates.
+- [x] Keep the proposed Sonnet roles on the existing routes; retain Jev and Gemini
+  final verification. Preserve explicit evaluation pins and optional local priority.
+- [x] Fall back on missing keys, exhausted credits, provider/transport/schema failures;
+  share cooldowns, retain discarded usage, and provide an immediate disable switch.
+- [x] Save the original configuration under ignored upgrade-backups. No dependency,
+  database schema, published-content or frontend changes are required.
+- Projected monthly usage at the October 2–8 call mix: **$53.58 Claude + $15.34
+  Gemini**, before credits and changes in repair/fallback volume, versus $82.36
+  Gemini. Live results must establish the actual savings.
+- Smoke artifacts: `data/evaluations/claude-routing-20261010/`.
+- Verification: 567 tests passed with routing enabled; Ruff, compilation and
+  whitespace checks passed. Full artifact validation found zero errors. Eight
+  isolated live Haiku role cases validated, and a simulated credit error completed
+  through real Gemini; nine calls cost $0.0085943 under `routing_evaluation`.
+  The combined dry run was blocked by the existing scheduled pipeline lock; no
+  lock was bypassed. Newly started pipeline processes load the enabled route.

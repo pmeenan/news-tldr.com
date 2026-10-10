@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from pipeline.aggregate import category_impact_floor_for_source, category_impact_floors
 from pipeline.config import load_feeds, load_pipeline_config
-from pipeline.llm import GeminiResult, create_llm_client, generate_validated_json
+from pipeline.llm import GeminiResult, create_llm_client, generate_validated_json, llm_client_for_role
 from pipeline.lock import PipelineLock
 from pipeline.paths import LOCK_PATH, PROJECT_ROOT
 from pipeline.state import StateDB
@@ -629,7 +629,7 @@ def generate_article_digest(
 ) -> dict[str, Any]:
     prompt = _build_digest_prompt(article, content_char_limit=content_char_limit)
     result = generate_validated_json(
-        client, validate_digest_response,
+        llm_client_for_role(client, "digest"), validate_digest_response,
         system_instruction=(
             "You write accurate, neutral article digests for a news aggregation pipeline. "
             "Use only the supplied article text. Do not infer, guess, or add facts that "
@@ -689,7 +689,7 @@ def generate_article_digest_with_review(
     if review_reason is None:
         return first_pass
 
-    result = review_client.generate_json(
+    result = llm_client_for_role(review_client, "filter").generate_json(
         system_instruction=(
             "You are the senior review editor for a news aggregation pipeline. "
             "Independently verify the article digest and especially whether the article "

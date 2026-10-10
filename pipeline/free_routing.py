@@ -1,6 +1,7 @@
 """Prefer explicitly selected zero-priced models, then the existing Gemini chain."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import math
 import os
@@ -19,6 +20,7 @@ from pipeline.llm import (
     GeminiRetryableError,
     GeminiTruncatedError,
     generate_validated_json,
+    llm_client_for_role,
     reported_cost_usd,
 )
 from pipeline.openrouter import OPENROUTER_API_BASE, OpenRouterClient
@@ -285,6 +287,11 @@ class FreeFirstClient:
             ) for model in self.order
         } if self.policy is not None else {}
 
+    def for_role(self, role: str) -> FreeFirstClient:
+        view = copy.copy(self)
+        view.fallback = llm_client_for_role(self.fallback, role)
+        return view
+
     def close(self) -> None:
         for client in self.candidates.values():
             client.close()
@@ -306,7 +313,7 @@ class FreeFirstClient:
     def generate_validated_json(self, validator: Callable[[dict[str, Any]], Any], **kwargs: Any) -> GeminiResult:
         return self.validation_session().generate_validated_json(validator, **kwargs)
 
-    def generate_json(self, **kwargs: Any) -> GeminiResult:
+    def generate_json(self, *, _validator: Callable | None = None, **kwargs: Any) -> GeminiResult:
         started = time.monotonic()
         attempts: list[dict[str, Any]] = []
         decisions: list[dict[str, str]] = []
@@ -353,9 +360,13 @@ class FreeFirstClient:
                 self._sleep(1)
         self._log(f"fall back to {self.fallback.model}")
         try:
-            result = self.fallback.generate_json(**kwargs)
+            result = (generate_validated_json(self.fallback, _validator, **kwargs) if _validator
+                      else self.fallback.generate_json(**kwargs))
         except Exception as exc:
-            exc.routing_attempts = attempts
+            if rejected := getattr(exc, "llm_result", None):
+                exc.llm_result = self._with_routing(rejected, attempts, decisions, started)
+            else:
+                exc.routing_attempts = [*attempts, *getattr(exc, "routing_attempts", [])]
             raise
         return self._with_routing(result, attempts, decisions, started)
 
@@ -364,7 +375,9 @@ class FreeFirstClient:
         result: GeminiResult, attempts: list[dict[str, Any]], decisions: list[dict[str, str]], started: float,
     ) -> GeminiResult:
         return GeminiResult(result.payload, result.model, round((time.monotonic() - started) * 1000), {
-            **result.usage, "model": result.model, "routingAttempts": attempts, "routingDecisions": decisions,
+            **result.usage, "model": result.model,
+            "routingAttempts": [*attempts, *result.usage.get("routingAttempts", [])],
+            "routingDecisions": [*decisions, *result.usage.get("routingDecisions", [])],
         })
 
 
@@ -376,11 +389,22 @@ class ValidationSession:
         self.client: Any = route
         self.model = route.model
 
+    def for_role(self, role: str) -> ValidationSession:
+        view = copy.copy(self)
+        view.route = self.route.for_role(role)
+        view.client = view.route if self.client is self.route else llm_client_for_role(self.client, role)
+        return view
+
     def generate_json(self, **kwargs: Any) -> GeminiResult:
         return self.client.generate_json(**kwargs)
 
     def generate_validated_json(self, validator: Callable[[dict[str, Any]], Any], **kwargs: Any) -> GeminiResult:
-        result = self.client.generate_json(**kwargs)
+        try:
+            result = (self.route.generate_json(_validator=validator, **kwargs) if self.client is self.route
+                      else generate_validated_json(self.client, validator, **kwargs))
+        except ValueError:
+            self.client = self.route.fallback
+            raise
         try:
             validator(result.payload)
         except ValueError as exc:

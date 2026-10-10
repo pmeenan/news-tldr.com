@@ -60,7 +60,8 @@ an error to stderr for cron; lock-check diagnostics also remain in the pipeline 
 ### Hosted LLM Setup
 
 Article digestion, story aggregation, editorial generation, and homepage curation
-use the Gemini Developer API by default through the project's `httpx`-based client.
+use the hosted routing below through the project's `httpx`-based clients.
+Gemini remains the fallback for every selected Claude role.
 Create a local `.env` file with an AI Studio API key and the two model tiers:
 
 ```bash
@@ -73,7 +74,8 @@ GEMINI_REVIEW_FLEX_MODELS=gemini-3.8-flash
 GEMINI_REVIEW_LITE_FALLBACK_MODEL=gemini-3.5-flash-lite
 ```
 
-`GEMINI_MODEL` remains a supported fallback for the bulk tier. The `.env` file
+The following Gemini tiers describe the fallback configuration; selected roles
+use Haiku first as described below. `GEMINI_MODEL` remains a supported fallback for the bulk tier. The `.env` file
 is ignored by git and must not be committed. Bulk digestion, grouping, scoring,
 candidate discovery, editorial evidence extraction, the regeneration gate, and
 homepage category sections use 3.5 Flash-Lite with minimal thinking. Borderline
@@ -82,8 +84,7 @@ event-merge fallback decisions use 3.8 Flash with low thinking, including
 editorial verification. No older full-Flash model is in the default chain.
 Deduplication may fall
 back once more to 3.5 Flash-Lite, but a Lite result can only reject or defer a
-pair and can never authorize a merge. All calls use Gemini structured output and
-validated responses. Safety-sensitive editorial inputs that produce empty
+pair and can never authorize a merge. Gemini calls use structured output and validated responses. Safety-sensitive editorial inputs that produce empty
 responses across all full-Flash tiers get one compact digest/key-fact retry on
 the same full-Flash chain; drafting and verification never use Lite.
 
@@ -111,6 +112,43 @@ failures retain their five-minute cooldown.
 dollars; usage rows record thinking tokens, cached tokens and the service tier
 returned by the API.
 
+### Claude routing and fallback
+
+Production enables `llm.claude.enabled` in `config/pipeline.json`. Add
+`CLAUDE_API_KEY` to the ignored `.env`; the adapter uses the existing `httpx`
+dependency and the direct Anthropic Messages API.
+
+| Haiku 5.5 thinking | Roles |
+| --- | --- |
+| Medium | Article filtering, event membership, newsworthiness, Top News, category sections |
+| High | Article digestion, ordinary editorial drafts, material-update gate |
+
+Existing free attempts run first. Political framing, evidence extraction, active-event
+filtering, grouping, coherence, prescreening and final verification retain their
+previous routes; Jev remains the duplicate reviewer. The optional local Top News
+route remains disabled, and still precedes hosted ranking if enabled later.
+
+Claude gets one request with a 120-second timeout and a 16,384-token output budget.
+Missing keys, API errors (including exhausted credits), timeouts, incomplete JSON
+and schema violations fall through to the original purpose-specific Gemini chain,
+including its Flex retries. Existing digest/scoring domain validators also fall
+through on rejected Claude responses. Editorial verification and repair limits remain
+unchanged; a rejected story is never automatically approved through fallback.
+
+Workers share a Claude cooldown within each pipeline process: 60 seconds for
+transient/response failures, one hour for request/authentication/billing failures,
+or longer when `Retry-After` requires it. Later requests may probe again after the
+cooldown; a new scheduled process also probes, allowing recovery after a credit top-up.
+Returned discarded responses retain usage and estimated charges. Transport failures
+without returned usage can have unknown charges. Prices under `llm.claude.prices`
+include the higher rate above 100,000 input tokens; thinking is billed only once.
+
+Set `CLAUDE_DISABLED=1` or `llm.claude.enabled=false` to restore the previous routing.
+Explicit backend/model selections for evaluations stay pinned. Configuration changes
+apply to newly created clients; running jobs keep their loaded configuration.
+The pre-rollout configuration is saved in ignored
+`data/state/upgrade-backups/claude-routing-20261010/pipeline.json`.
+
 ### OpenRouter Backend and Model Experiments
 
 OpenRouter is an opt-in alternative for every LLM pipeline stage and the private
@@ -127,19 +165,21 @@ Production enables `LLM_BACKEND=free-first` in the ignored `.env`:
 
 | Work normally assigned to | Preferred routing |
 | --- | --- |
-| Flash | Existing Gemini Flash chain directly |
-| Flash-Lite | Nemotron 3 Super while confirmed $0 and free quota remains → existing Gemini Flash-Lite chain |
+| Flash | Haiku for selected roles below → existing Gemini Flash chain |
+| Flash-Lite | Nemotron 3 Super while confirmed $0 and free quota remains → Haiku for selected roles → existing Gemini Flash-Lite chain |
 
 Union Alpha was removed from the rotation on September 18, 2026 after its free
-preview ended. Verification, merge/coherence reviews and drafting use Gemini.
+preview ended. Verification and coherence reviews retain Gemini; duplicate review
+retains Jev with Gemini fallback. Ordinary drafting uses Haiku, with Gemini verification.
 Draft and verification remain separate calls.
 Source-evidence checks, content validation, repair limits and rejected-story
 handling remain active. Semantic rejection still uses the existing stage repair
 policy; it is not automatically overturned by asking a paid model to approve it.
 
-Invalid Nemotron shapes fall through immediately to Flash-Lite. Local domain
-validation also triggers Lite fallback for digestion, grouping, scoring and
-evidence extraction. Subsequent repairs for that task stay on Lite, retain its
+Invalid Nemotron shapes fall through immediately to the paid route (selected Haiku
+roles, otherwise Flash-Lite). Local domain validation also triggers that fallback
+for digestion, grouping, scoring and evidence extraction. Subsequent repairs for
+that task stay on the paid route, retain its
 normal retry allowance, and account for rejected responses. Other workers may
 continue using Nemotron. This adds no full-Flash validation call; existing
 filter, membership and editorial verification guards remain in place.
@@ -949,3 +989,87 @@ The September 27 qualification kept the hosted default: local ranking was slower
 with occasional ID-copy errors and order-sensitive omissions, while recent Top News
 API usage was only about $1/month before Gemini credits. Larger LAN-hosted models
 can reuse the saved fixtures without repeating hosted reference calls.
+The October 9 preference supersedes that cost threshold: equivalent local quality
+is sufficient even for small savings. Jev remains the preferred hosted fallback
+for duplicate review while larger local models are evaluated.
+
+### Local inference service maintenance
+
+The local Intel Arc Pro B50 has 16 GB VRAM. LocalAI uses Docker with the
+`unless-stopped` restart policy. The user service `localai-start.service`, enabled
+with user lingering, also runs `~/.local/bin/update-localai --ensure-running` at
+boot. It resolves `/dev/dri/by-path/pci-0000:03:00.0-render` and recreates the
+container with the existing image if the Arc's render-node number changed.
+The weekly `localai-update.timer` checks for new releases; upgrades must pass
+readiness and a Gemma inference check before discarding the rollback container.
+
+On October 9, 2026, LocalAI was restored on `v4.10.0-gpu-intel` after the October 4
+update timed out and a reentrant rollback handler deleted the restored container.
+The updater now exits nonzero after one rollback and preserves the current
+container if its backup is missing. Its fixed GPU mapping avoids accidentally
+selecting the integrated GPU after reboot. The existing models and custom
+llama.cpp backend are preserved. Local Top News remains disabled intentionally;
+this outage did not cause the pipeline to fall back from local inference.
+
+Inspect or start the service without requesting an upgrade:
+
+```bash
+systemctl --user status localai-start.service localai-update.timer
+journalctl --user -u localai-update.service -n 60
+~/.local/bin/update-localai --ensure-running
+curl --fail http://127.0.0.1:11434/readyz
+```
+
+### Isolated Clef duplicate-review evaluation
+
+`data/evaluations/clef-jev-20261009/` contains the standalone Clef trial and
+LocalAI repair evidence. The trial uses llama.cpp `v0.6.0` (commit
+`d81235049384534c167caea52b85a694f6103d14`), compiled with the existing
+`localai/localai:v4.10.0-gpu-intel` oneAPI toolchain. Trivy 0.75.0 scanned the
+source before compilation; its findings concern unused Python helper requirements,
+which were not installed. The scan does not establish native-code safety.
+No Python dependency was added to the pipeline environment.
+
+Clef weights come from `ggml-org/Clef-Flash-GGUF`, pinned to revision
+`4a192915ef971886004b5b13294f2b4c7a7fc39d`; downloads are checked against the
+publisher's SHA-256 hashes. This is a decision model served at `/v1/systemone`,
+not a summary-generation model. The temporary server binds host loopback port
+18089 and has no automatic startup. Its replay harness accepts `--verbose`,
+reads frozen successful Jev requests, and never calls hosted inference or
+changes production articles, events, routing, or publication. See the retained
+evaluation report for measured quality, latency and serving limitations.
+
+The matched 71-case Q4/Q8 replay did not establish equivalent duplicate-review
+quality: on the 31 historical difficult cases, Q4 made 18 false merges and Q8 made
+19, compared with Jev's 11 under the retained assistant adjudications. This selected
+sample is not an overall error-rate estimate. Production remains on Jev. The
+larger 27B Clef has smaller community quantizations that remain untested here;
+weight-file size alone does not establish a fit for the pipeline's long inputs.
+
+### Isolated Claude API capability evaluation
+
+The October 9, 2026 study in ignored `data/evaluations/claude-matrix-20261009/`
+uses `CLAUDE_API_KEY` from `.env` with the direct Claude Messages API. It replays
+all 265 frozen cases across 16 pipeline roles against `claude-haiku-5-5`
+(medium effort) and `claude-sonnet-5-5` (high effort), with higher-effort followups
+on ten roles. The runner uses the existing `httpx` dependency, enforces the
+original stage validators, and records returned evaluation usage under
+`routing_evaluation`. API keys are not saved in evaluation artifacts.
+
+These commands require the retained private September matrix on this machine;
+its source articles and outputs are not distributed with a fresh checkout:
+
+```bash
+./.venv/bin/python data/evaluations/claude-matrix-20261009/run.py --dry-run
+./.venv/bin/python data/evaluations/claude-matrix-20261009/run.py \
+  --profiles haiku sonnet --workers 4 --verbose
+```
+
+Existing results are reused only when their request hash matches. Progress goes
+to stderr; the final summary is JSON on stdout. `report.html`, `analysis.json`,
+`source-review.json`, `role-costs.csv`, and `accounting.json` retain the findings,
+source-review corrections, forecasts and returned-token costs. Timeouts with no
+returned usage are explicitly listed as unknown charges. The study does not
+configure a production Claude backend or change the existing free/local, Jev,
+or Gemini routes. Merely adding `CLAUDE_API_KEY` does not enable Claude in the
+scheduled pipeline.

@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from pipeline.config import load_pipeline_config
-from pipeline.llm import GeminiResult, create_llm_client
+from pipeline.llm import GeminiResult, create_llm_client, llm_client_for_role
 from pipeline.openrouter import json_schema
 
 
@@ -110,7 +110,7 @@ class LocalTopNewsClient:
             if self._progress:
                 self._progress(f"top-news: local ranking failed; using API fallback: {reason}")
             try:
-                result = self._api_client().generate_json(**kwargs)
+                result = llm_client_for_role(self._api_client(), "top_news").generate_json(**kwargs)
             except Exception as fallback_error:
                 fallback_error.routing_attempts = [
                     *attempts, *getattr(fallback_error, "routing_attempts", []),

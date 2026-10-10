@@ -16,7 +16,13 @@ from typing import Any, Protocol
 from pipeline.config import load_categories, load_feeds, load_pipeline_config
 from pipeline.jev import JevDuplicateClient
 from pipeline.jev_shadow import ShadowRecorder
-from pipeline.llm import GeminiResult, create_llm_client, generate_validated_json, validation_session
+from pipeline.llm import (
+    GeminiResult,
+    create_llm_client,
+    generate_validated_json,
+    llm_client_for_role,
+    validation_session,
+)
 from pipeline.lock import PipelineLock
 from pipeline.paths import EVENT_DIR, LOCK_PATH, PROJECT_ROOT, STORY_DIR
 from pipeline.state import StateDB
@@ -1740,7 +1746,7 @@ def score_groups_newsworthiness(
 
     try:
         result = generate_validated_json(
-            client, lambda payload: validate_newsworthiness_response(
+            llm_client_for_role(client, "newsworthiness"), lambda payload: validate_newsworthiness_response(
                 payload, valid_group_indexes={int(group["group_index"]) for group in groups_for_model},
             ),
             system_instruction=(
@@ -1767,7 +1773,7 @@ def score_groups_newsworthiness(
         merged[group_index] = {
             **score,
             "scored_at": isoformat_z(),
-            "model": client.model,
+            "model": result.model,
             "prompt_version": NEWSWORTHINESS_PROMPT_VERSION,
             "baseline": baseline[group_index],
         }

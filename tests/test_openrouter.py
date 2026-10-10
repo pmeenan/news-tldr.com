@@ -180,6 +180,7 @@ def test_usage_stores_real_cost_without_double_counting_reasoning(tmp_path: Path
 
 
 def test_factory_preserves_gemini_defaults_and_supports_tier_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_DISABLED", "1")
     sentinel = object()
     calls = []
     def gemini(stage: str, **kwargs: Any) -> Any:

@@ -969,13 +969,36 @@ endpoint. The explicit `openrouter` backend does not fall back to other models o
 direct Gemini.
 Local models remain evaluation-only and are not a configured runtime fallback.
 
-With `free-first`, review-tier work uses the existing Gemini Flash chain directly.
-Bulk work tries `nvidia/nemotron-3-super-120b-a12b:free`, then Gemini Flash-Lite.
+With `free-first`, bulk work tries `nvidia/nemotron-3-super-120b-a12b:free`
+before its paid route. Selected paid roles use Claude Haiku 5.5 before the
+unchanged purpose-specific Gemini chain; other roles still use Gemini directly.
 Union Alpha was removed on September 18, 2026 after its free preview ended;
-it is excluded from both routing and catalog eligibility. Verification and
-membership/coherence/merge decisions use Gemini. Draft and verifier remain
-separate calls but can use the same model. Domain validation, bounded repairs,
+it is excluded from both routing and catalog eligibility. Final verification and
+coherence use Gemini; duplicate review uses Jev with Gemini fallback. Ordinary
+drafts use Haiku with separate Gemini verification. Domain validation, bounded repairs,
 filtered-article exclusion, and the Gemini Lite merge restriction remain intact.
+
+`pipeline/claude.py` wraps only the paid portion of implicit production clients.
+`llm_client_for_role` creates lightweight role views, so shared aggregation/editorial
+clients cannot accidentally route framing, grouping, evidence or verification to
+Claude. Haiku medium handles article filtering, membership, newsworthiness and
+both curation roles; high handles digestion, ordinary drafts and update gates.
+Role views share their HTTP transport and an API-key-scoped process-wide circuit.
+Existing free and optional local attempts retain priority; explicit evaluation
+backend/model pins bypass Claude. The root client owns transport shutdown.
+
+One bounded 120-second Claude request uses adaptive thinking and strict JSON
+Schema. Unsupported schema constraints become prompt descriptions and are enforced
+locally on the original schema. Incomplete/invalid responses and API/transport
+errors use the original Gemini chain. Billing/authentication/request failures cool
+Claude for one hour; other failures cool it for 60 seconds, extended by provider
+retry hints. Missing keys bypass Claude. Circuits reset with a new pipeline process,
+so newly replenished credits can recover on the next scheduled run. The disable
+switch restores original routing without reconstructing any prior model settings.
+Usage normalizes thinking separately without double billing and preserves discarded
+paid responses through nested free/Claude/Gemini fallback and validation errors.
+`llm.claude.prices` supplies Haiku standard and long-context rates. Existing domain
+validators, independent story verification and repair budgets remain authoritative.
 
 The process-wide `FreeModelPolicy` coalesces catalog and account-quota lookups,
 admits attempts through a FIFO queue per model, atomically reserves daily quota
