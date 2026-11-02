@@ -316,7 +316,7 @@ def test_display_ranking_balances_freshness_and_view_specific_impact() -> None:
                 "source_count": 0.8,
             },
         },
-        event_updated_at="2026-08-24T10:00:00Z",
+        published_at="2026-08-24T10:00:00Z",
         now=now,
     )
     category_first = _display_rank_scores(
@@ -330,7 +330,7 @@ def test_display_ranking_balances_freshness_and_view_specific_impact() -> None:
                 "source_count": 0.8,
             },
         },
-        event_updated_at="2026-08-24T10:00:00Z",
+        published_at="2026-08-24T10:00:00Z",
         now=now,
     )
     older = _display_rank_scores(
@@ -344,7 +344,7 @@ def test_display_ranking_balances_freshness_and_view_specific_impact() -> None:
                 "source_count": 0.8,
             },
         },
-        event_updated_at="2026-08-22T10:00:00Z",
+        published_at="2026-08-22T10:00:00Z",
         now=now,
     )
 
@@ -434,7 +434,7 @@ def test_active_index_includes_only_current_events_with_story_files(tmp_path: Pa
     assert payload["stories"][0]["source_coverage_ratio"] == 1.0
     assert payload["stories"][0]["homepage_rank_score"] > 0
     assert payload["stories"][0]["category_rank_score"] > 0
-    assert payload["ranking_version"] == "display-ranking-v2"
+    assert payload["ranking_version"] == "display-ranking-v3"
     assert payload["curation"]["model"] == "deterministic-ranking-fallback"
     assert payload["curation"]["top_news"] == ["event-2", "event-1"]
     assert payload["stories"][0]["event_updated_at"] == "2026-08-24T01:00:00Z"
@@ -446,6 +446,48 @@ def test_active_index_includes_only_current_events_with_story_files(tmp_path: Pa
         "curation_sections": 0,
         "curation_top_news": 2,
     }
+
+
+def test_new_reports_do_not_refresh_rollup_age_rank_or_curation(tmp_path: Path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    migrate(db_path)
+    story_dir = tmp_path / "stories"
+    story_dir.mkdir()
+    output = tmp_path / "active.json"
+    client = FakeEditorialClient({"top_news": ["event-1"], "sections": []})
+    story = {
+        "story_id": "event-1", "category": "world", "headline": "Original development",
+        "sources": [{"article_id": "a1", "source_name": "Wire Service"}],
+        "importance": {"score": 0.7}, "created_at": "2026-08-24T00:00:00Z",
+        "updated_at": "2026-08-24T00:00:00Z",
+    }
+    path = story_dir / "event-1.json"
+    path.write_text(json.dumps(story))
+    with StateDB(db_path) as state:
+        _insert_event_and_articles(state, tmp_path)
+        when = datetime(2026, 8, 24, 12, tzinfo=UTC)
+        write_active_stories_index(state=state, story_dir=story_dir, output_path=output,
+                                   curation_client=client, run_id="r", generated_at=when)
+        first = json.loads(output.read_text())
+        state.conn.execute("UPDATE events SET updated_at = ?", ("2026-08-24T11:00:00Z",))
+        write_active_stories_index(state=state, story_dir=story_dir, output_path=output,
+                                   curation_client=client, run_id="r", generated_at=when)
+        second = json.loads(output.read_text())
+        assert second["stories"][0]["freshness_score"] == first["stories"][0]["freshness_score"]
+        assert second["stories"][0]["homepage_rank_score"] == first["stories"][0]["homepage_rank_score"]
+        assert second["stories"][0]["created_at"] == story["created_at"]
+        # Even a regenerated summary or a meaningful revision cannot republish the root.
+        story.update(updated_at="2026-08-28T11:00:00Z", revision=2, revision_at="2026-08-28T11:00:00Z")
+        path.write_text(json.dumps(story))
+        state.conn.execute("UPDATE events SET updated_at = ?", ("2026-08-28T11:00:00Z",))
+        stats = write_active_stories_index(
+            state=state, story_dir=story_dir, output_path=output, curation_client=client, run_id="r",
+            generated_at=datetime(2026, 8, 28, 12, tzinfo=UTC), reuse_previous_curation=True,
+        )
+        expired = json.loads(output.read_text())
+        assert len(expired["stories"]) == 1  # Still available in the archive and for source grouping.
+        assert expired["curation"]["top_news"] == []
+        assert stats["curation_top_news"] == 0
 
 
 def test_homepage_curation_validates_top_news_and_meaningful_sections() -> None:
@@ -467,7 +509,7 @@ def test_homepage_curation_validates_top_news_and_meaningful_sections() -> None:
             "homepage_rank_score": 1 - index / 10,
             "category_rank_score": 1 - index / 10,
             "source_count": 2,
-            "event_updated_at": "2026-08-24T11:00:00Z",
+            "created_at": "2026-08-24T11:00:00Z",
         }
         for index in range(1, 4)
     ]
@@ -518,7 +560,7 @@ def test_homepage_curation_uses_one_high_ranked_candidate_set_per_category() -> 
             "source_count": 2,
             "source_coverage_score": 2,
             "source_coverage_ratio": 0.1,
-            "event_updated_at": "2026-08-24T11:00:00Z",
+            "created_at": "2026-08-24T11:00:00Z",
         }
         for index in range(205)
     ]
@@ -543,20 +585,20 @@ def test_homepage_curation_uses_one_high_ranked_candidate_set_per_category() -> 
 def test_homepage_coverage_priority_normalizes_category_supply_and_expires() -> None:
     generated_at = datetime(2026, 8, 24, 12, tzinfo=UTC)
     thin_category_story = {
-        "event_updated_at": "2026-08-24T11:00:00Z",
+        "created_at": "2026-08-24T11:00:00Z",
         "homepage_rank_score": 0.7,
         "source_coverage_score": 4,
         "source_coverage_ratio": 0.5,
     }
     rich_category_story = {
-        "event_updated_at": "2026-08-24T11:00:00Z",
+        "created_at": "2026-08-24T11:00:00Z",
         "homepage_rank_score": 0.7,
         "source_coverage_score": 6,
         "source_coverage_ratio": 0.1,
     }
     expired_story = {
         **thin_category_story,
-        "event_updated_at": "2026-08-23T10:00:00Z",
+        "created_at": "2026-08-23T10:00:00Z",
     }
 
     thin_priority = _homepage_coverage_priority(

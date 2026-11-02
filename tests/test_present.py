@@ -159,6 +159,26 @@ def test_build_static_site_renders_current_stories_and_keeps_old_detail_pages(tm
     assert "data-sync-button" not in detail
 
 
+def test_rollup_uses_original_publication_despite_new_reports_and_revisions(tmp_path: Path) -> None:
+    current = _story("current", updated_at="2026-08-24T00:00:00Z")
+    old = _story("old", updated_at="2026-08-18T00:00:00Z")
+    for story in (current, old):
+        story.update(updated_at="2026-08-24T02:00:00Z", revision=2, revision_at="2026-08-24T02:00:00Z")
+        story["llm_metadata"]["event_updated_at"] = "2026-08-24T02:00:00Z"
+    _, story_dir, active = _write_published_fixture(tmp_path, [current, old])
+    output = tmp_path / "dist"
+    stats = build_static_site(output_dir=output, story_dir=story_dir, active_stories_path=active,
+                              now=datetime(2026, 8, 24, 3, tzinfo=UTC))
+    home = (output / "index.html").read_text()
+    assert stats["homepage_stories"] == 1
+    assert 'data-story-id="old"' not in home
+    assert 'data-published-at="2026-08-24T00:00:00+00:00"' in home
+    assert "Published 3h ago" in home
+    detail = (output / "stories" / "old" / "index.html").read_text()
+    assert "Published Aug 18, 2026" in detail
+    assert "Updated Aug 24, 2026" not in detail
+
+
 def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     tmp_path: Path,
 ) -> None:
@@ -256,7 +276,7 @@ def test_home_renders_compact_navigation_revisit_controls_and_ranked_tints(
     assert "'unread story' : 'unread stories'" in script
     assert 'unread in briefing' not in script
     assert 'data-read-order="1787529600000:2026-08-24-polish"' in home
-    assert "function relativeUpdatedLabel(timestamp)" in script
+    assert "function relativeUpdatedLabel(timestamp, label = 'Updated')" in script
     assert "window.setInterval(updateSiteFreshness, 60 * 1000)" in script
     assert "viewedBeforeLoad" not in script
     assert "createStorySection('Top News'" in script

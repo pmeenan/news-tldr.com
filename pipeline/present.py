@@ -32,7 +32,7 @@ from pipeline.sources import publisher_id
 from pipeline.state import StateDB
 from pipeline.util import isoformat_z, sanitize_id, utc_now
 
-PRESENTATION_VERSION = "presentation-v28"
+PRESENTATION_VERSION = "presentation-v29"
 DEPLOY_MANIFEST = ".news-tldr-managed.json"
 DEFAULT_SITE_URL = "https://news-tldr.com"
 DEFAULT_ROLLING_WINDOW_HOURS = 72
@@ -508,18 +508,18 @@ function cardRank(card, category) {
 
 
 
-function relativeUpdatedLabel(timestamp) {
+function relativeUpdatedLabel(timestamp, label = 'Updated') {
   const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 3600) return `Updated ${Math.max(1, Math.floor(seconds / 60))}m ago`;
-  if (seconds < 86400) return `Updated ${Math.floor(seconds / 3600)}h ago`;
-  return `Updated ${Math.floor(seconds / 86400)}d ago`;
+  if (seconds < 3600) return `${label} ${Math.max(1, Math.floor(seconds / 60))}m ago`;
+  if (seconds < 86400) return `${label} ${Math.floor(seconds / 3600)}h ago`;
+  return `${label} ${Math.floor(seconds / 86400)}d ago`;
 }
 
 function updateSiteFreshness() {
   for (const card of cards) {
     const time = card.querySelector('[data-story-time]');
-    const updated = Date.parse(card.dataset.eventUpdated || '');
-    if (time && Number.isFinite(updated)) time.textContent = relativeUpdatedLabel(updated);
+    const published = Date.parse(card.dataset.publishedAt || '');
+    if (time && Number.isFinite(published)) time.textContent = relativeUpdatedLabel(published, 'Published');
   }
   if (!siteUpdated) return;
   const timestamp = Date.parse(siteUpdated.dataset.generatedAt || '');
@@ -845,9 +845,9 @@ async function deleteSyncGroup() {
 }
 
 function cardCoveragePriority(card, category) {
-  const updatedAt = Date.parse(card.dataset.eventUpdated || '');
+  const publishedAt = Date.parse(card.dataset.publishedAt || '');
   const editorial = EDITORIAL_PRIORITY_WEIGHT * Math.pow(cardRank(card, category), 3);
-  if (!Number.isFinite(updatedAt) || Date.now() - updatedAt > COVERAGE_WINDOW_MS) {
+  if (!Number.isFinite(publishedAt) || Date.now() - publishedAt > COVERAGE_WINDOW_MS) {
     return editorial;
   }
   const coverage = Math.max(0, Number.parseFloat(card.dataset.sourceCoverage || '0'));
@@ -872,7 +872,7 @@ function renderStories() {
   const compareCards = (left, right) => {
     const rankDifference = cardRank(right, activeCategory) - cardRank(left, activeCategory);
     if (rankDifference) return rankDifference;
-    return (right.dataset.eventUpdated || '').localeCompare(left.dataset.eventUpdated || '');
+    return (right.dataset.publishedAt || '').localeCompare(left.dataset.publishedAt || '');
   };
   const ordered = [...cards].sort(compareCards);
   visibleCards = [];
@@ -1474,7 +1474,7 @@ def build_static_site(
         stories.append(story)
 
     cutoff = generated_at - timedelta(hours=rolling_window_hours)
-    current_stories = [story for story in stories if _event_time(story) >= cutoff]
+    current_stories = [story for story in stories if _publication_time(story) >= cutoff]
     temporary_parent = output_dir.parent
     temporary_parent.mkdir(parents=True, exist_ok=True)
     temporary_dir = Path(
@@ -1722,12 +1722,12 @@ def _render_home(
             f'data-category-order="{category_order[story["category"]]}" '
             f'data-read-order="{_e(read_order)}" data-read-id="{_e(read_id)}" '
             f'data-initial-order="{_e(initial_order)}" '
-            f'data-event-updated="{_e(_event_time(story).isoformat())}">'
+            f'data-published-at="{_e(_publication_time(story).isoformat())}">'
             f'<p class="kicker">{_e(category_names[story["category"]])}</p>'
             f'<h2 data-story-title><a href="/stories/{_e(story_id)}/">{_e(story["headline"])}</a></h2>'
             f'{update}'
             f'<ul class="tldr-list">{bullets}</ul>'
-            f'<div class="story-meta"><span data-story-time>{_relative_time(_event_time(story), generated_at)}</span>'
+            f'<div class="story-meta"><span data-story-time>{_relative_time(_publication_time(story), generated_at)}</span>'
             f'<a href="/stories/{_e(story_id)}/#sources" class="story-publishers">'
             f'{_e(publishers["label"])}</a>'
             '<span class="read-indicator" aria-hidden="true">✓ Read</span></div>'
@@ -1840,7 +1840,7 @@ def _render_story(
             )
         )
 
-    updated = _event_time(story)
+    published = _publication_time(story)
     update_note = (
         '<p class="story-update"><strong>Latest update:</strong> '
         + _e(story["change_summary"]) + '</p>'
@@ -1849,7 +1849,7 @@ def _render_story(
         '<article class="story-page"><a class="back" href="/">← Latest briefing</a>'
         f'<p class="kicker">{_e(category_name)}</p><h1>{_e(story["headline"])}</h1>'
         f'<p class="standfirst">{_e(story["dek"])}</p>'
-        f'<div class="story-meta"><span>Updated {_display_datetime(updated)}</span>'
+        f'<div class="story-meta"><span>Published {_display_datetime(published)}</span>'
         f'<span>{len(story.get("sources") or [])} reports</span></div>'
         f'{update_note}'
         f'<section><h2>The short version</h2><ul class="tldr-list">{tldr}</ul></section>'
@@ -1879,8 +1879,8 @@ def _render_archive(
         rows.append(
             '<li><time datetime="{}">{}</time><div><p class="kicker">{}</p>'
             '<a href="/stories/{}/">{}</a></div></li>'.format(
-                _e(_event_time(story).isoformat()),
-                _display_date(_event_time(story)),
+                _e(_publication_time(story).isoformat()),
+                _display_date(_publication_time(story)),
                 _e(category_names[story["category"]]),
                 _e(story["story_id"]),
                 _e(story["headline"]),
@@ -1962,7 +1962,9 @@ def _render_methodology(site_url: str) -> str:
             'differences in the articles; they are not proof that competing claims have equal support.</p></section>'
             '<section><h2>Reading and updates</h2><p>A headline visible for one second counts as read. '
             'Cards stay in place while you skim. New hides those stories on later views, but meaningful '
-            'new facts or corrections can return with a short explanation. Optional private-link sync '
+            'new facts or corrections can return with a short explanation while the story remains in '
+            'the briefing window. Story age follows its original publication; additional reports and '
+            'summary revisions do not restart that window. Optional private-link sync '
             'keeps reading state aligned across browsers.</p></section>'
             '<section><h2>Corrections</h2><p>To flag an error, '
             '<a href="https://github.com/pmeenan/news-tldr.com/issues/new" rel="noopener noreferrer">'
@@ -2167,13 +2169,15 @@ def _source_metadata_by_name() -> dict[str, dict[str, Any]]:
     return result
 
 
-def _event_time(story: dict[str, Any]) -> datetime:
-    index = story.get("_index") if isinstance(story.get("_index"), dict) else {}
-    value = index.get("event_updated_at") or story.get("llm_metadata", {}).get("event_updated_at")
+def _publication_time(story: dict[str, Any]) -> datetime:
+    # created_at is the immutable first publication, independent of source arrivals,
+    # forced regeneration and reader-facing revision timestamps.
+    value = story.get("created_at")
     if not isinstance(value, str):
-        value = story.get("updated_at")
+        index = story.get("_index") if isinstance(story.get("_index"), dict) else {}
+        value = index.get("created_at")
     if not isinstance(value, str):
-        raise ValueError(f"story is missing an updated timestamp: {story.get('story_id')}")
+        raise ValueError(f"story is missing a publication timestamp: {story.get('story_id')}")
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
@@ -2197,10 +2201,10 @@ def _relative_time(value: datetime, now: datetime) -> str:
     seconds = max(0, int((now - value).total_seconds()))
     if seconds < 3600:
         minutes = max(1, seconds // 60)
-        return f"Updated {minutes}m ago"
+        return f"Published {minutes}m ago"
     if seconds < 86400:
-        return f"Updated {seconds // 3600}h ago"
-    return f"Updated {seconds // 86400}d ago"
+        return f"Published {seconds // 3600}h ago"
+    return f"Published {seconds // 86400}d ago"
 
 
 def _display_date(value: datetime) -> str:

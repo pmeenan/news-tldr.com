@@ -44,6 +44,7 @@ EDITORIAL_COMPACT_PROMPT_VERSION = "editorial-v5-compact"
 EDITORIAL_FRAMING_COMPACT_PROMPT_VERSION = "editorial-framing-v4-compact"
 UPDATE_GATE_PROMPT_VERSION = "editorial-update-gate-v1"
 HOMEPAGE_CURATION_PROMPT_VERSION = "homepage-curation-v6"
+DISPLAY_RANKING_VERSION = "display-ranking-v3"
 DEFAULT_ARTICLE_CHAR_LIMIT = 12_000
 DEFAULT_EVENT_CHAR_LIMIT = 60_000
 DEFAULT_BACKFILL_PER_RUN = 0
@@ -1542,7 +1543,7 @@ def _importance(event: EditorialEvent, payload: dict[str, Any], *, now: datetime
 
 
 def _display_rank_scores(
-    importance: dict[str, Any], *, event_updated_at: str, now: datetime
+    importance: dict[str, Any], *, published_at: str, now: datetime
 ) -> dict[str, float]:
     """Build view-specific ranks from durable editorial signals and current freshness."""
     base_score = _safe_score(importance.get("score"))
@@ -1555,7 +1556,7 @@ def _display_rank_scores(
     source_quality = _safe_score(components.get("source_quality", base_score))
     source_count = _safe_score(components.get("source_count", base_score))
     trust_and_coverage = (source_quality + source_count) / 2
-    age_hours = max(0.0, (now - _parse_datetime(event_updated_at)).total_seconds() / 3600)
+    age_hours = max(0.0, (now - _parse_datetime(published_at)).total_seconds() / 3600)
     freshness = max(0.15, 1.0 - (age_hours / 72.0))
     homepage = (
         global_score * 0.42
@@ -1627,7 +1628,7 @@ def write_active_stories_index(
         importance = story.get("importance") if isinstance(story.get("importance"), dict) else {}
         display_rank = _display_rank_scores(
             importance,
-            event_updated_at=row["event_updated_at"],
+            published_at=story["created_at"],
             now=generated_at,
         )
         stories.append(
@@ -1653,7 +1654,7 @@ def write_active_stories_index(
     coverage_cutoff = generated_at - timedelta(hours=max(1, rolling_window_hours))
     category_source_pools: dict[str, set[str]] = {}
     for story in stories:
-        if _parse_datetime(str(story.get("event_updated_at") or "")) < coverage_cutoff:
+        if _parse_datetime(story["created_at"]) < coverage_cutoff:
             continue
         category = str(story.get("category") or "other")
         category_source_pools.setdefault(category, set()).update(
@@ -1668,17 +1669,17 @@ def write_active_stories_index(
             min(1.0, source_count / pool_size) if pool_size else 0.0,
             4,
         )
-    stories.sort(key=lambda item: str(item["event_updated_at"] or ""), reverse=True)
+    stories.sort(key=lambda item: str(item["created_at"]), reverse=True)
     stories.sort(key=lambda item: item["homepage_rank_score"], reverse=True)
     # Curation input signature: the current-window story set and story versions.
     # An unchanged signature, or an intermediate pass, reuses the prior curation.
     window_versions = sorted(
         (str(story["story_id"]), str(story.get("updated_at") or ""))
         for story in stories
-        if _parse_datetime(str(story.get("event_updated_at") or "")) >= coverage_cutoff
+        if _parse_datetime(story["created_at"]) >= coverage_cutoff
     )
     input_signature = hashlib.sha256(
-        json.dumps([HOMEPAGE_CURATION_PROMPT_VERSION, window_versions]).encode("utf-8")
+        json.dumps([HOMEPAGE_CURATION_PROMPT_VERSION, DISPLAY_RANKING_VERSION, window_versions]).encode("utf-8")
     ).hexdigest()
     previous_index = _read_json(output_path)
     previous_curation = (
@@ -1686,7 +1687,10 @@ def write_active_stories_index(
         if isinstance(previous_index, dict) and isinstance(previous_index.get("curation"), dict)
         else None
     )
-    valid_story_ids = {str(story["story_id"]) for story in stories}
+    valid_story_ids = {
+        str(story["story_id"]) for story in stories
+        if _parse_datetime(story["created_at"]) >= coverage_cutoff
+    }
     reusable = bool(
         previous_curation
         and previous_curation.get("top_news")
@@ -1716,7 +1720,7 @@ def write_active_stories_index(
         output_path,
         {
             "generated_at": isoformat_z(generated_at),
-            "ranking_version": "display-ranking-v2",
+            "ranking_version": DISPLAY_RANKING_VERSION,
             "curation": public_curation,
             "stories": stories,
         },
@@ -1822,7 +1826,7 @@ def generate_homepage_curation(
     current = [
         story
         for story in stories
-        if _parse_datetime(str(story.get("event_updated_at") or "")) >= cutoff
+        if _parse_datetime(story["created_at"]) >= cutoff
     ]
     fallback_candidates = sorted(
         current,
@@ -1849,7 +1853,7 @@ def generate_homepage_curation(
         story_id = str(story["story_id"])
         age_hours = max(
             0.0,
-            (generated_at - _parse_datetime(str(story.get("event_updated_at") or ""))).total_seconds()
+            (generated_at - _parse_datetime(story["created_at"])).total_seconds()
             / 3600,
         )
         context.append(
@@ -2155,8 +2159,8 @@ def _homepage_coverage_priority(
     *,
     generated_at: datetime,
 ) -> float:
-    event_updated_at = _parse_datetime(str(story.get("event_updated_at") or ""))
-    age_hours = max(0.0, (generated_at - event_updated_at).total_seconds() / 3600)
+    published_at = _parse_datetime(story["created_at"])
+    age_hours = max(0.0, (generated_at - published_at).total_seconds() / 3600)
     editorial_rank = _safe_score(
         story.get("homepage_rank_score", story.get("importance_score"))
     )

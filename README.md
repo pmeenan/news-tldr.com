@@ -578,6 +578,11 @@ preserves prior and legacy CSS/JavaScript paths for cached pages, preserves
 unknown server files, and replaces `index.html` last so readers do not see a new
 homepage before its referenced pages and assets are present.
 
+The rolling homepage window, freshness ranking, Top News selection and displayed
+story age use the story's original publication (`created_at`). Newly grouped
+reports and summary revisions never reset that date. Older stories retain their
+detail pages and grouped source links while their events remain active/stale.
+
 The production Nginx virtual host is checked in at
 `deploy/nginx/news-tldr.com`. Generated HTML pages receive a 10-minute freshness
 lifetime (`Cache-Control: max-age=600` plus the corresponding `Expires` header),
@@ -649,6 +654,8 @@ place during a scan. Mark read applies to displayed cards. Meaningful new facts 
 can return in New with a short change summary. Rewording, extra citations and
 regeneration alone do not increment it. The optional private-link sync protocol
 also synchronizes these revision identities without changing its endpoints.
+Revisions can return only while the root story remains in the publication window;
+they do not republish an older story into the latest briefing.
 
 Homepage story links open in an article overlay, with a full-height layout on
 phones. Close, Escape, or browser Back returns to the same visible cards, filters,

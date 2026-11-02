@@ -111,7 +111,7 @@ def test_curation_keeps_sections_on_api_and_deterministic_last_fallback() -> Non
                                    200, json=response({"top_news": ["invalid"]}))))
     stories = [{"story_id": sid, "headline": sid, "category": "world", "source_count": 2,
                 "homepage_rank_score": rank, "category_rank_score": rank,
-                "event_updated_at": "2026-09-27T00:00:00Z"} for sid, rank in [("a", 0.9), ("b", 0.8)]]
+                "created_at": "2026-09-27T00:00:00Z"} for sid, rank in [("a", 0.9), ("b", 0.8)]]
     try:
         result = generate_homepage_curation(stories=stories, story_details={}, client=client,
                                            sections_client=sections, generated_at=datetime(2026, 9, 27, tzinfo=UTC),

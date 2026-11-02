@@ -626,8 +626,15 @@ Source labels do not prove truth or establish equal support for competing claims
 Importance retains its existing weighting of global/category impact, editorial
 judgment, freshness and source quality, but publisher counts replace feed counts.
 The active index contains active/stale stories, presentation ranks and homepage
-curation. Global and category views keep their respective rank order; news
-freshness remains based on event updates rather than forced editorial timestamps.
+curation. Global and category views keep their respective rank order. Rollup
+eligibility, ranking freshness, coverage boosts, curation ages, tie-breaking and
+displayed dates use immutable story `created_at`, the first public summary time.
+New grouped articles, merges and summary revisions never restart the root story's
+72-hour homepage window. Event `updated_at` remains an internal processing signal;
+revision times remain separate read-history identities. Expired roots retain their
+source links and detail/archive pages while active/stale. Reused curation also
+removes roots outside the publication window. Display ranking v3 invalidates the
+previous curation input signature; presentation v29 labels story dates “Published”.
 
 ### Story contract additions
 

@@ -197,6 +197,9 @@ gantt
 - [x] Add `health --verbose` monitoring for stale/failed stages, feed/article failures, stale running jobs, malformed artifacts, SQLite integrity, and live HTTPS output; scheduled failures exit nonzero for cron alerting and retain rotating logs plus `health.json`.
 - [x] Document how to add feeds, categories, and source policy metadata.
 - [x] Prevent sparse-window replays from refreshing unchanged event timestamps and triggering unnecessary hourly editorial regeneration.
+- [x] November 2: anchor homepage rollup age, ranks, curation and displayed dates to
+  immutable story publication; additional reports and revisions retain the root's
+  age and do not extend its 72-hour window.
 - [x] Add capacity-aware full-Flash fallbacks with per-model cooldown circuits; allow a deduplication-only Lite fallback that cannot authorize merges.
 - [x] Cache final deduplication reviews by event input versions and bound production review work to the newest 40 pairs and one pass per run.
 - [x] Snapshot the retained queue after maintenance and run collection concurrently with backlog processing; restrict prior digest/aggregation work to the snapshot boundary, checkpoint fetched articles even when backlog remains, and defer only their downstream admission.
